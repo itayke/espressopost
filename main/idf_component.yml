@@ -1,0 +1,15 @@
+## Managed dependencies for the espressopost main component.
+## Pulled at build time by `idf.py reconfigure` into ./managed_components/.
+
+dependencies:
+  idf:
+    version: ">=5.5,<6.0"
+
+  ## LVGL 9.x — UI toolkit. Pinned to the 9.x line so we don't get pulled to 10.x without a deliberate bump.
+  lvgl/lvgl: "^9.2.0"
+
+  ## CO5300 AMOLED panel driver (QSPI).
+  espressif/esp_lcd_co5300: "^2.0.0"
+
+  ## CST9217 capacitive touch controller (I²C).
+  waveshare/esp_lcd_touch_cst9217: "^1.0.4"

@@ -1,0 +1,39 @@
+# --- Target ---
+CONFIG_IDF_TARGET="esp32s3"
+
+# --- Flash & PSRAM (Waveshare ESP32-S3R8: 16MB QIO flash + 8MB OPI PSRAM) ---
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+
+# --- CPU ---
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# --- Custom partition table (see partitions.csv) ---
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# --- LittleFS (registry component will pull this in once added) ---
+# Placeholder: enable explicitly when storage component lands.
+
+# --- Logging ---
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_COLORS=y
+
+# --- C++ ---
+CONFIG_COMPILER_CXX_EXCEPTIONS=n
+CONFIG_COMPILER_CXX_RTTI=n
+
+# --- FreeRTOS tick at 1kHz so LVGL animations stay smooth ---
+CONFIG_FREERTOS_HZ=1000
+
+# --- LVGL fonts ---
+# Only Montserrat 14 is enabled by default. The bringup screen uses 48 pt
+# for the centered grind number; enable it explicitly so the build doesn't
+# fail on the linker.
+CONFIG_LV_FONT_MONTSERRAT_48=y
