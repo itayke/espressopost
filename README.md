@@ -6,12 +6,14 @@ learns a per-preset grind adjustment from local data. Offline-first.
 
 ## Status
 
-**Step 1 of 10 — hardware bringup.** Display + capacitive touch up
-under LVGL 9; one screen with a centered number adjustable by an arc
-around the rim. No climate sensor, no storage, no model yet.
+**Steps 1 + 2 of 10 — bringup + climate.** Display + capacitive touch
+up under LVGL 9 (round 466 × 466, full-rim touch arc, 2-px-aligned
+partial redraws), and a 1 Hz BME280 read loop on the H2 expansion
+header feeding a P / H / T status strip at the top of the screen. No
+storage, presets, or model yet.
 
 The full build order lives in the kickoff brief. Each step ends in a
-runnable device state; this is the first.
+runnable device state.
 
 ## Hardware target
 
@@ -26,8 +28,12 @@ case).
 - **RTC:** PCF85063 (wall-clock time source for shot records)
 - **IMU:** QMI8658 (planned wake-on-motion)
 - **Audio:** ES7210 dual-mic codec (unused in v1)
-- **Expansion:** 8-pin header (3 GPIO + 1 UART) — planned BME280
-  climate sensor lives here
+- **Climate:** Bosch BME280 (temperature / humidity / pressure) on the
+  8-pin H2 header — its own dedicated I²C bus on GPIO17 (SDA) / GPIO18
+  (SCL), separate from the internal bus to avoid contention with
+  PMIC/RTC/IMU/touch
+- **Expansion:** H2 also carries VBUS, 3V3, GND, U0RXD/U0TXD, and one
+  free GPIO (16) for future use
 
 Pin map is verbatim from Waveshare's reference: see
 [`main/board_pins.hpp`](main/board_pins.hpp).
@@ -103,27 +109,37 @@ Exit the monitor with `Ctrl+]`.
 
 ## What to verify on this build
 
-1. Boot log shows: `display: display + LVGL ready (466x466, 50-line partial buffer)` and `touch: CST9217 touch ready`.
-2. Screen shows the number **50** centered on a black background.
+1. Boot log shows: `display: display + LVGL ready (466x466, 50-line partial buffer)`, `touch: CST9217 touch ready`, and (if a BME280 is wired) `climate: BME280 ready at 0x76 on I2C1 (SDA=17 SCL=18 @ 400000 Hz)`.
+2. Screen shows the number **50** centered on a black background, in
+   amber.
 3. An amber arc traces three-quarters of the rim with a gap at the
    bottom; a knob sits where the arc meets the indicator.
-4. Dragging the knob around the rim with a finger changes the number
-   smoothly between 0 and 100.
-5. No tearing / artifacts at the arc edges as you drag.
+4. A muted gray status strip sits just under the rim near the top,
+   reading e.g. `P 30.05inHg  H 42%  T 72.3°F` and updating once per
+   second. Without a sensor it stays as `P --  H --  T --` and the
+   rest of the app still works.
+5. Dragging the knob around the rim with a finger changes the number
+   smoothly between 0 and 100, with no tearing or shearing.
 
 If any of these fail, the most likely culprits in order:
 
 - **Black screen, no log:** wrong toolchain (sourced an older IDF), or
   `idf.py set-target esp32s3` was skipped.
-- **Log says display ready but screen stays black:** AXP2101 isn't
-  enabling the LCD rail (Waveshare's PMIC defaults usually do this, but
-  if your unit shipped with non-default PMIC state, we'll need to
-  initialize the PMIC explicitly — flag this and we'll add it).
-- **Screen shows but no touch:** wrong CST9217 address (verify `0x5A`
-  against your unit's schematic), or `kI2cSda`/`kI2cScl` pins differ on
-  a revision.
-- **Drag works on phantom location only:** swap_xy / mirror flags need
-  flipping in `touch.cpp::init_panel`.
+- **Display garbled / sheared / wrong colors:** byte-swap, set_gap, or
+  even-pixel rounder regressed in `display.cpp` — these CO5300 quirks
+  are documented inline at each fix site.
+- **Screen shows but no touch / touch is rotated:** verify CST9217
+  address `0x5A` and the `mirror_x` / `mirror_y` / `swap_xy` flags in
+  `touch.cpp::init_panel` — the panel and the touch controller don't
+  agree on orientation by default.
+- **`climate: BME280 not found at 0x76 or 0x77` and a silent bus
+  scan:** wiring on H2 — most often SDA / SCL swapped, no 3V3, or (on
+  bare breakouts) the CSB pin floating instead of tied to VCC, which
+  leaves the sensor in SPI mode.
+- **`climate: ... 0x?? ACKs` but not at 0x76/0x77:** something other
+  than a BME280 is on the bus, or it's a BMP280 (chip id `0x58`,
+  pressure + temp only — drop the humidity bits if you want to support
+  it).
 
 ## What's deliberately NOT here yet
 
@@ -131,7 +147,6 @@ If any of these fail, the most likely culprits in order:
   add this when we implement sleep/wake).
 - AMOLED burn-in mitigation (dim/sleep policy is still an open decision).
 - PCF85063 RTC, QMI8658 IMU drivers.
-- BME280 climate sensor.
 - LittleFS, shot records, presets.
 - The model.
 - The Report screen and idle screen.
@@ -154,10 +169,11 @@ memory notes for design decisions already locked in.
 └── components/
     ├── display/                CO5300 QSPI + LVGL display binding + LVGL task
     ├── touch/                  CST9217 I²C + LVGL pointer indev
+    ├── climate/                BME280 1 Hz sample task on H2 I²C bus
     └── ui/                     bringup screen (will be replaced as real
                                 screens land in later steps)
 ```
 
-Components for `sensors/`, `storage/`, `model/`, `presets/`, `grinder/`
-are intentionally NOT scaffolded yet — they'll be added in their
-respective build-order steps so the tree only contains live code.
+Components for `storage/`, `model/`, `presets/`, `grinder/` are
+intentionally NOT scaffolded yet — they'll be added in their respective
+build-order steps so the tree only contains live code.
