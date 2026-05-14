@@ -1,13 +1,12 @@
 idf_component_register(
     SRCS
-        "app_main.cpp"
+        "climate.cpp"
     INCLUDE_DIRS
-        "."
+        "include"
+    PRIV_INCLUDE_DIRS
+        "../../main"
     REQUIRES
-        climate
-        display
-        touch
-        ui
+        driver
         esp_timer
 )
 

@@ -2,6 +2,7 @@
 
 #include <cstdio>
 
+#include "climate.hpp"
 #include "display.hpp"
 #include "lvgl.h"
 
@@ -17,11 +18,13 @@ constexpr int32_t kArcInitial = 50;
 // max-intensity sub-pixels are exactly what burns in fastest.
 // `static const` rather than `constexpr` because lv_color_t's constructor
 // isn't constexpr across all LVGL build configs.
-const lv_color_t kColorBg     = LV_COLOR_MAKE(0x00, 0x00, 0x00);
-const lv_color_t kColorAccent = LV_COLOR_MAKE(0xC8, 0x80, 0x36);  // muted espresso amber
-const lv_color_t kColorText   = LV_COLOR_MAKE(0xE0, 0xE0, 0xE0);
+const lv_color_t kColorBg      = LV_COLOR_MAKE(0x00, 0x00, 0x00);
+const lv_color_t kColorAccent  = LV_COLOR_MAKE(0xC8, 0x80, 0x36);  // muted espresso amber
+const lv_color_t kColorText    = LV_COLOR_MAKE(0xE0, 0xE0, 0xE0);
+const lv_color_t kColorMuted   = LV_COLOR_MAKE(0x70, 0x70, 0x70);  // climate status strip
 
-lv_obj_t* s_value_label = nullptr;
+lv_obj_t* s_value_label   = nullptr;
+lv_obj_t* s_climate_label = nullptr;
 
 void on_arc_value_change(lv_event_t* e) {
   auto* arc = static_cast<lv_obj_t*>(lv_event_get_target(e));
@@ -29,6 +32,23 @@ void on_arc_value_change(lv_event_t* e) {
   char buf[8];
   std::snprintf(buf, sizeof(buf), "%ld", static_cast<long>(v));
   lv_label_set_text(s_value_label, buf);
+}
+
+// LVGL timer — fires on the LVGL task, so it's safe to touch widgets without
+// taking display::lock() (the LVGL task already holds it for the timer
+// callback). Reads the latest climate snapshot and reformats the status strip.
+void update_climate_strip(lv_timer_t* /*t*/) {
+  const climate::Reading r = climate::latest();
+  if (r.timestamp_us == 0) {
+    lv_label_set_text(s_climate_label, "P --  H --  T --");
+    return;
+  }
+  const float p_inhg = climate::hpa_to_inhg(r.pressure_hpa);
+  const float t_f    = climate::c_to_f(r.temp_c);
+  char buf[48];
+  std::snprintf(buf, sizeof(buf), "P %.2finHg  H %.0f%%  T %.1f\xC2\xB0""F",
+                p_inhg, r.humidity_pct, t_f);
+  lv_label_set_text(s_climate_label, buf);
 }
 
 }  // namespace
@@ -80,6 +100,23 @@ void start_bringup() {
   char buf[8];
   std::snprintf(buf, sizeof(buf), "%ld", static_cast<long>(kArcInitial));
   lv_label_set_text(s_value_label, buf);
+
+  // Climate status strip — pressure / humidity / temperature in US-customary
+  // units. Sits just below the rim arc at the top, muted gray so it reads as
+  // status rather than a focal element. The font is Montserrat 14 (LVGL's
+  // default) — bigger sizes don't justify the burn-in risk for a static row.
+  s_climate_label = lv_label_create(scr);
+  static lv_style_t climate_style;
+  lv_style_init(&climate_style);
+  lv_style_set_text_color(&climate_style, kColorMuted);
+  lv_style_set_text_font(&climate_style, &lv_font_montserrat_14);
+  lv_obj_add_style(s_climate_label, &climate_style, LV_PART_MAIN);
+  lv_obj_align(s_climate_label, LV_ALIGN_TOP_MID, 0, 66);
+  lv_label_set_text(s_climate_label, "P --  H --  T --");
+
+  // Repaint at 1 Hz to match the BME280 sample cadence — faster polling just
+  // copies the same numbers.
+  lv_timer_create(update_climate_strip, 1000, nullptr);
 
   display::unlock();
 }
