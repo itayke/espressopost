@@ -50,13 +50,30 @@ bool on_color_trans_done(esp_lcd_panel_io_handle_t /*io*/,
   return false;
 }
 
-void flush_cb(lv_display_t* disp, const lv_area_t* area, uint8_t* px_map) {
+void flush_cb(lv_display_t* /*disp*/, const lv_area_t* area, uint8_t* px_map) {
   const int x1 = area->x1;
   const int y1 = area->y1;
   const int x2 = area->x2 + 1;
   const int y2 = area->y2 + 1;
-  // LVGL 9 hands us a pre-formatted pixel buffer. Pass straight to the panel.
+  // LVGL 9 renders RGB565 little-endian by default; the CO5300 over QSPI
+  // expects big-endian RGB565. Swap in place before pushing — without this
+  // every color appears as its byte-swapped twin (amber → green, etc.).
+  lv_draw_sw_rgb565_swap(px_map, lv_area_get_size(area));
   esp_lcd_panel_draw_bitmap(s_panel, x1, y1, x2, y2, px_map);
+}
+
+// The CO5300 over QSPI requires the column/row window to be 2-pixel aligned
+// (each QSPI write carries a pair of RGB565 pixels). LVGL by default may
+// invalidate areas with odd x1 / odd width, which makes the panel walk one
+// pixel off per row and shears the image diagonally. Snap every invalidated
+// area to even-x1/odd-x2 boundaries before LVGL renders into the partial
+// buffer — matches Waveshare's BSP rounder for this exact board.
+void rounder_event_cb(lv_event_t* e) {
+  auto* area = static_cast<lv_area_t*>(lv_event_get_param(e));
+  area->x1 = (area->x1 >> 1) << 1;
+  area->y1 = (area->y1 >> 1) << 1;
+  area->x2 = ((area->x2 >> 1) << 1) | 1;
+  area->y2 = ((area->y2 >> 1) << 1) | 1;
 }
 
 void lvgl_tick_cb(void* /*arg*/) {
@@ -119,6 +136,13 @@ esp_err_t init_panel() {
 
   ESP_RETURN_ON_ERROR(esp_lcd_panel_reset(s_panel), kTag, "panel_reset");
   ESP_RETURN_ON_ERROR(esp_lcd_panel_init(s_panel),  kTag, "panel_init");
+
+  // Waveshare's BSP for this exact board applies a 6-pixel X offset because
+  // the CO5300's framebuffer addresses 480 wide but only 466 columns are
+  // wired to the visible AMOLED matrix, starting at column 6. Without this
+  // every partial redraw lands 6 px off, producing tearing/garble at edges.
+  ESP_RETURN_ON_ERROR(esp_lcd_panel_set_gap(s_panel, 6, 0), kTag, "set_gap");
+
   // CO5300 is OLED; brightness is set via the panel command in the driver.
   // Default brightness is high — fine for bringup; we'll add a brightness
   // controller alongside the burn-in policy later.
@@ -145,6 +169,8 @@ esp_err_t init_lvgl() {
                          kDrawBufBytes, LV_DISPLAY_RENDER_MODE_PARTIAL);
   lv_display_set_color_format(s_lvgl_disp, LV_COLOR_FORMAT_RGB565);
   lv_display_set_flush_cb(s_lvgl_disp, flush_cb);
+  lv_display_add_event_cb(s_lvgl_disp, rounder_event_cb,
+                          LV_EVENT_INVALIDATE_AREA, nullptr);
 
   // Register the panel's color-transfer-done callback so flush_ready fires
   // exactly when DMA finishes, not after a guesstimated delay.

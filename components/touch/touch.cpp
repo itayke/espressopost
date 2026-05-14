@@ -54,8 +54,11 @@ esp_err_t init_i2c() {
 }
 
 esp_err_t init_panel(lv_display_t* disp) {
-  const esp_lcd_panel_io_i2c_config_t tp_io_cfg =
-      ESP_LCD_TOUCH_IO_I2C_CST9217_CONFIG();
+  esp_lcd_panel_io_i2c_config_t tp_io_cfg = ESP_LCD_TOUCH_IO_I2C_CST9217_CONFIG();
+  // The CST9217 macro doesn't set scl_speed_hz; the new i2c_master driver
+  // rejects a zero value with ESP_ERR_INVALID_ARG (`invalid scl frequency`).
+  tp_io_cfg.scl_speed_hz = board::kI2cFreqHz;
+
   // C++ overload resolves to esp_lcd_new_panel_io_i2c_v2 because s_i2c_bus
   // is an i2c_master_bus_handle_t; no cast required.
   ESP_RETURN_ON_ERROR(
@@ -73,8 +76,11 @@ esp_err_t init_panel(lv_display_t* disp) {
       },
       .flags = {
           .swap_xy = 0,
-          .mirror_x = 0,
-          .mirror_y = 0,
+          // CST9217's native frame is rotated 180° from the CO5300's visible
+          // orientation on this board — without both mirrors a touch at the
+          // top-right reports as bottom-left.
+          .mirror_x = 1,
+          .mirror_y = 1,
       },
   };
   ESP_RETURN_ON_ERROR(esp_lcd_touch_new_i2c_cst9217(s_tp_io, &tp_cfg, &s_tp_handle),
