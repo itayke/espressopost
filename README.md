@@ -196,9 +196,9 @@ memory notes for design decisions already locked in.
 ├── partitions.csv              custom: nvs + factory (4 MB) + littlefs (~12 MB)
 ├── sdkconfig.defaults          PSRAM, flash, partition table, FreeRTOS tick
 ├── main/
-│   ├── app_main.cpp            init display → init touch → show bringup screen
+│   ├── app_main.cpp            display → touch → storage → presets → climate → rtc → power → ui
 │   ├── board_pins.hpp          verbatim from Waveshare's reference repo
-│   ├── idf_component.yml       managed deps: lvgl, CO5300, CST9217
+│   ├── idf_component.yml       managed deps: lvgl, CO5300, CST9217, littlefs
 │   └── CMakeLists.txt
 └── components/
     ├── display/                CO5300 QSPI + LVGL display binding + LVGL task
