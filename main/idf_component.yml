@@ -13,3 +13,6 @@ dependencies:
 
   ## CST9217 capacitive touch controller (I²C).
   waveshare/esp_lcd_touch_cst9217: "^1.0.4"
+
+  ## LittleFS VFS layer — shot log + (future) presets live on the `storage` partition.
+  joltwallet/littlefs: "^1.16.4"

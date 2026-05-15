@@ -2,13 +2,16 @@
 
 namespace espressopost::ui {
 
-// Build and show the Step-1 bringup screen: a centered number adjustable
-// by a touch arc around the rim of the round display. This screen is a
-// hardware-verification milestone; it will be replaced when the real idle
-// screen lands later in the build order.
+// Build and show the Report screen: climate strip at the top, time-delta
+// stepper + 1–5 quality stars in the middle, Submit at the bottom. Submit is
+// enabled only after the user has explicitly set both fields; tapping it
+// appends a ShotRecord to LittleFS and resets the form.
 //
-// Must be called after `display::init()` + `touch::init()`. Acquires the
-// LVGL lock internally.
-void start_bringup();
+// This is the device's primary screen until the idle screen lands in a later
+// build-order step.
+//
+// Must be called after display::init() + touch::init() + storage::init().
+// Acquires the LVGL lock internally.
+void start_report();
 
 }  // namespace espressopost::ui

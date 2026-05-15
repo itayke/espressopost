@@ -6,11 +6,13 @@ learns a per-preset grind adjustment from local data. Offline-first.
 
 ## Status
 
-**Steps 1 + 2 of 10 — bringup + climate.** Display + capacitive touch
-up under LVGL 9 (round 466 × 466, full-rim touch arc, 2-px-aligned
-partial redraws), and a 1 Hz BME280 read loop on the H2 expansion
-header feeding a P / H / T status strip at the top of the screen. No
-storage, presets, or model yet.
+**Steps 1 – 3 of 10 — bringup + climate + shot logging.** Display +
+capacitive touch up under LVGL 9 (round 466 × 466, 2-px-aligned partial
+redraws), 1 Hz BME280 read loop feeding a P / H / T status strip, and a
+Report screen (time-delta stepper + 1–5 stars + Submit) that appends a
+32-byte `ShotRecord` to LittleFS on every save. Single hard-coded preset
+(id 0); no model yet; RTC field is still 0 (PCF85063 lands in a later
+step — `esp_timer` ticks order shots in the meantime).
 
 The full build order lives in the kickoff brief. Each step ends in a
 runnable device state.
@@ -109,17 +111,19 @@ Exit the monitor with `Ctrl+]`.
 
 ## What to verify on this build
 
-1. Boot log shows: `display: display + LVGL ready (466x466, 50-line partial buffer)`, `touch: CST9217 touch ready`, and (if a BME280 is wired) `climate: BME280 ready at 0x76 on I2C1 (SDA=17 SCL=18 @ 400000 Hz)`.
-2. Screen shows the number **50** centered on a black background, in
-   amber.
-3. An amber arc traces three-quarters of the rim with a gap at the
-   bottom; a knob sits where the arc meets the indicator.
-4. A muted gray status strip sits just under the rim near the top,
-   reading e.g. `P 30.05inHg  H 42%  T 72.3°F` and updating once per
-   second. Without a sensor it stays as `P --  H --  T --` and the
-   rest of the app still works.
-5. Dragging the knob around the rim with a finger changes the number
-   smoothly between 0 and 100, with no tearing or shearing.
+1. Boot log shows: `display: display + LVGL ready (466x466, 50-line partial buffer)`, `touch: CST9217 touch ready`, `storage: littlefs mounted at /littlefs (...KB used, N shots logged)`, and (if a BME280 is wired) `climate: BME280 ready at 0x76 on I2C1 (SDA=17 SCL=18 @ 400000 Hz)`.
+2. Screen shows the climate strip at the top, a `-` placeholder for
+   time delta in the middle, five gray quality circles below it, and a
+   muted **Submit** button at the bottom (disabled until both fields
+   are set).
+3. Tapping `−` / `+` either side of the delta value sets it to a signed
+   seconds reading (range −30 … +30). Tapping a star fills it amber and
+   any star to its left.
+4. Once both delta and stars are set, Submit lights amber. Tapping it
+   appends a 32-byte record to `/littlefs/shots.bin`, briefly shows
+   `Saved #N` near the top, and clears the form.
+5. Power-cycling and submitting another shot shows the count carrying
+   over (`Saved #2`, `#3`, …) — proof that LittleFS is persisting.
 
 If any of these fail, the most likely culprits in order:
 
@@ -132,6 +136,13 @@ If any of these fail, the most likely culprits in order:
   address `0x5A` and the `mirror_x` / `mirror_y` / `swap_xy` flags in
   `touch.cpp::init_panel` — the panel and the touch controller don't
   agree on orientation by default.
+- **`storage: littlefs mount failed`:** usually `partitions.csv` /
+  `sdkconfig.defaults` drifted apart, or an in-flight format was
+  interrupted. `idf.py erase-flash` + reflash will recover (destroys
+  any previously logged shots, of course).
+- **`Submit` lights amber but `Saved #N` never appears / `append_shot
+  failed`:** check the `storage:` log line; `ESP_FAIL` is usually a
+  full or wedged partition. Same recovery as above.
 - **`climate: BME280 not found at 0x76 or 0x77` and a silent bus
   scan:** wiring on H2 — most often SDA / SCL swapped, no 3V3, or (on
   bare breakouts) the CSB pin floating instead of tied to VCC, which
@@ -147,9 +158,10 @@ If any of these fail, the most likely culprits in order:
   add this when we implement sleep/wake).
 - AMOLED burn-in mitigation (dim/sleep policy is still an open decision).
 - PCF85063 RTC, QMI8658 IMU drivers.
-- LittleFS, shot records, presets.
-- The model.
-- The Report screen and idle screen.
+- A real preset system — every shot logs `preset_id = 0`.
+- The model — every shot logs `click_delta = 0`.
+- The idle screen (Report is the only screen for now) and any
+  read-back / history UI.
 
 Each is its own step in the brief's build order. See the project's
 memory notes for design decisions already locked in.
@@ -170,10 +182,10 @@ memory notes for design decisions already locked in.
     ├── display/                CO5300 QSPI + LVGL display binding + LVGL task
     ├── touch/                  CST9217 I²C + LVGL pointer indev
     ├── climate/                BME280 1 Hz sample task on H2 I²C bus
-    └── ui/                     bringup screen (will be replaced as real
-                                screens land in later steps)
+    ├── storage/                LittleFS mount + 32-byte ShotRecord append-log
+    └── ui/                     Report screen (delta + stars + Submit)
 ```
 
-Components for `storage/`, `model/`, `presets/`, `grinder/` are
-intentionally NOT scaffolded yet — they'll be added in their respective
-build-order steps so the tree only contains live code.
+Components for `model/`, `presets/`, `grinder/` are intentionally NOT
+scaffolded yet — they'll be added in their respective build-order steps
+so the tree only contains live code.

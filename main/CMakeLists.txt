@@ -6,6 +6,7 @@ idf_component_register(
     REQUIRES
         climate
         display
+        storage
         touch
         ui
         esp_timer

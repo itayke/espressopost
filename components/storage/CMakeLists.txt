@@ -1,13 +1,11 @@
 idf_component_register(
     SRCS
-        "ui_report.cpp"
+        "storage.cpp"
     INCLUDE_DIRS
         "include"
     REQUIRES
-        lvgl__lvgl
-        display
         climate
-        storage
+        joltwallet__littlefs
         esp_timer
 )
 
