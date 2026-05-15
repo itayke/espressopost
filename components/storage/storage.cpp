@@ -16,7 +16,7 @@ constexpr const char* kTag           = "storage";
 constexpr const char* kPartitionLbl  = "storage";   // matches partitions.csv
 constexpr const char* kBasePath      = "/littlefs";
 constexpr const char* kShotsPath     = "/littlefs/shots.bin";
-constexpr uint8_t     kRecordVersion = 1;
+constexpr uint8_t     kRecordVersion = 2;
 
 bool s_mounted = false;
 
@@ -73,8 +73,9 @@ esp_err_t append_shot(const ShotRecord& record) {
   if (!s_mounted) return ESP_ERR_INVALID_STATE;
 
   ShotRecord r = record;
-  r.version    = kRecordVersion;
-  r._pad[0] = r._pad[1] = r._pad[2] = 0;
+  r.version       = kRecordVersion;
+  r._reserved[0]  = 0;
+  r._reserved[1]  = 0;
 
   Guard g;
   if (!g.ok) return ESP_ERR_TIMEOUT;

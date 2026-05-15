@@ -6,13 +6,16 @@ learns a per-preset grind adjustment from local data. Offline-first.
 
 ## Status
 
-**Steps 1 – 3 of 10 — bringup + climate + shot logging.** Display +
-capacitive touch up under LVGL 9 (round 466 × 466, 2-px-aligned partial
-redraws), 1 Hz BME280 read loop feeding a P / H / T status strip, and a
-Report screen (time-delta stepper + 1–5 stars + Submit) that appends a
-32-byte `ShotRecord` to LittleFS on every save. Single hard-coded preset
-(id 0); no model yet; RTC field is still 0 (PCF85063 lands in a later
-step — `esp_timer` ticks order shots in the meantime).
+**Steps 1 – 4 of 10 — bringup + climate + shot logging + presets.**
+Display + capacitive touch up under LVGL 9 (round 466 × 466,
+2-px-aligned partial redraws), 1 Hz BME280 read loop feeding a P / H / T
+status strip, an NVS-backed preset table (3 defaults seeded on first
+boot, selection persistent across reboots), and a Report screen
+(tappable preset row at top, time-delta stepper + 1–5 stars + Submit)
+that appends a 32-byte `ShotRecord` to LittleFS on every save. No model
+yet (`click_anchor` and `click_delta` are still 0); RTC field is still
+0 (PCF85063 lands in a later step — `esp_timer` ticks order shots in
+the meantime).
 
 The full build order lives in the kickoff brief. Each step ends in a
 runnable device state.
@@ -111,19 +114,21 @@ Exit the monitor with `Ctrl+]`.
 
 ## What to verify on this build
 
-1. Boot log shows: `display: display + LVGL ready (466x466, 50-line partial buffer)`, `touch: CST9217 touch ready`, `storage: littlefs mounted at /littlefs (...KB used, N shots logged)`, and (if a BME280 is wired) `climate: BME280 ready at 0x76 on I2C1 (SDA=17 SCL=18 @ 400000 Hz)`.
-2. Screen shows the climate strip at the top, a `-` placeholder for
-   time delta in the middle, five gray quality circles below it, and a
-   muted **Submit** button at the bottom (disabled until both fields
-   are set).
-3. Tapping `−` / `+` either side of the delta value sets it to a signed
+1. Boot log shows: `display: display + LVGL ready (466x466, 50-line partial buffer)`, `touch: CST9217 touch ready`, `storage: littlefs mounted at /littlefs (...KB used, N shots logged)`, `presets: 3 presets loaded, selected=N ("espresso")`, and (if a BME280 is wired) `climate: BME280 ready at 0x76 on I2C1 (SDA=17 SCL=18 @ 400000 Hz)`.
+2. Screen shows, top to bottom: a tappable preset row (e.g. `espresso ·
+   target 30s`), the climate strip, a `-` placeholder for time delta, a
+   `-` / `+` stepper around it, five gray quality circles, and a muted
+   **Submit** button (disabled until both fields are set).
+3. Tapping the preset row cycles through the seeded presets (`espresso`
+   → `lungo` → `ristretto` → back) and the target seconds update with it.
+4. Tapping `−` / `+` either side of the delta value sets it to a signed
    seconds reading (range −30 … +30). Tapping a star fills it amber and
    any star to its left.
-4. Once both delta and stars are set, Submit lights amber. Tapping it
+5. Once both delta and stars are set, Submit lights amber. Tapping it
    appends a 32-byte record to `/littlefs/shots.bin`, briefly shows
    `Saved #N` near the top, and clears the form.
-5. Power-cycling and submitting another shot shows the count carrying
-   over (`Saved #2`, `#3`, …) — proof that LittleFS is persisting.
+6. Power-cycling restores the last-selected preset (NVS persists it) and
+   shot count carries over (`Saved #2`, `#3`, …).
 
 If any of these fail, the most likely culprits in order:
 
@@ -158,8 +163,9 @@ If any of these fail, the most likely culprits in order:
   add this when we implement sleep/wake).
 - AMOLED burn-in mitigation (dim/sleep policy is still an open decision).
 - PCF85063 RTC, QMI8658 IMU drivers.
-- A real preset system — every shot logs `preset_id = 0`.
-- The model — every shot logs `click_delta = 0`.
+- A Preset editor — names, target time, dose, and the table itself are
+  hard-coded defaults until the UI overhaul.
+- The model — every shot logs `click_delta = 0` and `click_anchor = 0`.
 - The idle screen (Report is the only screen for now) and any
   read-back / history UI.
 
@@ -183,9 +189,10 @@ memory notes for design decisions already locked in.
     ├── touch/                  CST9217 I²C + LVGL pointer indev
     ├── climate/                BME280 1 Hz sample task on H2 I²C bus
     ├── storage/                LittleFS mount + 32-byte ShotRecord append-log
-    └── ui/                     Report screen (delta + stars + Submit)
+    ├── presets/                NVS-backed Preset table + tap-to-cycle selection
+    └── ui/                     Report screen (preset / delta / stars / Submit)
 ```
 
-Components for `model/`, `presets/`, `grinder/` are intentionally NOT
-scaffolded yet — they'll be added in their respective build-order steps
-so the tree only contains live code.
+Components for `model/`, `grinder/` are intentionally NOT scaffolded
+yet — they'll be added in their respective build-order steps so the
+tree only contains live code.

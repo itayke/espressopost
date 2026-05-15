@@ -8,6 +8,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "lvgl.h"
+#include "presets.hpp"
 #include "storage.hpp"
 
 namespace espressopost::ui {
@@ -36,6 +37,7 @@ const lv_color_t kColorText    = LV_COLOR_MAKE(0xE0, 0xE0, 0xE0);
 const lv_color_t kColorMuted   = LV_COLOR_MAKE(0x70, 0x70, 0x70);
 const lv_color_t kColorDim     = LV_COLOR_MAKE(0x30, 0x30, 0x30);
 
+lv_obj_t* s_preset_label  = nullptr;
 lv_obj_t* s_climate_label = nullptr;
 lv_obj_t* s_delta_label   = nullptr;
 lv_obj_t* s_star_btns[kMaxStars] = {};
@@ -48,6 +50,20 @@ lv_timer_t* s_toast_timer = nullptr;
 bool   s_delta_set     = false;
 int8_t s_delta_value   = 0;
 uint8_t s_stars_value  = 0;   // 0 = none picked yet
+
+void refresh_preset_label() {
+  const auto id = presets::selected_id();
+  const auto p  = presets::get(id);
+  char buf[40];
+  std::snprintf(buf, sizeof(buf), "%s  \xC2\xB7  target %us", p.name,
+                static_cast<unsigned>(p.target_time_s));
+  lv_label_set_text(s_preset_label, buf);
+}
+
+void on_preset_tap(lv_event_t*) {
+  presets::cycle_selected();
+  refresh_preset_label();
+}
 
 void refresh_delta_label() {
   if (!s_delta_set) {
@@ -134,7 +150,7 @@ void on_submit(lv_event_t*) {
 
   const climate::Reading r = climate::latest();
   storage::ShotRecord rec = {};
-  rec.preset_id     = 0;                    // single preset until Step 4
+  rec.preset_id     = presets::selected_id();
   rec.time_delta_s  = s_delta_value;
   rec.quality_stars = s_stars_value;
   rec.click_delta   = 0;                    // stub until the model lands
@@ -194,13 +210,28 @@ void start_report() {
   lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
-  // --- Climate status strip (same row used in bringup, kept here) ---
+  // --- Preset row at the very top: tap to cycle. Made a button so LVGL
+  // gives us a generous hit area without us having to position one manually.
+  static lv_style_t row_text_style;
+  lv_style_init(&row_text_style);
+  lv_style_set_text_color(&row_text_style, kColorMuted);
+  lv_style_set_text_font(&row_text_style, &lv_font_montserrat_14);
+
+  lv_obj_t* preset_btn = lv_button_create(scr);
+  lv_obj_set_style_bg_opa(preset_btn, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_shadow_width(preset_btn, 0, LV_PART_MAIN);
+  lv_obj_set_style_border_width(preset_btn, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(preset_btn, 6, LV_PART_MAIN);
+  lv_obj_align(preset_btn, LV_ALIGN_TOP_MID, 0, 40);
+  lv_obj_add_event_cb(preset_btn, on_preset_tap, LV_EVENT_CLICKED, nullptr);
+  s_preset_label = lv_label_create(preset_btn);
+  lv_obj_add_style(s_preset_label, &row_text_style, LV_PART_MAIN);
+  lv_obj_center(s_preset_label);
+  refresh_preset_label();
+
+  // --- Climate status strip just below the preset row ---
   s_climate_label = lv_label_create(scr);
-  static lv_style_t climate_style;
-  lv_style_init(&climate_style);
-  lv_style_set_text_color(&climate_style, kColorMuted);
-  lv_style_set_text_font(&climate_style, &lv_font_montserrat_14);
-  lv_obj_add_style(s_climate_label, &climate_style, LV_PART_MAIN);
+  lv_obj_add_style(s_climate_label, &row_text_style, LV_PART_MAIN);
   lv_obj_align(s_climate_label, LV_ALIGN_TOP_MID, 0, 80);
   lv_label_set_text(s_climate_label, "P --  H --  T --");
   lv_timer_create(update_climate_strip, 1000, nullptr);

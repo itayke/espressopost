@@ -8,6 +8,7 @@
 
 #include "climate.hpp"
 #include "display.hpp"
+#include "presets.hpp"
 #include "storage.hpp"
 #include "touch.hpp"
 #include "ui.hpp"
@@ -29,6 +30,13 @@ extern "C" void app_main(void) {
   if (storage_err != ESP_OK) {
     ESP_LOGE(kTag, "storage init failed (%s) — submit will fail until fixed",
              esp_err_to_name(storage_err));
+  }
+
+  // Presets owns nvs_flash_init() right now; hoist it if another NVS user lands.
+  const esp_err_t presets_err = espressopost::presets::init();
+  if (presets_err != ESP_OK) {
+    ESP_LOGE(kTag, "presets init failed (%s) — falling back to defaults in RAM",
+             esp_err_to_name(presets_err));
   }
 
   const esp_err_t climate_err = espressopost::climate::init();

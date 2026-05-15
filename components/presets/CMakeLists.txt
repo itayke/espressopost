@@ -1,15 +1,10 @@
 idf_component_register(
     SRCS
-        "ui_report.cpp"
+        "presets.cpp"
     INCLUDE_DIRS
         "include"
     REQUIRES
-        lvgl__lvgl
-        display
-        climate
-        presets
-        storage
-        esp_timer
+        nvs_flash
 )
 
 target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)
