@@ -113,6 +113,8 @@ esp_err_t init_panel(lv_display_t* disp) {
 
 }  // namespace
 
+i2c_master_bus_handle_t i2c_bus() { return s_i2c_bus; }
+
 esp_err_t init(lv_display_t* disp) {
   if (disp == nullptr) return ESP_ERR_INVALID_ARG;
   if (s_tp_handle != nullptr) return ESP_ERR_INVALID_STATE;

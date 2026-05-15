@@ -1,16 +1,13 @@
 idf_component_register(
     SRCS
-        "ui_report.cpp"
+        "rtc.cpp"
     INCLUDE_DIRS
         "include"
+    PRIV_INCLUDE_DIRS
+        "../../main"
     REQUIRES
-        lvgl__lvgl
-        display
-        climate
-        presets
-        rtc
-        storage
-        esp_timer
+        driver
+        touch
 )
 
 target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)

@@ -9,6 +9,7 @@
 #include "esp_timer.h"
 #include "lvgl.h"
 #include "presets.hpp"
+#include "rtc.hpp"
 #include "storage.hpp"
 
 namespace espressopost::ui {
@@ -155,7 +156,7 @@ void on_submit(lv_event_t*) {
   rec.quality_stars = s_stars_value;
   rec.click_delta   = 0;                    // stub until the model lands
   rec.timestamp_us  = esp_timer_get_time();
-  rec.rtc_epoch_s   = 0;                    // until RTC step
+  rec.rtc_epoch_s   = rtc::epoch_s();        // 0 if RTC not initialized / not yet set
   if (r.timestamp_us != 0) {
     rec.temp_c       = r.temp_c;
     rec.humidity_pct = r.humidity_pct;

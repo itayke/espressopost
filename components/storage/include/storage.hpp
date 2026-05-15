@@ -25,8 +25,8 @@ constexpr uint8_t kFlagAnomaly   = 1u << 1;
 // care about is big-endian.
 //
 // `version` lets future schema changes be detected without a separate file
-// header. `rtc_epoch_s` is 0 until the PCF85063 driver lands — fall back to
-// `timestamp_us` (esp_timer ticks since boot) for ordering in the meantime.
+// header. `rtc_epoch_s` is 0 if the PCF85063 hasn't been seeded yet — fall
+// back to `timestamp_us` (esp_timer ticks since boot) for ordering then.
 struct __attribute__((packed)) ShotRecord {
   uint8_t  version;          // 2 (current)
   uint8_t  preset_id;        // index into presets::get(); persisted in NVS

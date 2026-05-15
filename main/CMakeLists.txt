@@ -8,6 +8,7 @@ idf_component_register(
         display
         power
         presets
+        rtc
         storage
         touch
         ui

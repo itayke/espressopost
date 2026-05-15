@@ -10,6 +10,7 @@
 #include "display.hpp"
 #include "power.hpp"
 #include "presets.hpp"
+#include "rtc.hpp"
 #include "storage.hpp"
 #include "touch.hpp"
 #include "ui.hpp"
@@ -44,6 +45,15 @@ extern "C" void app_main(void) {
   if (climate_err != ESP_OK) {
     ESP_LOGW(kTag, "climate sensor unavailable (%s); records will log 0s",
              esp_err_to_name(climate_err));
+  }
+
+  // RTC piggybacks on touch's I²C0 bus, so it must come after touch::init.
+  // Non-fatal: if it fails (chip missing / wedged), epoch_s() returns 0 and
+  // ShotRecord.rtc_epoch_s stays 0 — same as the pre-RTC state.
+  const esp_err_t rtc_err = espressopost::rtc::init();
+  if (rtc_err != ESP_OK) {
+    ESP_LOGW(kTag, "rtc unavailable (%s); shots will log rtc_epoch_s=0",
+             esp_err_to_name(rtc_err));
   }
 
   // Power last — installs the idle watchdog after every other subsystem is

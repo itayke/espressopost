@@ -6,17 +6,22 @@ learns a per-preset grind adjustment from local data. Offline-first.
 
 ## Status
 
-**Steps 1 – 4 + idle policy.** Display + capacitive touch up under LVGL
-9 (round 466 × 466, 2-px-aligned partial redraws), 1 Hz BME280 read loop
-feeding a P / H / T status strip, an NVS-backed preset table (3 defaults
-seeded on first boot, selection persistent across reboots), and a Report
-screen (tappable preset row at top, time-delta stepper + 1–5 stars +
-Submit) that appends a 32-byte `ShotRecord` to LittleFS on every save.
-An idle watchdog dims the AMOLED to 33 % after 30 s and turns the panel
-off after 2 min; any touch wakes it (the wake-tap is swallowed for 500 ms
-so it doesn't accidentally hit a widget). No model yet (`click_anchor`
-and `click_delta` are still 0); RTC field is still 0 (PCF85063 is the
-next planned step — `esp_timer` ticks order shots in the meantime).
+**Steps 1 – 4 + idle policy + RTC.** Display + capacitive touch up under
+LVGL 9 (round 466 × 466, 2-px-aligned partial redraws), 1 Hz BME280 read
+loop feeding a P / H / T status strip, an NVS-backed preset table (3
+defaults seeded on first boot, selection persistent across reboots), and
+a Report screen (tappable preset row at top, time-delta stepper + 1–5
+stars + Submit) that appends a 32-byte `ShotRecord` to LittleFS on every
+save. An idle watchdog dims the AMOLED to 33 % after 30 s and turns the
+panel off after 2 min; any touch wakes it (the wake-tap is swallowed for
+500 ms so it doesn't accidentally hit a widget). PCF85063 RTC driven over
+the shared internal I²C bus: on first boot (or after the backup cell
+dies) the chip's OS flag is set and the driver seeds the clock from
+`__DATE__`/`__TIME__` (off by the build machine's TZ, typically <24 h —
+fine as a floor until a real time-set flow lands); subsequent boots read
+the live clock straight off the chip and `ShotRecord.rtc_epoch_s` is a
+real wall-clock value. No model yet (`click_anchor` and `click_delta`
+are still 0).
 
 The full build order lives in the kickoff brief. Each step ends in a
 runnable device state.
@@ -31,7 +36,8 @@ case).
 - **Touch:** CST9217 over I²C (shared bus with PMIC/RTC/IMU)
 - **PMIC:** AXP2101 (display rail gated by PMIC defaults — works at
   power-on without configuration; we'll drive it later for sleep)
-- **RTC:** PCF85063 (wall-clock time source for shot records)
+- **RTC:** PCF85063 on shared internal I²C bus @ 0x51, battery-backed
+  (CR1220) — wall-clock source for `rtc_epoch_s` in every shot record
 - **IMU:** QMI8658 (planned wake-on-motion)
 - **Audio:** ES7210 dual-mic codec (unused in v1)
 - **Climate:** Bosch BME280 (temperature / humidity / pressure) on the
@@ -115,7 +121,7 @@ Exit the monitor with `Ctrl+]`.
 
 ## What to verify on this build
 
-1. Boot log shows: `display: display + LVGL ready (466x466, 50-line partial buffer)`, `touch: CST9217 touch ready`, `storage: littlefs mounted at /littlefs (...KB used, N shots logged)`, `presets: 3 presets loaded, selected=N ("espresso")`, and (if a BME280 is wired) `climate: BME280 ready at 0x76 on I2C1 (SDA=17 SCL=18 @ 400000 Hz)`.
+1. Boot log shows: `display: display + LVGL ready (466x466, 50-line partial buffer)`, `touch: CST9217 touch ready`, `storage: littlefs mounted at /littlefs (...KB used, N shots logged)`, `presets: 3 presets loaded, selected=N ("espresso")`, (if a BME280 is wired) `climate: BME280 ready at 0x76 on I2C1 (SDA=17 SCL=18 @ 400000 Hz)`, and the RTC line — either `rtc: first boot (OS=1) — seeding from build time …` on a virgin chip, or `rtc: PCF85063 already set: 2026-MM-DD HH:MM:SS UTC (epoch …)` on subsequent boots.
 2. Screen shows, top to bottom: a tappable preset row (e.g. `espresso ·
    target 30s`), the climate strip, a `-` placeholder for time delta, a
    `-` / `+` stepper around it, five gray quality circles, and a muted
@@ -169,8 +175,10 @@ If any of these fail, the most likely culprits in order:
   add this when battery / true light-sleep matters).
 - QMI8658 IMU driver — wake-on-motion is a planned upgrade so the
   device can also wake by picking it up, not just touching it.
-- PCF85063 RTC — next step; until then `rtc_epoch_s` in every record
-  stays 0 and shots are ordered by `esp_timer` ticks.
+- A real time-set flow — first-boot seeding from `__DATE__`/`__TIME__`
+  is approximate (off by the build machine's TZ; minutes-to-hours stale
+  by the time the device actually boots). NTP-over-companion-app, a
+  serial command, or a hidden UI gesture will eventually replace it.
 - A Preset editor — names, target time, dose, and the table itself are
   hard-coded defaults until the UI overhaul.
 - The model — every shot logs `click_delta = 0` and `click_anchor = 0`.
@@ -198,10 +206,11 @@ memory notes for design decisions already locked in.
     ├── climate/                BME280 1 Hz sample task on H2 I²C bus
     ├── storage/                LittleFS mount + 32-byte ShotRecord append-log
     ├── presets/                NVS-backed Preset table + tap-to-cycle selection
+    ├── rtc/                    PCF85063 driver: build-time seed + epoch_s() for ShotRecord
     ├── power/                  idle state machine: dim @ 30s, off @ 2min, wake on touch
     └── ui/                     Report screen (preset / delta / stars / Submit)
 ```
 
-Components for `rtc/`, `model/`, `grinder/` are intentionally NOT
-scaffolded yet — they'll be added in their respective build-order steps
-so the tree only contains live code.
+Components for `model/`, `grinder/` are intentionally NOT scaffolded yet
+— they'll be added in their respective build-order steps so the tree
+only contains live code.
