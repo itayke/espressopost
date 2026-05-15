@@ -11,6 +11,7 @@ idf_component_register(
         lvgl__lvgl
         waveshare__esp_lcd_touch_cst9217
         display
+        power
 )
 
 target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)

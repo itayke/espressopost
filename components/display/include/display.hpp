@@ -23,4 +23,15 @@ lv_display_t* lvgl_display();
 bool lock(uint32_t timeout_ms = UINT32_MAX);
 void unlock();
 
+// Panel brightness in percent (0..100). Sends CO5300 cmd 0x51 with the value
+// rescaled to 0..255. AMOLED — 0% is genuinely "all sub-pixels off"; no need
+// to also call set_on(false) for power savings, though set_on() additionally
+// stops the controller from scanning.
+esp_err_t set_brightness(uint8_t pct);
+
+// Panel scan on/off. When off the framebuffer is preserved, so the same UI
+// re-appears on the next set_on(true). Use for hard sleep; for soft idle
+// just dim via set_brightness().
+esp_err_t set_on(bool on);
+
 }  // namespace espressopost::display

@@ -9,6 +9,7 @@
 #include "esp_lcd_touch.h"
 #include "esp_lcd_touch_cst9217.h"
 #include "esp_log.h"
+#include "power.hpp"
 
 namespace espressopost::touch {
 namespace {
@@ -31,6 +32,13 @@ void read_cb(lv_indev_t* /*indev*/, lv_indev_data_t* data) {
       s_tp_handle, &point, &point_count, /*max_point_cnt=*/1);
 
   if (err == ESP_OK && point_count > 0) {
+    // Let the power state machine see the input. If we just woke from
+    // screen-off (or we're still inside the post-wake debounce), drop the
+    // event so the wake-up tap doesn't ghost-press an invisible widget.
+    if (power::consume_input()) {
+      data->state = LV_INDEV_STATE_RELEASED;
+      return;
+    }
     data->point.x = point.x;
     data->point.y = point.y;
     data->state = LV_INDEV_STATE_PRESSED;

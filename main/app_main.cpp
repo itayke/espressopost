@@ -8,6 +8,7 @@
 
 #include "climate.hpp"
 #include "display.hpp"
+#include "power.hpp"
 #include "presets.hpp"
 #include "storage.hpp"
 #include "touch.hpp"
@@ -44,6 +45,12 @@ extern "C" void app_main(void) {
     ESP_LOGW(kTag, "climate sensor unavailable (%s); records will log 0s",
              esp_err_to_name(climate_err));
   }
+
+  // Power last — installs the idle watchdog after every other subsystem is
+  // up. Until init() returns, consume_input() is a no-op, so any stray touch
+  // arriving between touch::init and power::init won't try to drive a
+  // half-initialized state machine.
+  ESP_ERROR_CHECK(espressopost::power::init());
 
   espressopost::ui::start_report();
 

@@ -227,4 +227,20 @@ void unlock() {
   if (s_lvgl_mutex != nullptr) xSemaphoreGiveRecursive(s_lvgl_mutex);
 }
 
+esp_err_t set_brightness(uint8_t pct) {
+  if (s_panel == nullptr) return ESP_ERR_INVALID_STATE;
+  if (pct > 100) pct = 100;
+  // Don't call esp_lcd_panel_io_tx_param(io, 0x51, ...) directly — in QSPI
+  // mode the CO5300 driver wraps every command byte with an opcode prefix
+  // (see esp_lcd_co5300_spi.c::tx_param). The public set_brightness goes
+  // through that wrapper; raw tx_param bypasses it and the panel ignores
+  // the write.
+  return esp_lcd_panel_co5300_set_brightness(s_panel, pct);
+}
+
+esp_err_t set_on(bool on) {
+  if (s_panel == nullptr) return ESP_ERR_INVALID_STATE;
+  return esp_lcd_panel_disp_on_off(s_panel, on);
+}
+
 }  // namespace espressopost::display

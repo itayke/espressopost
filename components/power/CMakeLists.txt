@@ -1,16 +1,11 @@
 idf_component_register(
     SRCS
-        "app_main.cpp"
+        "power.cpp"
     INCLUDE_DIRS
-        "."
+        "include"
     REQUIRES
-        climate
         display
-        power
-        presets
-        storage
-        touch
-        ui
+        lvgl__lvgl
         esp_timer
 )
 

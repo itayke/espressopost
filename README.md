@@ -6,16 +6,17 @@ learns a per-preset grind adjustment from local data. Offline-first.
 
 ## Status
 
-**Steps 1 – 4 of 10 — bringup + climate + shot logging + presets.**
-Display + capacitive touch up under LVGL 9 (round 466 × 466,
-2-px-aligned partial redraws), 1 Hz BME280 read loop feeding a P / H / T
-status strip, an NVS-backed preset table (3 defaults seeded on first
-boot, selection persistent across reboots), and a Report screen
-(tappable preset row at top, time-delta stepper + 1–5 stars + Submit)
-that appends a 32-byte `ShotRecord` to LittleFS on every save. No model
-yet (`click_anchor` and `click_delta` are still 0); RTC field is still
-0 (PCF85063 lands in a later step — `esp_timer` ticks order shots in
-the meantime).
+**Steps 1 – 4 + idle policy.** Display + capacitive touch up under LVGL
+9 (round 466 × 466, 2-px-aligned partial redraws), 1 Hz BME280 read loop
+feeding a P / H / T status strip, an NVS-backed preset table (3 defaults
+seeded on first boot, selection persistent across reboots), and a Report
+screen (tappable preset row at top, time-delta stepper + 1–5 stars +
+Submit) that appends a 32-byte `ShotRecord` to LittleFS on every save.
+An idle watchdog dims the AMOLED to 33 % after 30 s and turns the panel
+off after 2 min; any touch wakes it (the wake-tap is swallowed for 500 ms
+so it doesn't accidentally hit a widget). No model yet (`click_anchor`
+and `click_delta` are still 0); RTC field is still 0 (PCF85063 is the
+next planned step — `esp_timer` ticks order shots in the meantime).
 
 The full build order lives in the kickoff brief. Each step ends in a
 runnable device state.
@@ -129,6 +130,11 @@ Exit the monitor with `Ctrl+]`.
    `Saved #N` near the top, and clears the form.
 6. Power-cycling restores the last-selected preset (NVS persists it) and
    shot count carries over (`Saved #2`, `#3`, …).
+7. Leaving the device untouched for 30 s drops brightness to ~33 %;
+   another 90 s and the panel turns off entirely. Touching it
+   anywhere brings it back to full brightness, and the first 500 ms of
+   touch after wake doesn't register as a tap (so you can pick the
+   device up without inadvertently submitting a shot).
 
 If any of these fail, the most likely culprits in order:
 
@@ -160,9 +166,11 @@ If any of these fail, the most likely culprits in order:
 ## What's deliberately NOT here yet
 
 - AXP2101 PMIC driver (board powers up with sensible defaults; we'll
-  add this when we implement sleep/wake).
-- AMOLED burn-in mitigation (dim/sleep policy is still an open decision).
-- PCF85063 RTC, QMI8658 IMU drivers.
+  add this when battery / true light-sleep matters).
+- QMI8658 IMU driver — wake-on-motion is a planned upgrade so the
+  device can also wake by picking it up, not just touching it.
+- PCF85063 RTC — next step; until then `rtc_epoch_s` in every record
+  stays 0 and shots are ordered by `esp_timer` ticks.
 - A Preset editor — names, target time, dose, and the table itself are
   hard-coded defaults until the UI overhaul.
 - The model — every shot logs `click_delta = 0` and `click_anchor = 0`.
@@ -190,9 +198,10 @@ memory notes for design decisions already locked in.
     ├── climate/                BME280 1 Hz sample task on H2 I²C bus
     ├── storage/                LittleFS mount + 32-byte ShotRecord append-log
     ├── presets/                NVS-backed Preset table + tap-to-cycle selection
+    ├── power/                  idle state machine: dim @ 30s, off @ 2min, wake on touch
     └── ui/                     Report screen (preset / delta / stars / Submit)
 ```
 
-Components for `model/`, `grinder/` are intentionally NOT scaffolded
-yet — they'll be added in their respective build-order steps so the
-tree only contains live code.
+Components for `rtc/`, `model/`, `grinder/` are intentionally NOT
+scaffolded yet — they'll be added in their respective build-order steps
+so the tree only contains live code.
