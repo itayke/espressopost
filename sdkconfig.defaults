@@ -33,7 +33,8 @@ CONFIG_COMPILER_CXX_RTTI=n
 CONFIG_FREERTOS_HZ=1000
 
 # --- LVGL fonts ---
-# Only Montserrat 14 is enabled by default. The bringup screen uses 48 pt
-# for the centered grind number; enable it explicitly so the build doesn't
-# fail on the linker.
+# Only Montserrat 14 is enabled by default. 48 pt is the centered time-delta
+# number on the Report screen; 24 pt is the secondary grind-stepper label.
+# Enable both explicitly so the linker can find them.
+CONFIG_LV_FONT_MONTSERRAT_24=y
 CONFIG_LV_FONT_MONTSERRAT_48=y

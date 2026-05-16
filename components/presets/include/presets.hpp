@@ -14,16 +14,24 @@ constexpr uint8_t kNameLen    = 16;   // including NUL terminator
 // One brew preset. Persisted as a packed blob under NVS key `pN` so the
 // on-disk shape matches the in-memory shape — no per-field serialization.
 //
-// `click_anchor` is the model's current grind-setting offset for this preset
-// (signed clicks from baseline). It stays 0 until Step 5 (the model writes it).
+// `version` lets future preset schema changes be detected without a separate
+// catalog header — same trick we use on ShotRecord. v1 (20 B, no version
+// byte, int8 click_anchor) is detected by blob size in presets::init() and
+// transparently rewritten to v2 on first boot.
+//
+// `grind_anchor` is the model's per-preset baseline grind setting, in the
+// same absolute units the user dials on their grinder. Used as a starting
+// hint for new shots (the Report UI pre-populates the grind stepper with
+// this value) and as the prior peak for the Step-5 model.
 struct __attribute__((packed)) Preset {
-  char    name[kNameLen];
+  uint8_t version;          // 2 (current)
   uint8_t target_time_s;
   uint8_t dose_g;
-  int8_t  click_anchor;
-  uint8_t _pad;             // keep the blob a round 20 bytes
+  uint8_t _pad;             // align grind_anchor to a 4-byte offset for readability
+  char    name[kNameLen];
+  float   grind_anchor;
 };
-static_assert(sizeof(Preset) == 20, "Preset NVS blob size must be stable");
+static_assert(sizeof(Preset) == 24, "Preset NVS blob size must be stable");
 
 // Open the NVS namespace, seed the default preset table on first boot, and
 // load the current selection. Safe to call once. Returns ESP_ERR_INVALID_STATE

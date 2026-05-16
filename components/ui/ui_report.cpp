@@ -1,6 +1,7 @@
 #include "ui.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 
 #include "climate.hpp"
@@ -28,6 +29,14 @@ constexpr int8_t kDeltaMin     = -30;
 constexpr int8_t kDeltaMax     =  30;
 constexpr int8_t kDeltaStep    =   1;
 
+// Grind range / resolution. Wide enough to cover most grinders' dials (the
+// number is whatever the user reads off their hopper); 0.1 step matches the
+// finest granularity any common grinder exposes. Clamped to non-negative
+// because nobody dials a negative grind setting.
+constexpr float kGrindMin  =  0.0f;
+constexpr float kGrindMax  = 99.9f;
+constexpr float kGrindStep =  0.1f;
+
 constexpr uint8_t kMaxStars = 5;
 
 // AMOLED-friendly muted palette — pure-black background, no max-intensity
@@ -41,16 +50,28 @@ const lv_color_t kColorDim     = LV_COLOR_MAKE(0x30, 0x30, 0x30);
 lv_obj_t* s_preset_label  = nullptr;
 lv_obj_t* s_climate_label = nullptr;
 lv_obj_t* s_delta_label   = nullptr;
+lv_obj_t* s_grind_label   = nullptr;
 lv_obj_t* s_star_btns[kMaxStars] = {};
 lv_obj_t* s_submit_btn    = nullptr;
 lv_obj_t* s_submit_label  = nullptr;
 lv_obj_t* s_toast_label   = nullptr;
 lv_timer_t* s_toast_timer = nullptr;
 
-// "Has the user touched this field at least once?" — Submit is gated on both.
+// "Has the user touched this field at least once?" — Submit is gated on
+// `s_delta_set` and `s_stars_value > 0`. Grind always has a value (it
+// auto-populates from the active preset's grind_anchor) so it doesn't gate
+// Submit; recording 0 because the anchor is 0 is still meaningful data.
 bool   s_delta_set     = false;
 int8_t s_delta_value   = 0;
 uint8_t s_stars_value  = 0;   // 0 = none picked yet
+float   s_grind_value  = 0.0f;
+
+void refresh_grind_label() {
+  if (s_grind_label == nullptr) return;
+  char buf[24];
+  std::snprintf(buf, sizeof(buf), "grind: %.1f", static_cast<double>(s_grind_value));
+  lv_label_set_text(s_grind_label, buf);
+}
 
 void refresh_preset_label() {
   const auto id = presets::selected_id();
@@ -62,8 +83,13 @@ void refresh_preset_label() {
 }
 
 void on_preset_tap(lv_event_t*) {
-  presets::cycle_selected();
+  const auto new_id = presets::cycle_selected();
+  // Reseed the grind stepper from the new preset's anchor so the next
+  // shot defaults to that preset's known-good setting; the user can still
+  // step away from it before submitting.
+  s_grind_value = presets::get(new_id).grind_anchor;
   refresh_preset_label();
+  refresh_grind_label();
 }
 
 void refresh_delta_label() {
@@ -103,7 +129,12 @@ void reset_form() {
   s_delta_set    = false;
   s_delta_value  = 0;
   s_stars_value  = 0;
+  // Grind resets to the active preset's anchor — most shots will keep the
+  // same grind setting across multiple submits, so this saves the user
+  // stepping back to the same value every time.
+  s_grind_value  = presets::get(presets::selected_id()).grind_anchor;
   refresh_delta_label();
+  refresh_grind_label();
   refresh_stars();
   refresh_submit_enabled();
 }
@@ -135,6 +166,16 @@ void on_delta_plus(lv_event_t*) {
   refresh_submit_enabled();
 }
 
+void on_grind_minus(lv_event_t*) {
+  s_grind_value = std::max(kGrindMin, s_grind_value - kGrindStep);
+  refresh_grind_label();
+}
+
+void on_grind_plus(lv_event_t*) {
+  s_grind_value = std::min(kGrindMax, s_grind_value + kGrindStep);
+  refresh_grind_label();
+}
+
 void on_star_tap(lv_event_t* e) {
   auto* btn = static_cast<lv_obj_t*>(lv_event_get_target(e));
   const auto idx = reinterpret_cast<uintptr_t>(lv_event_get_user_data(e));
@@ -151,12 +192,13 @@ void on_submit(lv_event_t*) {
 
   const climate::Reading r = climate::latest();
   storage::ShotRecord rec = {};
-  rec.preset_id     = presets::selected_id();
-  rec.time_delta_s  = s_delta_value;
-  rec.quality_stars = s_stars_value;
-  rec.click_delta   = 0;                    // stub until the model lands
-  rec.timestamp_us  = esp_timer_get_time();
-  rec.rtc_epoch_s   = rtc::epoch_s();        // 0 if RTC not initialized / not yet set
+  rec.preset_id       = presets::selected_id();
+  rec.time_delta_s    = s_delta_value;
+  rec.quality_stars   = s_stars_value;
+  rec.timestamp_us    = esp_timer_get_time();
+  rec.rtc_epoch_s     = rtc::epoch_s();      // 0 if RTC not initialized / not yet set
+  rec.user_grind      = s_grind_value;
+  rec.suggested_grind = std::nanf("");       // model hasn't emitted a suggestion yet
   if (r.timestamp_us != 0) {
     rec.temp_c       = r.temp_c;
     rec.humidity_pct = r.humidity_pct;
@@ -270,6 +312,35 @@ void start_report() {
   lv_label_set_text(plus_lbl, "+");
   lv_obj_center(plus_lbl);
   lv_obj_add_event_cb(plus, on_delta_plus, LV_EVENT_CLICKED, nullptr);
+
+  // --- Grind stepper: small ±-buttons + inline "grind: X.X" label, slotted
+  //     between the time stepper (ends around y=center-15) and the quality
+  //     caption (starts at y=center+40). 36 px buttons stay tappable on a
+  //     round panel without crowding the time-delta row above it.
+  s_grind_label = lv_label_create(scr);
+  lv_obj_set_style_text_color(s_grind_label, kColorText, LV_PART_MAIN);
+  lv_obj_set_style_text_font(s_grind_label, &lv_font_montserrat_24, LV_PART_MAIN);
+  lv_obj_align(s_grind_label, LV_ALIGN_CENTER, 0, 10);
+  refresh_grind_label();
+
+  const int32_t grind_btn = 36;
+  lv_obj_t* grind_minus = make_round_btn(scr, grind_btn);
+  lv_obj_align(grind_minus, LV_ALIGN_CENTER, -100, 10);
+  lv_obj_t* grind_minus_lbl = lv_label_create(grind_minus);
+  lv_obj_set_style_text_color(grind_minus_lbl, kColorText, LV_PART_MAIN);
+  lv_obj_set_style_text_font(grind_minus_lbl, &lv_font_montserrat_24, LV_PART_MAIN);
+  lv_label_set_text(grind_minus_lbl, "-");
+  lv_obj_center(grind_minus_lbl);
+  lv_obj_add_event_cb(grind_minus, on_grind_minus, LV_EVENT_CLICKED, nullptr);
+
+  lv_obj_t* grind_plus = make_round_btn(scr, grind_btn);
+  lv_obj_align(grind_plus, LV_ALIGN_CENTER, 100, 10);
+  lv_obj_t* grind_plus_lbl = lv_label_create(grind_plus);
+  lv_obj_set_style_text_color(grind_plus_lbl, kColorText, LV_PART_MAIN);
+  lv_obj_set_style_text_font(grind_plus_lbl, &lv_font_montserrat_24, LV_PART_MAIN);
+  lv_label_set_text(grind_plus_lbl, "+");
+  lv_obj_center(grind_plus_lbl);
+  lv_obj_add_event_cb(grind_plus, on_grind_plus, LV_EVENT_CLICKED, nullptr);
 
   // --- Star row: 5 round buttons in a horizontal strip ---
   lv_obj_t* stars_caption = lv_label_create(scr);

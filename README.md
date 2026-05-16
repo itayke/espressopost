@@ -6,22 +6,36 @@ learns a per-preset grind adjustment from local data. Offline-first.
 
 ## Status
 
-**Steps 1 – 4 + idle policy + RTC.** Display + capacitive touch up under
-LVGL 9 (round 466 × 466, 2-px-aligned partial redraws), 1 Hz BME280 read
-loop feeding a P / H / T status strip, an NVS-backed preset table (3
-defaults seeded on first boot, selection persistent across reboots), and
-a Report screen (tappable preset row at top, time-delta stepper + 1–5
-stars + Submit) that appends a 32-byte `ShotRecord` to LittleFS on every
-save. An idle watchdog dims the AMOLED to 33 % after 30 s and turns the
-panel off after 2 min; any touch wakes it (the wake-tap is swallowed for
-500 ms so it doesn't accidentally hit a widget). PCF85063 RTC driven over
-the shared internal I²C bus: on first boot (or after the backup cell
-dies) the chip's OS flag is set and the driver seeds the clock from
-`__DATE__`/`__TIME__` (off by the build machine's TZ, typically <24 h —
-fine as a floor until a real time-set flow lands); subsequent boots read
-the live clock straight off the chip and `ShotRecord.rtc_epoch_s` is a
-real wall-clock value. No model yet (`click_anchor` and `click_delta`
-are still 0).
+**Steps 1 – 4 + idle policy + RTC + grind capture.** Display + capacitive
+touch up under LVGL 9 (round 466 × 466, 2-px-aligned partial redraws),
+1 Hz BME280 read loop feeding a P / H / T status strip, an NVS-backed
+preset table (3 defaults seeded on first boot, selection persistent
+across reboots), and a Report screen (tappable preset row at top,
+time-delta stepper + grind stepper + 1–5 stars + Submit) that appends a
+40-byte v3 `ShotRecord` to LittleFS on every save. The grind stepper
+defaults to the active preset's `grind_anchor` (so off-recipe shots take
+one tap; on-recipe shots take zero), records as an absolute float, and
+the model's eventual recommendation lands as a separate `suggested_grind`
+field next to it. An idle watchdog dims the AMOLED to 33 % after 30 s
+and turns the panel off after 2 min; any touch wakes it (the wake-tap
+is swallowed for 500 ms so it doesn't accidentally hit a widget).
+PCF85063 RTC driven over the shared internal I²C bus: on first boot
+(or after the backup cell dies) the chip's OS flag is set and the
+driver seeds the clock from `__DATE__`/`__TIME__` (off by the build
+machine's TZ, typically <24 h — fine as a floor until a real time-set
+flow lands); subsequent boots read the live clock straight off the chip
+and `ShotRecord.rtc_epoch_s` is a real wall-clock value. No model yet
+(`suggested_grind` is NaN on every shot).
+
+**One-time v2 → v3 migration runs on first boot of this build:** every
+existing v2 shot (32 B, no grind data) gets rewritten to v3 (40 B) with
+`user_grind = 5.2f` and `suggested_grind = NaN`, atomically via a temp
+file + rename so a power loss mid-migration retries on the next boot.
+Preset blobs in NVS get the same treatment — v1 (20 B, int8
+`click_anchor`) is expanded to v2 (24 B, float `grind_anchor = 5.2f`).
+After the first boot logs `storage: migrated N shots from v2 → v3` and
+`presets: migrated preset table v1 → v2`, both migrations become no-ops
+forever.
 
 The full build order lives in the kickoff brief. Each step ends in a
 runnable device state.
@@ -123,17 +137,24 @@ Exit the monitor with `Ctrl+]`.
 
 1. Boot log shows: `display: display + LVGL ready (466x466, 50-line partial buffer)`, `touch: CST9217 touch ready`, `storage: littlefs mounted at /littlefs (...KB used, N shots logged)`, `presets: 3 presets loaded, selected=N ("espresso")`, (if a BME280 is wired) `climate: BME280 ready at 0x76 on I2C1 (SDA=17 SCL=18 @ 400000 Hz)`, and the RTC line — either `rtc: first boot (OS=1) — seeding from build time …` on a virgin chip, or `rtc: PCF85063 already set: 2026-MM-DD HH:MM:SS UTC (epoch …)` on subsequent boots.
 2. Screen shows, top to bottom: a tappable preset row (e.g. `espresso ·
-   target 30s`), the climate strip, a `-` placeholder for time delta, a
-   `-` / `+` stepper around it, five gray quality circles, and a muted
-   **Submit** button (disabled until both fields are set).
+   target 30s`), the climate strip, a `-` placeholder for time delta with
+   a `-` / `+` stepper around it, a `grind: 5.2` row with its own
+   smaller `-` / `+` stepper, five gray quality circles, and a muted
+   **Submit** button (disabled until time delta and stars are set —
+   grind always has a value because it defaults to the preset's anchor).
 3. Tapping the preset row cycles through the seeded presets (`espresso`
-   → `lungo` → `ristretto` → back) and the target seconds update with it.
-4. Tapping `−` / `+` either side of the delta value sets it to a signed
-   seconds reading (range −30 … +30). Tapping a star fills it amber and
-   any star to its left.
-5. Once both delta and stars are set, Submit lights amber. Tapping it
-   appends a 32-byte record to `/littlefs/shots.bin`, briefly shows
-   `Saved #N` near the top, and clears the form.
+   → `lungo` → `ristretto` → back). Target seconds and the grind value
+   both update — each preset carries its own `grind_anchor` (all three
+   ship seeded to 5.2 on first boot or after migration).
+4. Tapping `−` / `+` on the time row sets a signed seconds reading
+   (range −30 … +30). Tapping `−` / `+` on the grind row steps the
+   absolute value by 0.1 (range 0.0 … 99.9). Tapping a star fills it
+   amber and any star to its left.
+5. Once time delta and stars are set, Submit lights amber. Tapping it
+   appends a 40-byte v3 record to `/littlefs/shots.bin` (carrying
+   `user_grind` from the stepper and `suggested_grind = NaN` until the
+   model lands), briefly shows `Saved #N` near the top, and clears the
+   form.
 6. Power-cycling restores the last-selected preset (NVS persists it) and
    shot count carries over (`Saved #2`, `#3`, …).
 7. Leaving the device untouched for 30 s drops brightness to ~33 %;
