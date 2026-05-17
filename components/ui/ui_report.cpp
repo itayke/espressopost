@@ -83,23 +83,31 @@ void refresh_grind_label() {
   lv_label_set_text(s_grind_label, buf);
 }
 
-// Re-evaluate the model for the current preset against the latest climate, cache
-// the result for the submit path, and update the on-screen suggestion line.
-// Confidence 0 → hide the row entirely (rather than show "0%") since the spec
-// uses that value to mean "don't surface anything yet".
+// Re-evaluate the model for the current preset against the latest climate,
+// cache the result for the submit path, and update the on-screen suggestion
+// line. When the model has nothing useful to say (preset has no shots yet,
+// confidence below threshold, β_g near zero, climate not sampled), we keep
+// the row visible with a muted "learning..." placeholder rather than hiding
+// it entirely — silent disappearance reads as a bug to the user, especially
+// after they cycle to an empty preset and the row vanishes without
+// explanation.
 void refresh_suggestion() {
   if (s_suggestion_label == nullptr) return;
   s_current_suggestion = model::suggest_for_preset(presets::selected_id());
-  if (s_current_suggestion.confidence_pct == 0 ||
-      std::isnan(s_current_suggestion.grind)) {
-    lv_obj_add_flag(s_suggestion_label, LV_OBJ_FLAG_HIDDEN);
-    return;
+  const bool have_suggestion =
+      s_current_suggestion.confidence_pct > 0 &&
+      !std::isnan(s_current_suggestion.grind);
+  if (have_suggestion) {
+    char buf[40];
+    std::snprintf(buf, sizeof(buf), "suggested %.1f  \xC2\xB7  %u%%",
+                  static_cast<double>(s_current_suggestion.grind),
+                  static_cast<unsigned>(s_current_suggestion.confidence_pct));
+    lv_label_set_text(s_suggestion_label, buf);
+    lv_obj_set_style_text_color(s_suggestion_label, kColorAccent, LV_PART_MAIN);
+  } else {
+    lv_label_set_text(s_suggestion_label, "learning...");
+    lv_obj_set_style_text_color(s_suggestion_label, kColorMuted, LV_PART_MAIN);
   }
-  char buf[40];
-  std::snprintf(buf, sizeof(buf), "suggested %.1f  \xC2\xB7  %u%%",
-                static_cast<double>(s_current_suggestion.grind),
-                static_cast<unsigned>(s_current_suggestion.confidence_pct));
-  lv_label_set_text(s_suggestion_label, buf);
   lv_obj_remove_flag(s_suggestion_label, LV_OBJ_FLAG_HIDDEN);
 }
 
