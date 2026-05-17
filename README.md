@@ -16,8 +16,8 @@ Submit) that appends a 40-byte v3 `ShotRecord` to LittleFS on every save.
 The grind stepper defaults to the active preset's `grind_anchor` (so
 off-recipe shots take one tap; on-recipe shots take zero), records as an
 absolute float, and the model's recommendation lands as a separate
-`suggested_grind` field next to it. An idle watchdog dims the AMOLED to
-33 % after 30 s and turns the panel off after 2 min; any touch wakes it
+`suggested_grind` field next to it. An idle watchdog dims the AMOLED 
+after 30 s and turns the panel off after 2 min; any touch wakes it
 (the wake-tap is swallowed for 500 ms so it doesn't accidentally hit a
 widget). PCF85063 RTC driven over the shared internal I²C bus: on first
 boot (or after the backup cell dies) the chip's OS flag is set and the
@@ -37,9 +37,10 @@ so the first suggestion points the user the right way, and (c) fade as
 real data accumulates (two real shots already out-vote them). Refits on
 boot and after every submit. The Report screen shows a small
 accent-colored row beneath the grind stepper — `suggested 5.3 · 35%`
-— when the posterior predictive parameter variance maps to ≥ 10 %
-confidence (rounded to nearest 5 %, capped at 95 %); below that the row
-is hidden entirely. The cached suggestion at submit time is what gets
+— when the marginal posterior variance of `β_g` (the grind coefficient
+alone — i.e. "how well do we know the grind→time slope?", independent
+of the current climate query point) maps to ≥ 10 % confidence (rounded
+to nearest 5 %, capped at 95 %); below that the row is hidden entirely. The cached suggestion at submit time is what gets
 stored in `ShotRecord.suggested_grind` (NaN when the row is hidden), so
 each shot records the model state the user actually saw. Quality model,
 cross-preset pooling, and recency-weighted shots from the spec are
@@ -154,6 +155,31 @@ idf.py -p /dev/cu.usbmodem<N> flash monitor
 
 Exit the monitor with `Ctrl+]`.
 
+## Host tests
+
+The model's math (`components/model/model_math.{hpp,cpp}`) is deliberately
+free of ESP-IDF includes so it can compile and run on the dev machine — no
+flash, no device, no IDF environment. That gives us a millisecond-feedback
+loop for tuning priors, weights, and confidence behavior.
+
+```sh
+./tests/host/run.sh                       # build + run all cases
+./tests/host/run.sh "[confidence]"        # filter by tag
+./tests/host/run.sh -s                    # show successful assertions too
+```
+
+The first run will configure CMake under `tests/host/build/` (Ninja);
+subsequent runs only re-link. Requires `cmake` and `ninja` on PATH (same
+prerequisites as the ESP-IDF build).
+
+Tests live in [`tests/host/test_model.cpp`](tests/host/test_model.cpp) and
+use Catch2 v2 (single-header, vendored under
+[`tests/host/third_party/`](tests/host/third_party/) — no install). The
+design rule: if you ever need an IDF include in `model_math.{hpp,cpp}` to
+make a test pass, the test is wrong — push the IDF dependency back into
+`model.cpp` (the wrapper) and have the test build a synthetic input
+instead.
+
 ## What to verify on this build
 
 1. Boot log shows: `display: display + LVGL ready (466x466, 50-line partial buffer)`, `touch: CST9217 touch ready`, `storage: littlefs mounted at /littlefs (...KB used, N shots logged)`, `presets: 3 presets loaded, selected=N ("espresso")`, (if a BME280 is wired) `climate: BME280 ready at 0x76 on I2C1 (SDA=17 SCL=18 @ 400000 Hz)`, the RTC line — either `rtc: first boot (OS=1) — seeding from build time …` on a virgin chip, or `rtc: PCF85063 already set: 2026-MM-DD HH:MM:SS UTC (epoch …)` on subsequent boots — and `model: refit: N records on disk, M presets fit, K shots used in fits`.
@@ -183,7 +209,7 @@ Exit the monitor with `Ctrl+]`.
    cycle / climate tick reflects the new data point.
 6. Power-cycling restores the last-selected preset (NVS persists it) and
    shot count carries over (`Saved #2`, `#3`, …).
-7. Leaving the device untouched for 30 s drops brightness to ~33 %;
+7. Leaving the device untouched for 30 s drops brightness;
    another 90 s and the panel turns off entirely. Touching it
    anywhere brings it back to full brightness, and the first 500 ms of
    touch after wake doesn't register as a tap (so you can pick the
@@ -269,7 +295,18 @@ memory notes for design decisions already locked in.
     ├── rtc/                    PCF85063 driver: build-time seed + epoch_s() for ShotRecord
     ├── power/                  idle state machine: dim @ 30s, off @ 2min, wake on touch
     ├── model/                  per-preset Bayesian time model + suggested grind + confidence
+    │   ├── include/model.hpp      IDF-bound API (init/refit/suggest_for_preset)
+    │   ├── include/model_math.hpp pure math API (FitSample, fit, suggest, Suggestion)
+    │   ├── model.cpp              IDF glue: mutex, storage, climate, logging
+    │   └── model_math.cpp         pure math: standardization, ridge prior, Σ
     └── ui/                     Report screen (preset / delta / grind / suggestion / stars / Submit)
+
+tests/
+└── host/                          host-side unit tests for model_math (no IDF)
+    ├── CMakeLists.txt             vanilla CMake, system compiler
+    ├── run.sh                     configure + build + run one-liner
+    ├── test_model.cpp             Catch2 cases
+    └── third_party/catch.hpp      vendored Catch2 v2 single header
 ```
 
 The `grinder/` component is intentionally NOT scaffolded yet — it'll

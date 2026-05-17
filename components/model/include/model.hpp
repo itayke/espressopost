@@ -3,25 +3,19 @@
 #include <cstdint>
 
 #include "esp_err.h"
+#include "model_math.hpp"  // pulls in Suggestion + the rest of the pure-math types
 
 namespace espressopost::model {
 
-// What we hand back to the UI / submit path.
+// IDF-bound API. The pure math (fit + suggest, defined in model_math.hpp) is
+// what the host unit tests under tests/host/ exercise; the wrapper below adds:
+//   - thread-safe singleton state (one PresetFit per preset, mutex-guarded)
+//   - reading shots out of LittleFS via storage::read_shots
+//   - fetching live climate via climate::latest()
+//   - boot/refit logging via esp_log
 //
-// `grind`              — absolute grind setting the model recommends to land
-//                        time_delta=0 at the current climate; NaN when the
-//                        preset doesn't have enough useful data yet.
-// `confidence_pct`     — 0..100 in 5-unit steps. 0 means "do not display" —
-//                        the caller should suppress the suggestion entirely
-//                        (either fall back to UI placeholder or hide the row).
-//                        The mapping is heuristic on top of the Bayesian
-//                        posterior predictive variance; calibration is fine
-//                        for v1 since the indicator is meant to be directional
-//                        ("the model is starting to learn") not probabilistic.
-struct Suggestion {
-  float   grind;
-  uint8_t confidence_pct;
-};
+// `Suggestion` itself is defined in model_math.hpp so it can be used from
+// both worlds with one definition.
 
 // Build the per-preset fits from whatever's currently in the shot log. Safe to
 // call once at boot, after storage::init() and presets::init() have returned.
