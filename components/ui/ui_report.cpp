@@ -9,6 +9,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "lvgl.h"
+#include "model.hpp"
 #include "presets.hpp"
 #include "rtc.hpp"
 #include "storage.hpp"
@@ -47,15 +48,24 @@ const lv_color_t kColorText    = LV_COLOR_MAKE(0xE0, 0xE0, 0xE0);
 const lv_color_t kColorMuted   = LV_COLOR_MAKE(0x70, 0x70, 0x70);
 const lv_color_t kColorDim     = LV_COLOR_MAKE(0x30, 0x30, 0x30);
 
-lv_obj_t* s_preset_label  = nullptr;
-lv_obj_t* s_climate_label = nullptr;
-lv_obj_t* s_delta_label   = nullptr;
-lv_obj_t* s_grind_label   = nullptr;
+lv_obj_t* s_preset_label     = nullptr;
+lv_obj_t* s_climate_label    = nullptr;
+lv_obj_t* s_delta_label      = nullptr;
+lv_obj_t* s_grind_label      = nullptr;
+lv_obj_t* s_suggestion_label = nullptr;
 lv_obj_t* s_star_btns[kMaxStars] = {};
 lv_obj_t* s_submit_btn    = nullptr;
 lv_obj_t* s_submit_label  = nullptr;
 lv_obj_t* s_toast_label   = nullptr;
 lv_timer_t* s_toast_timer = nullptr;
+
+// Cached model output for the currently selected preset. Updated by
+// refresh_suggestion() — which runs on every preset cycle and on the climate
+// strip's 1 Hz tick. We snapshot it at submit time so the value stored in
+// ShotRecord.suggested_grind matches what the user actually saw on screen at
+// the moment they pressed Submit (rather than re-running the model after the
+// fact and risking a divergent value).
+model::Suggestion s_current_suggestion = {std::nanf(""), 0};
 
 // "Has the user touched this field at least once?" — Submit is gated on
 // `s_delta_set` and `s_stars_value > 0`. Grind always has a value (it
@@ -71,6 +81,26 @@ void refresh_grind_label() {
   char buf[24];
   std::snprintf(buf, sizeof(buf), "grind: %.1f", static_cast<double>(s_grind_value));
   lv_label_set_text(s_grind_label, buf);
+}
+
+// Re-evaluate the model for the current preset against the latest climate, cache
+// the result for the submit path, and update the on-screen suggestion line.
+// Confidence 0 → hide the row entirely (rather than show "0%") since the spec
+// uses that value to mean "don't surface anything yet".
+void refresh_suggestion() {
+  if (s_suggestion_label == nullptr) return;
+  s_current_suggestion = model::suggest_for_preset(presets::selected_id());
+  if (s_current_suggestion.confidence_pct == 0 ||
+      std::isnan(s_current_suggestion.grind)) {
+    lv_obj_add_flag(s_suggestion_label, LV_OBJ_FLAG_HIDDEN);
+    return;
+  }
+  char buf[40];
+  std::snprintf(buf, sizeof(buf), "suggested %.1f  \xC2\xB7  %u%%",
+                static_cast<double>(s_current_suggestion.grind),
+                static_cast<unsigned>(s_current_suggestion.confidence_pct));
+  lv_label_set_text(s_suggestion_label, buf);
+  lv_obj_remove_flag(s_suggestion_label, LV_OBJ_FLAG_HIDDEN);
 }
 
 void refresh_preset_label() {
@@ -90,6 +120,8 @@ void on_preset_tap(lv_event_t*) {
   s_grind_value = presets::get(new_id).grind_anchor;
   refresh_preset_label();
   refresh_grind_label();
+  // Each preset has its own model; cycle invalidates the previous suggestion.
+  refresh_suggestion();
 }
 
 void refresh_delta_label() {
@@ -198,7 +230,14 @@ void on_submit(lv_event_t*) {
   rec.timestamp_us    = esp_timer_get_time();
   rec.rtc_epoch_s     = rtc::epoch_s();      // 0 if RTC not initialized / not yet set
   rec.user_grind      = s_grind_value;
-  rec.suggested_grind = std::nanf("");       // model hasn't emitted a suggestion yet
+  // Snapshot the suggestion the user saw on screen at submit time. NaN when
+  // confidence was 0 (suppressed row) — matches the "no useful guidance" state
+  // and lets future analyses tell apart "model said nothing" from "model said
+  // exactly N". Refitting happens AFTER the append so this record reflects
+  // the model state at decision time, not after this new data point lands.
+  rec.suggested_grind = (s_current_suggestion.confidence_pct == 0)
+                            ? std::nanf("")
+                            : s_current_suggestion.grind;
   if (r.timestamp_us != 0) {
     rec.temp_c       = r.temp_c;
     rec.humidity_pct = r.humidity_pct;
@@ -216,6 +255,12 @@ void on_submit(lv_event_t*) {
   std::snprintf(buf, sizeof(buf), "Saved #%u", static_cast<unsigned>(storage::shot_count()));
   show_toast(buf);
   reset_form();
+  // New data point — refit and refresh so the next preset cycle / climate
+  // tick reflects what we just learned. Cheap on our data volumes; doing it
+  // inline keeps the UI deterministic ("save → see updated suggestion") vs
+  // deferring to a background task.
+  model::refit();
+  refresh_suggestion();
 }
 
 void update_climate_strip(lv_timer_t*) {
@@ -230,6 +275,11 @@ void update_climate_strip(lv_timer_t*) {
   std::snprintf(buf, sizeof(buf), "P %.2finHg  H %.0f%%  T %.1f\xC2\xB0""F",
                 p_inhg, r.humidity_pct, t_f);
   lv_label_set_text(s_climate_label, buf);
+  // Re-run the suggestion on the climate cadence — model output depends on
+  // T/H/P and the user expects the displayed number to track ambient changes
+  // without them having to cycle the preset. Cost is tiny (one 4x4 solve at
+  // 1 Hz) compared to the climate read itself.
+  refresh_suggestion();
 }
 
 lv_obj_t* make_round_btn(lv_obj_t* parent, int32_t size) {
@@ -342,12 +392,25 @@ void start_report() {
   lv_obj_center(grind_plus_lbl);
   lv_obj_add_event_cb(grind_plus, on_grind_plus, LV_EVENT_CLICKED, nullptr);
 
-  // --- Star row: 5 round buttons in a horizontal strip ---
+  // --- Model suggestion: small muted line sandwiched between the grind row
+  //     and the quality caption. Hidden by default (refresh_suggestion will
+  //     toggle visibility based on confidence). Accent color so users notice
+  //     when it appears, but tiny so it never competes with the primary
+  //     input controls.
+  s_suggestion_label = lv_label_create(scr);
+  lv_obj_set_style_text_color(s_suggestion_label, kColorAccent, LV_PART_MAIN);
+  lv_obj_set_style_text_font(s_suggestion_label, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_align(s_suggestion_label, LV_ALIGN_CENTER, 0, 32);
+  lv_obj_add_flag(s_suggestion_label, LV_OBJ_FLAG_HIDDEN);
+
+  // --- Star row: 5 round buttons in a horizontal strip. Caption and buttons
+  //     bumped 18 px south of their original positions to make room for the
+  //     model's suggestion line above (slotted between grind row and stars).
   lv_obj_t* stars_caption = lv_label_create(scr);
   lv_obj_set_style_text_color(stars_caption, kColorMuted, LV_PART_MAIN);
   lv_obj_set_style_text_font(stars_caption, &lv_font_montserrat_14, LV_PART_MAIN);
   lv_label_set_text(stars_caption, "quality");
-  lv_obj_align(stars_caption, LV_ALIGN_CENTER, 0, 40);
+  lv_obj_align(stars_caption, LV_ALIGN_CENTER, 0, 58);
 
   const int32_t star_size = 44;
   const int32_t star_gap  = 12;
@@ -355,7 +418,7 @@ void start_report() {
   const int32_t row_x0    = kCenter - row_width / 2;
   for (uint8_t i = 0; i < kMaxStars; ++i) {
     lv_obj_t* b = make_round_btn(scr, star_size);
-    lv_obj_set_pos(b, row_x0 + i * (star_size + star_gap), kCenter + 70);
+    lv_obj_set_pos(b, row_x0 + i * (star_size + star_gap), kCenter + 88);
     lv_obj_add_event_cb(b, on_star_tap, LV_EVENT_CLICKED,
                         reinterpret_cast<void*>(static_cast<uintptr_t>(i)));
     s_star_btns[i] = b;
@@ -382,6 +445,10 @@ void start_report() {
   lv_obj_add_flag(s_toast_label, LV_OBJ_FLAG_HIDDEN);
 
   reset_form();
+  // First paint of the suggestion line. If climate hasn't sampled yet or the
+  // model can't speak for this preset, the row stays hidden — the 1 Hz
+  // climate timer will reveal it as soon as data arrives.
+  refresh_suggestion();
 
   display::unlock();
 }

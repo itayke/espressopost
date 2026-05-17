@@ -8,6 +8,7 @@
 
 #include "climate.hpp"
 #include "display.hpp"
+#include "model.hpp"
 #include "power.hpp"
 #include "presets.hpp"
 #include "rtc.hpp"
@@ -54,6 +55,15 @@ extern "C" void app_main(void) {
   if (rtc_err != ESP_OK) {
     ESP_LOGW(kTag, "rtc unavailable (%s); shots will log rtc_epoch_s=0",
              esp_err_to_name(rtc_err));
+  }
+
+  // Model after storage + presets + climate so its first refit sees the live
+  // shot log and can ask climate::latest() during the very next suggest call.
+  // Non-fatal: on failure the UI just won't surface a "suggested" row.
+  const esp_err_t model_err = espressopost::model::init();
+  if (model_err != ESP_OK) {
+    ESP_LOGW(kTag, "model unavailable (%s); suggestion row will stay hidden",
+             esp_err_to_name(model_err));
   }
 
   // Power last — installs the idle watchdog after every other subsystem is

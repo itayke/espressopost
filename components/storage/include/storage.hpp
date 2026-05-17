@@ -65,4 +65,11 @@ esp_err_t append_shot(const ShotRecord& record);
 // divides by sizeof(ShotRecord). Used by the UI to display "Saved #N".
 uint32_t shot_count();
 
+// Bulk-load every record in the log into `out`. Returns the number of records
+// actually read; never exceeds `max`. Records arrive in the order they were
+// appended (chronological by submit time). Used by the model (Step 5) to fit
+// from history — at expected shot counts (tens to hundreds) reading the whole
+// file is cheap and keeps the model agnostic of incremental update logic.
+size_t read_shots(ShotRecord* out, size_t max);
+
 }  // namespace espressopost::storage

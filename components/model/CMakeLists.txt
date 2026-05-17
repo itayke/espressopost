@@ -1,18 +1,12 @@
 idf_component_register(
     SRCS
-        "app_main.cpp"
+        "model.cpp"
     INCLUDE_DIRS
-        "."
+        "include"
     REQUIRES
         climate
-        display
-        model
-        power
         presets
-        rtc
         storage
-        touch
-        ui
         esp_timer
 )
 

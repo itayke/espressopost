@@ -7,6 +7,7 @@ idf_component_register(
         lvgl__lvgl
         display
         climate
+        model
         presets
         rtc
         storage

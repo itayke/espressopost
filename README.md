@@ -6,26 +6,47 @@ learns a per-preset grind adjustment from local data. Offline-first.
 
 ## Status
 
-**Steps 1 – 4 + idle policy + RTC + grind capture.** Display + capacitive
-touch up under LVGL 9 (round 466 × 466, 2-px-aligned partial redraws),
-1 Hz BME280 read loop feeding a P / H / T status strip, an NVS-backed
-preset table (3 defaults seeded on first boot, selection persistent
-across reboots), and a Report screen (tappable preset row at top,
-time-delta stepper + grind stepper + 1–5 stars + Submit) that appends a
-40-byte v3 `ShotRecord` to LittleFS on every save. The grind stepper
-defaults to the active preset's `grind_anchor` (so off-recipe shots take
-one tap; on-recipe shots take zero), records as an absolute float, and
-the model's eventual recommendation lands as a separate `suggested_grind`
-field next to it. An idle watchdog dims the AMOLED to 33 % after 30 s
-and turns the panel off after 2 min; any touch wakes it (the wake-tap
-is swallowed for 500 ms so it doesn't accidentally hit a widget).
-PCF85063 RTC driven over the shared internal I²C bus: on first boot
-(or after the backup cell dies) the chip's OS flag is set and the
+**Steps 1 – 5 (model v1) + idle policy + RTC + grind capture.** Display +
+capacitive touch up under LVGL 9 (round 466 × 466, 2-px-aligned partial
+redraws), 1 Hz BME280 read loop feeding a P / H / T status strip, an
+NVS-backed preset table (3 defaults seeded on first boot, selection
+persistent across reboots), and a Report screen (tappable preset row at
+top, time-delta stepper + grind stepper + suggestion row + 1–5 stars +
+Submit) that appends a 40-byte v3 `ShotRecord` to LittleFS on every save.
+The grind stepper defaults to the active preset's `grind_anchor` (so
+off-recipe shots take one tap; on-recipe shots take zero), records as an
+absolute float, and the model's recommendation lands as a separate
+`suggested_grind` field next to it. An idle watchdog dims the AMOLED to
+33 % after 30 s and turns the panel off after 2 min; any touch wakes it
+(the wake-tap is swallowed for 500 ms so it doesn't accidentally hit a
+widget). PCF85063 RTC driven over the shared internal I²C bus: on first
+boot (or after the backup cell dies) the chip's OS flag is set and the
 driver seeds the clock from `__DATE__`/`__TIME__` (off by the build
 machine's TZ, typically <24 h — fine as a floor until a real time-set
 flow lands); subsequent boots read the live clock straight off the chip
-and `ShotRecord.rtc_epoch_s` is a real wall-clock value. No model yet
-(`suggested_grind` is NaN on every shot).
+and `ShotRecord.rtc_epoch_s` is a real wall-clock value.
+
+**Model v1 (time model only):** per-preset Bayesian linear regression
+on `time_delta_s ~ grind + T + H + P` with a unit-variance Gaussian
+ridge prior (effective ≈ 3 shots per coefficient). Two synthetic
+"phantom" shots — `{grind=5, time=+10s}` and `{grind=6, time=-10s}`,
+weight 0.5 each — get folded into every fit. They (a) inject grind
+variance so `std_g` never sits at the floor while real shots cluster at
+one dial setting, (b) seed `β_g` with the right sign (finer→longer)
+so the first suggestion points the user the right way, and (c) fade as
+real data accumulates (two real shots already out-vote them). Refits on
+boot and after every submit. The Report screen shows a small
+accent-colored row beneath the grind stepper — `suggested 5.3 · 35%`
+— when the posterior predictive parameter variance maps to ≥ 10 %
+confidence (rounded to nearest 5 %, capped at 95 %); below that the row
+is hidden entirely. The cached suggestion at submit time is what gets
+stored in `ShotRecord.suggested_grind` (NaN when the row is hidden), so
+each shot records the model state the user actually saw. Quality model,
+cross-preset pooling, and recency-weighted shots from the spec are
+deferred — the time-only model gets us a useful directional indicator
+while data accumulates, and recency weighting was dropped in v1 because
+we have no signal yet that bean-age / grinder drift matters enough to
+justify guessing a half-life.
 
 **One-time v2 → v3 migration runs on first boot of this build:** every
 existing v2 shot (32 B, no grind data) gets rewritten to v3 (40 B) with
@@ -135,13 +156,16 @@ Exit the monitor with `Ctrl+]`.
 
 ## What to verify on this build
 
-1. Boot log shows: `display: display + LVGL ready (466x466, 50-line partial buffer)`, `touch: CST9217 touch ready`, `storage: littlefs mounted at /littlefs (...KB used, N shots logged)`, `presets: 3 presets loaded, selected=N ("espresso")`, (if a BME280 is wired) `climate: BME280 ready at 0x76 on I2C1 (SDA=17 SCL=18 @ 400000 Hz)`, and the RTC line — either `rtc: first boot (OS=1) — seeding from build time …` on a virgin chip, or `rtc: PCF85063 already set: 2026-MM-DD HH:MM:SS UTC (epoch …)` on subsequent boots.
+1. Boot log shows: `display: display + LVGL ready (466x466, 50-line partial buffer)`, `touch: CST9217 touch ready`, `storage: littlefs mounted at /littlefs (...KB used, N shots logged)`, `presets: 3 presets loaded, selected=N ("espresso")`, (if a BME280 is wired) `climate: BME280 ready at 0x76 on I2C1 (SDA=17 SCL=18 @ 400000 Hz)`, the RTC line — either `rtc: first boot (OS=1) — seeding from build time …` on a virgin chip, or `rtc: PCF85063 already set: 2026-MM-DD HH:MM:SS UTC (epoch …)` on subsequent boots — and `model: refit: N records on disk, M presets fit, K shots used in fits`.
 2. Screen shows, top to bottom: a tappable preset row (e.g. `espresso ·
    target 30s`), the climate strip, a `-` placeholder for time delta with
    a `-` / `+` stepper around it, a `grind: 5.2` row with its own
-   smaller `-` / `+` stepper, five gray quality circles, and a muted
-   **Submit** button (disabled until time delta and stars are set —
-   grind always has a value because it defaults to the preset's anchor).
+   smaller `-` / `+` stepper, optionally a small amber
+   `suggested 5.3 · 35%` line below it (only when the model has enough
+   data and a non-zero confidence), five gray quality circles, and a
+   muted **Submit** button (disabled until time delta and stars are
+   set — grind always has a value because it defaults to the preset's
+   anchor).
 3. Tapping the preset row cycles through the seeded presets (`espresso`
    → `lungo` → `ristretto` → back). Target seconds and the grind value
    both update — each preset carries its own `grind_anchor` (all three
@@ -152,9 +176,11 @@ Exit the monitor with `Ctrl+]`.
    amber and any star to its left.
 5. Once time delta and stars are set, Submit lights amber. Tapping it
    appends a 40-byte v3 record to `/littlefs/shots.bin` (carrying
-   `user_grind` from the stepper and `suggested_grind = NaN` until the
-   model lands), briefly shows `Saved #N` near the top, and clears the
-   form.
+   `user_grind` from the stepper and `suggested_grind` from whatever the
+   suggestion line was showing at submit time — NaN when it was
+   hidden), briefly shows `Saved #N` near the top, and clears the form.
+   The model refits immediately after the append, so the next preset
+   cycle / climate tick reflects the new data point.
 6. Power-cycling restores the last-selected preset (NVS persists it) and
    shot count carries over (`Saved #2`, `#3`, …).
 7. Leaving the device untouched for 30 s drops brightness to ~33 %;
@@ -162,6 +188,15 @@ Exit the monitor with `Ctrl+]`.
    anywhere brings it back to full brightness, and the first 500 ms of
    touch after wake doesn't register as a tap (so you can pick the
    device up without inadvertently submitting a shot).
+8. The `suggested` line should appear on the very first usable shot
+   thanks to the phantom prior (synthetic shots at `grind=5, +10s` and
+   `grind=6, -10s` injected into every fit). Expect the displayed
+   confidence to be low (10–20 %) until you've logged real shots that
+   either confirm or pull against the prior; the percentage climbs as
+   real data accumulates. The convention encoded in the phantoms is
+   "lower grind number = finer = longer shot" — if your grinder runs
+   the opposite direction, flip the `time_delta_s` signs on
+   `kPriorShots[]` in [`components/model/model.cpp`](components/model/model.cpp).
 
 If any of these fail, the most likely culprits in order:
 
@@ -202,7 +237,11 @@ If any of these fail, the most likely culprits in order:
   serial command, or a hidden UI gesture will eventually replace it.
 - A Preset editor — names, target time, dose, and the table itself are
   hard-coded defaults until the UI overhaul.
-- The model — every shot logs `click_delta = 0` and `click_anchor = 0`.
+- The model's full spec — v1 ships a time-only Bayesian regression
+  fitted per preset. The quality model (peak-quality grind via
+  `α + β·grind + γ·grind² + climate + interactions`) and cross-preset
+  pooling of climate slopes are deferred until the per-preset model is
+  observed to overfit / underfit on real data.
 - The idle screen (Report is the only screen for now) and any
   read-back / history UI.
 
@@ -217,7 +256,7 @@ memory notes for design decisions already locked in.
 ├── partitions.csv              custom: nvs + factory (4 MB) + littlefs (~12 MB)
 ├── sdkconfig.defaults          PSRAM, flash, partition table, FreeRTOS tick
 ├── main/
-│   ├── app_main.cpp            display → touch → storage → presets → climate → rtc → power → ui
+│   ├── app_main.cpp            display → touch → storage → presets → climate → rtc → model → power → ui
 │   ├── board_pins.hpp          verbatim from Waveshare's reference repo
 │   ├── idf_component.yml       managed deps: lvgl, CO5300, CST9217, littlefs
 │   └── CMakeLists.txt
@@ -225,13 +264,13 @@ memory notes for design decisions already locked in.
     ├── display/                CO5300 QSPI + LVGL display binding + LVGL task
     ├── touch/                  CST9217 I²C + LVGL pointer indev
     ├── climate/                BME280 1 Hz sample task on H2 I²C bus
-    ├── storage/                LittleFS mount + 32-byte ShotRecord append-log
+    ├── storage/                LittleFS mount + 40-byte ShotRecord append-log
     ├── presets/                NVS-backed Preset table + tap-to-cycle selection
     ├── rtc/                    PCF85063 driver: build-time seed + epoch_s() for ShotRecord
     ├── power/                  idle state machine: dim @ 30s, off @ 2min, wake on touch
-    └── ui/                     Report screen (preset / delta / stars / Submit)
+    ├── model/                  per-preset Bayesian time model + suggested grind + confidence
+    └── ui/                     Report screen (preset / delta / grind / suggestion / stars / Submit)
 ```
 
-Components for `model/`, `grinder/` are intentionally NOT scaffolded yet
-— they'll be added in their respective build-order steps so the tree
-only contains live code.
+The `grinder/` component is intentionally NOT scaffolded yet — it'll
+be added in its build-order step so the tree only contains live code.

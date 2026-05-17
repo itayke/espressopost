@@ -263,4 +263,19 @@ uint32_t shot_count() {
   return static_cast<uint32_t>(st.st_size / sizeof(ShotRecord));
 }
 
+size_t read_shots(ShotRecord* out, size_t max) {
+  if (!s_mounted || out == nullptr || max == 0) return 0;
+
+  Guard g;
+  if (!g.ok) return 0;
+
+  FILE* f = std::fopen(kShotsPath, "rb");
+  if (!f) return 0;  // no shots yet — not an error
+
+  size_t n = 0;
+  while (n < max && std::fread(&out[n], sizeof(ShotRecord), 1, f) == 1) ++n;
+  std::fclose(f);
+  return n;
+}
+
 }  // namespace espressopost::storage
