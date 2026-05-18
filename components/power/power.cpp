@@ -12,7 +12,7 @@ constexpr const char* kTag = "power";
 
 // Policy knobs. See header comment for the full state machine.
 constexpr uint8_t kBrightnessActive = 100;
-constexpr uint8_t kBrightnessDimmed = 33;
+constexpr uint8_t kBrightnessDimmed = 25;
 constexpr int64_t kIdleToDimUs    =  30LL * 1000LL * 1000LL;
 constexpr int64_t kIdleToOffUs    = 120LL * 1000LL * 1000LL;
 constexpr int64_t kWakeDebounceUs = 500LL * 1000LL;
