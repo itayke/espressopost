@@ -382,13 +382,18 @@ TEST_CASE("real-data: target that exactly matches mean_y returns the centroid gr
 
 TEST_CASE("real-data: combined confidence differentiates extrapolation distance",
           "[real-data][combined-conf]") {
-  // The 6-shot fixture (before the corrective hot shot) at T=25.5°C produced
-  // a 70% confidence in a 4.x suggestion — same number as the 7-shot fixture
-  // at T=26.57°C with a sensible 5.x suggestion. Combined confidence should
-  // discriminate: the 7-shot fit's β_T near zero AND a slightly closer T_z
-  // both reduce the extrapolation penalty (the 7-shot's penalty is smaller),
-  // and the user-facing number should be higher when the model is more
-  // honest about what it knows.
+  // Two scenarios that the previous (Σ[0,0]-only) confidence number couldn't
+  // tell apart — both read 70%. The combined formula penalizes them
+  // differently:
+  //   - past: 6-shot fit at hot climate → suggestion 4.x (outside the
+  //     trained grind range) → BOTH climate-extrap AND grind-extrap factors
+  //     fire → confidence drops dramatically.
+  //   - current: 7-shot fit at slightly hot climate → suggestion 5.x
+  //     (inside the trained grind range) → only the climate factor fires,
+  //     so confidence is moderate-but-not-bad.
+  // The displayed number should rank these honestly: past < current, and
+  // current should still be below the no-penalty cap (something is being
+  // extrapolated, even if only climate).
   PresetFit f6 = fit(kRealShots, 6);  // pre-shot-6 fit
   PresetFit f7 = fit(kRealShots, 7);  // current fit
 
@@ -396,14 +401,15 @@ TEST_CASE("real-data: combined confidence differentiates extrapolation distance"
   const Suggestion current = suggest(f7, {26.57f, 50.54f, 1006.41f});
   INFO("past=" << past.grind << "@" << int(past.confidence_pct) << "%"
        << "  current=" << current.grind << "@" << int(current.confidence_pct) << "%");
-  // Both should still surface a suggestion (average can't zero out a known
-  // slope just because extrapolation is bad).
+  // Both surface a suggestion (averaging can't zero one factor's bad news).
   REQUIRE(past.confidence_pct > 0);
   REQUIRE(current.confidence_pct > 0);
-  // Both are extrapolating, so both should be below the slope-only baseline
-  // (would have been 70% with the previous Σ[0,0]-only formula).
-  REQUIRE(past.confidence_pct < 70);
-  REQUIRE(current.confidence_pct < 70);
+  // Past is double-penalized (climate AND grind extrapolation) → far below
+  // the cap. Current only has climate-extrap firing → moderate.
+  REQUIRE(past.confidence_pct < 50);
+  REQUIRE(current.confidence_pct < 95);
+  // The differentiator — past < current — is the actual point of this test.
+  REQUIRE(past.confidence_pct < current.confidence_pct);
 }
 
 TEST_CASE("real-data: in-range climate query gets higher confidence than extrapolation",
@@ -420,6 +426,46 @@ TEST_CASE("real-data: in-range climate query gets higher confidence than extrapo
   INFO("centroid="  << at_centroid.grind    << "@" << int(at_centroid.confidence_pct)    << "%");
   INFO("extrapol.=" << at_extrapolate.grind << "@" << int(at_extrapolate.confidence_pct) << "%");
   REQUIRE(at_centroid.confidence_pct > at_extrapolate.confidence_pct);
+}
+
+// 8-shot fixture (2026-05-18 evening). Adds shot 7 — T=27.48, grind=5.10,
+// ran -8s. User reported live state at T=27.55 → suggestion=4.80 @ 60%, and
+// flagged the confidence as feeling too high for an apparent extrapolation.
+namespace {
+constexpr FitSample kRealShots8[] = {
+    {5.20f, 21.10f, 44.86f,  999.61f,  0.0f},
+    {5.20f, 22.53f, 46.47f,  999.53f,  1.0f},
+    {5.20f, 19.18f, 58.69f, 1005.89f,  4.0f},
+    {5.20f, 23.20f, 44.18f, 1000.63f, -2.0f},
+    {5.20f, 22.95f, 53.68f, 1003.41f, -8.0f},
+    {5.10f, 23.20f, 51.98f, 1008.58f, -6.0f},
+    {5.00f, 25.92f, 50.88f, 1006.91f,  8.0f},
+    {5.10f, 27.48f, 49.05f, 1005.43f, -8.0f},  // ← newest
+};
+constexpr size_t kRealN8 = sizeof(kRealShots8) / sizeof(kRealShots8[0]);
+constexpr ClimateInput kLiveClimate8 = {27.55f, 49.33f, 1005.37f};
+}  // namespace
+
+TEST_CASE("real-data 8-shot: grind-extrap factor brings confidence in line",
+          "[real-data][combined-conf]") {
+  // 2026-05-18 evening: device reported grind=4.80 @ 60% at T=27.55. The
+  // suggestion was leaving the real-grind range [5.00, 5.20] entirely — i.e.
+  // extrapolating in two dimensions (climate AND grind). The grind-extrap
+  // factor exists to surface exactly this case. With it in the mix the
+  // displayed confidence should drop into the "low" tag (<30) territory or
+  // close to it — a much more honest read of the situation.
+  PresetFit f = fit(kRealShots8, kRealN8);
+  REQUIRE(f.valid);
+
+  Suggestion s = suggest(f, kLiveClimate8);
+  INFO("mean_g_real=" << f.mean_g_real << " std_g_real=" << f.std_g_real);
+  INFO("suggested grind=" << s.grind
+       << "  grind z=" << std::fabs((s.grind - f.mean_g_real) / f.std_g_real));
+  INFO("Σ[0,0]=" << f.sigma[0]
+       << "  T_z=" << (kLiveClimate8.temp_c - f.mean_T) / f.std_T);
+  INFO("confidence=" << int(s.confidence_pct));
+  // Was 60% pre-fix; should now read materially lower.
+  REQUIRE(s.confidence_pct <= 45);
 }
 
 TEST_CASE("real-data: target = recent-shots quality-weighted mean (last 3)",

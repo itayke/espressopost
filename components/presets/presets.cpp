@@ -58,6 +58,16 @@ void preset_key(uint8_t i, char out[4]) {
   out[3] = '\0';
 }
 
+// Last-grind keys live in the same namespace under `gN`. Stored as a u32 bit
+// pattern of the float so we can round-trip through nvs_get_u32 — NVS lacks
+// a native float type, and u32 is cheaper than a 4-byte blob.
+void grind_key(uint8_t i, char out[4]) {
+  out[0] = 'g';
+  out[1] = static_cast<char>('0' + i);
+  out[2] = '\0';
+  out[3] = '\0';
+}
+
 esp_err_t seed_defaults(nvs_handle_t h) {
   s_count = kDefaultCount;
   for (uint8_t i = 0; i < kDefaultCount; ++i) {
@@ -212,6 +222,35 @@ uint8_t cycle_selected() {
     nvs_close(h);
   }
   return s_selected;
+}
+
+float last_grind(uint8_t id) {
+  if (id >= s_count) return 0.0f;
+  const float fallback = s_table[id].grind_anchor;
+  nvs_handle_t h;
+  if (nvs_open(kNamespace, NVS_READONLY, &h) != ESP_OK) return fallback;
+  char key[4];
+  grind_key(id, key);
+  uint32_t bits = 0;
+  const esp_err_t err = nvs_get_u32(h, key, &bits);
+  nvs_close(h);
+  if (err != ESP_OK) return fallback;
+  float v;
+  std::memcpy(&v, &bits, sizeof(v));
+  return v;
+}
+
+void set_last_grind(uint8_t id, float v) {
+  if (id >= s_count) return;
+  nvs_handle_t h;
+  if (nvs_open(kNamespace, NVS_READWRITE, &h) != ESP_OK) return;
+  char key[4];
+  grind_key(id, key);
+  uint32_t bits;
+  std::memcpy(&bits, &v, sizeof(bits));
+  nvs_set_u32(h, key, bits);
+  nvs_commit(h);
+  nvs_close(h);
 }
 
 }  // namespace espressopost::presets

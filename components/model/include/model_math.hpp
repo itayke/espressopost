@@ -56,7 +56,13 @@ struct Suggestion {
 //                  always present internally; they don't count here).
 // `mean_*, std_*`  per-feature standardization parameters captured at fit
 //                  time. suggest() needs them to map live climate into the
-//                  same standardized space β lives in.
+//                  same standardized space β lives in. These include the
+//                  synthetic phantom shots — used for the fit math.
+// `mean_g_real`,   real-shots-only grind centroid and spread, floored at
+// `std_g_real`     kGrindStdFloor. Used by suggest() to score how far the
+//                  recommended grind is from anything the user has actually
+//                  pulled; phantoms are excluded so the score reflects user
+//                  behavior, not the prior.
 // `beta[]`         standardized coefficients in [grind, T, H, P] order.
 // `sigma[]`        4×4 posterior covariance, row-major. Used for the
 //                  predictive parameter variance that drives confidence.
@@ -68,6 +74,7 @@ struct PresetFit {
   float    mean_H, std_H;
   float    mean_P, std_P;
   float    mean_y, std_y;
+  float    mean_g_real, std_g_real;
   float    beta[4];
   float    sigma[4 * 4];
 };

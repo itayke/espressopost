@@ -101,18 +101,34 @@ constexpr uint8_t kConfidenceFloor = 10;
 // brewing) while capping wild excursions.
 constexpr float kClimateClampZ = 2.0f;
 
-// Climate-extrapolation confidence band. The reported confidence is the
-// average of (a) the slope-quality factor derived from Σ[0,0] and (b) an
-// extrapolation factor that's 1.0 within ±kExtrapPenaltyStart σ of training
-// climate and decays linearly to 0 at ±kExtrapPenaltyEnd σ. Effect: a model
-// that knows its grind slope well but is being queried at hot-climate it's
-// never seen reports lower confidence than the same model in normal weather,
-// without losing the suggestion entirely (average never zeroes out a
-// well-known slope). Uses the *unclamped* z-values so the confidence channel
-// surfaces extrapolation distance honestly even though the point-estimate
-// solver clamps for safety.
+// Extrapolation confidence band. Same shape on both axes: full credit
+// within ±kExtrapPenaltyStart σ, linear decay to zero at ±kExtrapPenaltyEnd σ.
+// Applied to two independent z-scores:
+//   - climate z: max(|T_z_raw|, |H_z_raw|, |P_z_raw|) using the (phantom-
+//     blended) training mean/std. Asks "is the live climate in a region
+//     we've sampled?"
+//   - grind z: (suggested_grind - mean_g_real) / std_g_real using
+//     real-shots-only stats. Asks "is the recommendation inside the user's
+//     observed dial range?"
+// Both factors enter the reported confidence as an unweighted average with
+// the slope-quality factor (derived from Σ[0,0]). Averaging means no single
+// factor can hide a useful suggestion, but each one drags the displayed
+// number down to honest territory. Uses the *unclamped* z-values so the
+// confidence channel surfaces extrapolation distance honestly even though
+// the point-estimate solver clamps climate for safety.
 constexpr float kExtrapPenaltyStart = 1.0f;
 constexpr float kExtrapPenaltyEnd   = 3.0f;
+
+// Floor on the real-shot std_g used by the grind-extrapolation factor. If
+// the user has only ever pulled at one or two nearly-identical dial settings
+// std_g_real collapses to zero and any suggestion away from the centroid
+// would crash the factor to 0. Flooring at 0.1 (= one slider step) means
+// "treat one dial step as the smallest meaningful tolerance band." Effect:
+// suggestions within ±1 step of where the user has been get full credit;
+// ±3 steps out gets zero credit. Tight by design — the whole point of this
+// factor is to surface "you're recommending something outside the user's
+// observed range."
+constexpr float kGrindStdFloor = 0.1f;
 
 // In-place Gauss-Jordan inverse of an n×n matrix with partial pivoting. We
 // only ever invert n=kNFeat (4×4) so stack-allocating the augmented matrix is
@@ -237,6 +253,22 @@ PresetFit fit(const FitSample* samples, std::size_t n_real) {
   f.std_P = std::max(kStdFloor, static_cast<float>(std::sqrt(var_P / w_sum)));
   f.std_y = std::max(kStdFloor, static_cast<float>(std::sqrt(var_y / w_sum)));
 
+  // Real-shots-only grind centroid and spread, for the grind-extrapolation
+  // confidence factor. Separate from f.mean_g / f.std_g (which fold phantoms
+  // in for the fit math) so the factor reflects user behavior, not the
+  // prior. Floored at kGrindStdFloor so single-dial-setting histories don't
+  // make the factor pathological.
+  double sum_g_r = 0.0;
+  for (std::size_t i = 0; i < n_real; ++i) sum_g_r += samples[i].user_grind;
+  f.mean_g_real = static_cast<float>(sum_g_r / n_real);
+  double var_g_r = 0.0;
+  for (std::size_t i = 0; i < n_real; ++i) {
+    const float d = samples[i].user_grind - f.mean_g_real;
+    var_g_r += d * d;
+  }
+  f.std_g_real = std::max(kGrindStdFloor,
+                          static_cast<float>(std::sqrt(var_g_r / n_real)));
+
   // --- Step 2: form XᵀWX (kNFeat×kNFeat) and XᵀWy in standardized space.
   // For weighted Bayesian regression with zero-mean Gaussian prior:
   //   posterior precision Λ = XᵀWX + λI
@@ -325,27 +357,39 @@ Suggestion suggest(const PresetFit& f, ClimateInput c, float target_time_delta) 
   grind = std::clamp(grind, 0.0f, 99.9f);
   grind = std::round(grind * 10.0f) / 10.0f;  // 0.1 step — matches UI stepper
 
-  // Confidence is the average of two 0..1 factors:
-  //   (1) slope_factor: how well we know β_g, from Σ[0,0]. Same math as the
-  //       previous confidence-from-variance formula — at zero data it's 0
-  //       (prior-only), and it climbs as real shots pin down the slope.
-  //   (2) extrap_factor: how close the live climate is to training. Full
-  //       credit within kExtrapPenaltyStart σ, linear decay to zero by
-  //       kExtrapPenaltyEnd σ. Uses raw (unclamped) z-values so the
-  //       extrapolation honesty isn't hidden by the point-estimate clamp.
-  // Averaging means neither factor alone can hide the suggestion: a model
-  // with a well-known slope queried at extreme climate still surfaces a
-  // value (just at lower confidence), and a model still learning its slope
-  // doesn't get falsely boosted by an in-range climate query.
+  // Confidence is the average of three 0..1 factors:
+  //   (1) slope_factor:        how well we know β_g, from Σ[0,0]. At zero
+  //                            data it's 0 (prior-only); climbs as real
+  //                            shots pin down the slope.
+  //   (2) climate_extrap_factor: how close the live climate is to training.
+  //                              Full credit within kExtrapPenaltyStart σ,
+  //                              linear decay to zero by kExtrapPenaltyEnd σ.
+  //                              Uses raw (unclamped) z so the honesty isn't
+  //                              hidden by the point-estimate clamp.
+  //   (3) grind_extrap_factor:   how close the *recommended grind* is to the
+  //                              dial settings the user has actually pulled.
+  //                              Same shape as (2), but using the
+  //                              real-shots-only mean_g_real/std_g_real (no
+  //                              phantoms — so a model that's never seen
+  //                              the user move the dial gets honestly
+  //                              penalized when it recommends moving it).
+  // Averaging means no single factor can hide a useful suggestion, but each
+  // one drags the displayed number toward honest territory when warranted.
   const float slope_factor = std::clamp(1.0f - f.sigma[0] * kPriorPrec, 0.0f, 1.0f);
-  const float z_max = std::max({std::fabs(T_z_raw),
-                                std::fabs(H_z_raw),
-                                std::fabs(P_z_raw)});
-  const float extrap_factor = std::clamp(
-      1.0f - std::max(0.0f, z_max - kExtrapPenaltyStart) /
+  const float z_climate = std::max({std::fabs(T_z_raw),
+                                    std::fabs(H_z_raw),
+                                    std::fabs(P_z_raw)});
+  const float climate_extrap_factor = std::clamp(
+      1.0f - std::max(0.0f, z_climate - kExtrapPenaltyStart) /
                  (kExtrapPenaltyEnd - kExtrapPenaltyStart),
       0.0f, 1.0f);
-  const uint8_t conf = confidence_pct_from_factor((slope_factor + extrap_factor) / 2.0f);
+  const float z_grind = std::fabs((grind - f.mean_g_real) / f.std_g_real);
+  const float grind_extrap_factor = std::clamp(
+      1.0f - std::max(0.0f, z_grind - kExtrapPenaltyStart) /
+                 (kExtrapPenaltyEnd - kExtrapPenaltyStart),
+      0.0f, 1.0f);
+  const uint8_t conf = confidence_pct_from_factor(
+      (slope_factor + climate_extrap_factor + grind_extrap_factor) / 3.0f);
   if (conf == 0) return none;
 
   return Suggestion{grind, conf};

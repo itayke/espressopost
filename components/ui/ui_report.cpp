@@ -168,10 +168,9 @@ void refresh_preset_label() {
 
 void on_preset_tap(lv_event_t*) {
   const auto new_id = presets::cycle_selected();
-  // Reseed the grind stepper from the new preset's anchor so the next
-  // shot defaults to that preset's known-good setting; the user can still
-  // step away from it before submitting.
-  s_grind_value = presets::get(new_id).grind_anchor;
+  // Restore the grind stepper to whatever the user last dialed for this
+  // preset — falls back to grind_anchor on a preset that's never been used.
+  s_grind_value = presets::last_grind(new_id);
   refresh_preset_label();
   refresh_grind_label();
   // Each preset has its own model; cycle invalidates the previous suggestion.
@@ -215,10 +214,12 @@ void reset_form() {
   s_delta_set    = false;
   s_delta_value  = 0;
   s_stars_value  = 0;
-  // Grind resets to the active preset's anchor — most shots will keep the
-  // same grind setting across multiple submits, so this saves the user
-  // stepping back to the same value every time.
-  s_grind_value  = presets::get(presets::selected_id()).grind_anchor;
+  // Grind survives reset: presets::set_last_grind() captures every step the
+  // user makes, so the value already on screen IS the last-known good for
+  // this preset. Reload it from NVS on first call (when s_grind_value is
+  // still 0.0f from static-init) so the screen comes up showing the
+  // persisted dial setting.
+  s_grind_value  = presets::last_grind(presets::selected_id());
   refresh_delta_label();
   refresh_grind_label();
   refresh_stars();
@@ -254,11 +255,13 @@ void on_delta_plus(lv_event_t*) {
 
 void on_grind_minus(lv_event_t*) {
   s_grind_value = std::max(kGrindMin, s_grind_value - kGrindStep);
+  presets::set_last_grind(presets::selected_id(), s_grind_value);
   refresh_grind_label();
 }
 
 void on_grind_plus(lv_event_t*) {
   s_grind_value = std::min(kGrindMax, s_grind_value + kGrindStep);
+  presets::set_last_grind(presets::selected_id(), s_grind_value);
   refresh_grind_label();
 }
 

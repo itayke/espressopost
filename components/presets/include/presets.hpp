@@ -54,4 +54,15 @@ Preset get(uint8_t id);
 // selected id. Wraps around at count(). Cheap; no measurable wear for daily use.
 uint8_t cycle_selected();
 
+// Last grind value the user dialed for this preset, persisted across reboots.
+// Falls back to the preset's `grind_anchor` if no value has been stored yet.
+// Stored separately from the Preset blob so the schema stays stable across
+// per-shot writes (which would otherwise rewrite the whole blob every click).
+float last_grind(uint8_t id);
+
+// Persist the last grind value for this preset. Cheap NVS u32 write + commit;
+// called on every grind step in the Report UI. NVS wear at our usage volumes
+// (≲ tens of clicks per day) is well inside the part's endurance budget.
+void set_last_grind(uint8_t id, float v);
+
 }  // namespace espressopost::presets
