@@ -29,20 +29,26 @@ and `ShotRecord.rtc_epoch_s` is a real wall-clock value.
 **Model v1 (time model only):** per-preset Bayesian linear regression
 on `time_delta_s ~ grind + T + H + P` with a unit-variance Gaussian
 ridge prior (effective ≈ 3 shots per coefficient). Two synthetic
-"phantom" shots — `{grind=5, time=+10s}` and `{grind=6, time=-10s}`,
-weight 0.5 each — get folded into every fit. They (a) inject grind
-variance so `std_g` never sits at the floor while real shots cluster at
-one dial setting, (b) seed `β_g` with the right sign (finer→longer)
-so the first suggestion points the user the right way, and (c) fade as
-real data accumulates (two real shots already out-vote them). Refits on
-boot and after every submit. The Report screen shows a small
-accent-colored row beneath the grind stepper — `suggested 5.3 · 35%`
-— when the marginal posterior variance of `β_g` (the grind coefficient
-alone — i.e. "how well do we know the grind→time slope?", independent
-of the current climate query point) maps to ≥ 10 % confidence (rounded
-to nearest 5 %, capped at 95 %); below that the row is hidden entirely. The cached suggestion at submit time is what gets
-stored in `ShotRecord.suggested_grind` (NaN when the row is hidden), so
-each shot records the model state the user actually saw. Quality model,
+"phantom" shots get folded into every fit at `{real_mean − 0.5, +10s}`
+and `{real_mean + 0.5, −10s}` (weight 0.5 each), built at fit time so
+the directional prior tracks wherever on the dial the user actually
+grinds. They (a) inject grind variance so `std_g` never sits at the
+floor while real shots cluster at one dial setting, (b) seed `β_g`
+with the right sign (finer→longer) so the first suggestion points the
+user the right way, and (c) fade as real data accumulates (two real
+shots already out-vote them). Refits on boot and after every submit.
+The Report screen shows a small accent-colored row beneath the grind
+stepper — `suggested 5.3 · 35%` — when the **combined confidence**
+clears the 10 % floor. Combined confidence is the average of three
+0..1 factors: (1) slope-quality from `Σ[0,0]` (how well we know the
+grind→time slope), (2) climate-extrapolation distance (how far live
+T/H/P sits outside the trained range, full credit within ±1σ decaying
+to 0 by ±3σ), and (3) grind-extrapolation distance (how far the
+recommended dial position sits outside the user's observed range,
+same shape). Rounded to nearest 5 %, capped at 95 %, suppressed below
+10 %. The cached suggestion at submit time is what gets stored in
+`ShotRecord.suggested_grind` (NaN when the row is hidden), so each
+shot records the model state the user actually saw. Quality model,
 cross-preset pooling, and recency-weighted shots from the spec are
 deferred — the time-only model gets us a useful directional indicator
 while data accumulates, and recency weighting was dropped in v1 because
@@ -195,34 +201,42 @@ instead.
 3. Tapping the preset row cycles through the seeded presets (`espresso`
    → `lungo` → `ristretto` → back). Target seconds and the grind value
    both update — each preset carries its own `grind_anchor` (all three
-   ship seeded to 5.2 on first boot or after migration).
+   ship seeded to 5.2 on first boot or after migration) and remembers
+   the last grind value you dialed for it (NVS key `gN`, falls back to
+   `grind_anchor` until you change anything).
 4. Tapping `−` / `+` on the time row sets a signed seconds reading
    (range −30 … +30). Tapping `−` / `+` on the grind row steps the
-   absolute value by 0.1 (range 0.0 … 99.9). Tapping a star fills it
-   amber and any star to its left.
+   absolute value by 0.1 (range 0.0 … 99.9), and each step is persisted
+   to NVS so a reboot resumes on the same value. Tapping a star fills
+   it amber and any star to its left.
 5. Once time delta and stars are set, Submit lights amber. Tapping it
    appends a 40-byte v3 record to `/littlefs/shots.bin` (carrying
    `user_grind` from the stepper and `suggested_grind` from whatever the
    suggestion line was showing at submit time — NaN when it was
-   hidden), briefly shows `Saved #N` near the top, and clears the form.
-   The model refits immediately after the append, so the next preset
-   cycle / climate tick reflects the new data point.
-6. Power-cycling restores the last-selected preset (NVS persists it) and
-   shot count carries over (`Saved #2`, `#3`, …).
+   hidden), briefly shows `Saved #N` near the top, and clears the
+   time-delta / stars fields. The grind stepper keeps its last value
+   (most shots stay near the same dial setting). The model refits
+   immediately after the append, so the next preset cycle / climate tick
+   reflects the new data point.
+6. Power-cycling restores the last-selected preset (NVS persists it),
+   the last grind value for each preset, and the shot count carries
+   over (`Saved #2`, `#3`, …).
 7. Leaving the device untouched for 30 s drops brightness;
    another 90 s and the panel turns off entirely. Touching it
    anywhere brings it back to full brightness, and the first 500 ms of
    touch after wake doesn't register as a tap (so you can pick the
    device up without inadvertently submitting a shot).
 8. The `suggested` line should appear on the very first usable shot
-   thanks to the phantom prior (synthetic shots at `grind=5, +10s` and
-   `grind=6, -10s` injected into every fit). Expect the displayed
-   confidence to be low (10–20 %) until you've logged real shots that
-   either confirm or pull against the prior; the percentage climbs as
-   real data accumulates. The convention encoded in the phantoms is
-   "lower grind number = finer = longer shot" — if your grinder runs
-   the opposite direction, flip the `time_delta_s` signs on
-   `kPriorShots[]` in [`components/model/model.cpp`](components/model/model.cpp).
+   thanks to the phantom prior (two synthetic shots centered on the
+   real-shot grind mean: `{real_mean − 0.5, +10s}` and
+   `{real_mean + 0.5, −10s}`, injected into every fit). Expect the
+   displayed confidence to be low (10–20 %) until you've logged real
+   shots that either confirm or pull against the prior; the percentage
+   climbs as real data accumulates. The convention encoded in the
+   phantoms is "lower grind number = finer = longer shot" — if your
+   grinder runs the opposite direction, flip the `time_delta_s` signs
+   in the `phantoms[]` array inside `fit()` in
+   [`components/model/model_math.cpp`](components/model/model_math.cpp).
 
 If any of these fail, the most likely culprits in order:
 
