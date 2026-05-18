@@ -213,13 +213,13 @@ TEST_CASE("confidence never exceeds the 95% display cap", "[confidence]") {
   REQUIRE(s.confidence_pct <= 95);
 }
 
-TEST_CASE("confidence is independent of climate query point (uses Σ[0,0])",
+TEST_CASE("confidence has a stable plateau within the safe climate band",
           "[confidence]") {
-  // Confidence is now driven by the marginal variance of β_g (Σ[0,0]) — a
-  // property of the fit alone, not of the query point. So evaluating the
-  // same fit at wildly different climates must produce the same confidence
-  // number. (Predictive-variance confidence would NOT pass this — V_param
-  // grows quadratically as the query moves away from the centroid.)
+  // Combined confidence layers a climate-extrapolation penalty on top of the
+  // slope-quality factor. Within ±kExtrapPenaltyStart σ of training climate,
+  // the penalty is zero — confidence is determined by slope quality alone
+  // and doesn't flicker as climate drifts inside the safe band. Outside it,
+  // confidence drops monotonically.
   Rng rng(11);
   std::vector<FitSample> shots;
   for (int i = 0; i < 30; ++i) {
@@ -232,14 +232,14 @@ TEST_CASE("confidence is independent of climate query point (uses Σ[0,0])",
   PresetFit f = fit(shots.data(), shots.size());
   REQUIRE(f.valid);
 
-  const uint8_t centroid = suggest(f, {23.0f, 50.0f, 1013.0f}).confidence_pct;
-  const uint8_t hot      = suggest(f, {26.0f, 50.0f, 1013.0f}).confidence_pct;
-  const uint8_t cold     = suggest(f, {20.0f, 50.0f, 1013.0f}).confidence_pct;
-  INFO("centroid=" << static_cast<int>(centroid)
-       << " hot=" << static_cast<int>(hot)
-       << " cold=" << static_cast<int>(cold));
-  REQUIRE(centroid == hot);
-  REQUIRE(centroid == cold);
+  // Queries inside the safe band: same confidence number.
+  const uint8_t centroid    = suggest(f, {f.mean_T,              50.0f, 1013.0f}).confidence_pct;
+  const uint8_t mild_warm   = suggest(f, {f.mean_T + 0.3f * f.std_T, 50.0f, 1013.0f}).confidence_pct;
+  // Outside the safe band: penalty kicks in.
+  const uint8_t far_warm    = suggest(f, {f.mean_T + 2.5f * f.std_T, 50.0f, 1013.0f}).confidence_pct;
+  INFO("centroid=" << int(centroid) << " mild=" << int(mild_warm) << " far=" << int(far_warm));
+  REQUIRE(centroid == mild_warm);
+  REQUIRE(far_warm < centroid);
 }
 
 TEST_CASE("confidence does not decrease as more data arrives",
@@ -273,4 +273,170 @@ TEST_CASE("confidence does not decrease as more data arrives",
   // to the current confidence-mapping constants.
   REQUIRE(c20 >= c5);
   REQUIRE(c80 >= c20);
+}
+
+// -----------------------------------------------------------------------------
+// Real-device fixture (2026-05-18)
+// -----------------------------------------------------------------------------
+// Captured from the actual device via the temporary boot-time dump in
+// storage::init(). User reported that with these 6 shots + a live climate of
+// 78°F (~25.5°C), the model suggested grind=4.3 — well below anything they'd
+// ever pulled. These tests reproduce that scenario and probe a few "what if"
+// configurations side by side, so we can decide whether the parked
+// quality-weighted-target hack actually addresses the failure mode before
+// writing the production version.
+
+namespace {
+
+constexpr FitSample kRealShots[] = {
+    {5.20f, 21.10f, 44.86f,  999.61f,  0.0f},  // 5★
+    {5.20f, 22.53f, 46.47f,  999.53f,  1.0f},  // 5★
+    {5.20f, 19.18f, 58.69f, 1005.89f,  4.0f},  // 4★
+    {5.20f, 23.20f, 44.18f, 1000.63f, -2.0f},  // 4★
+    {5.20f, 22.95f, 53.68f, 1003.41f, -8.0f},  // 5★
+    {5.10f, 23.20f, 51.98f, 1008.58f, -6.0f},  // 5★
+    {5.00f, 25.92f, 50.88f, 1006.91f,  8.0f},  // 5★  ← hottest climate, finer grind, ran LONG (contradicts β_T<0)
+};
+constexpr uint8_t kRealStars[] = {5, 5, 4, 4, 5, 5, 5};
+constexpr size_t  kRealN       = sizeof(kRealShots) / sizeof(kRealShots[0]);
+
+// Live climate at the moment the user reported the 4.3 suggestion. T from the
+// hardware (78°F = 25.5°C); H/P estimated from the two most-recent shots.
+constexpr ClimateInput kLiveClimate = {25.5f, 50.0f, 1008.0f};
+
+// Quality-weighted mean time_delta across "good" shots (4-5 stars). With this
+// fixture every shot qualifies, so it's just the unweighted mean.
+float quality_weighted_target(const FitSample* shots, const uint8_t* stars,
+                              size_t n, uint8_t min_stars = 4) {
+  float sum = 0.0f;
+  int   cnt = 0;
+  for (size_t i = 0; i < n; ++i) {
+    if (stars[i] >= min_stars) { sum += shots[i].time_delta_s; ++cnt; }
+  }
+  return cnt > 0 ? sum / static_cast<float>(cnt) : 0.0f;
+}
+
+}  // namespace
+
+TEST_CASE("real-data: model suggests within the trained grind range",
+          "[real-data]") {
+  // With the 7-shot fixture (shot 6 added a hot-and-LONG counter-example to
+  // the model's earlier β_T<0 belief), the climate slope collapsed near zero
+  // and the suggestion is no longer extrapolating wildly. This test pins the
+  // post-fix behavior: suggestion within a reasonable band around the
+  // training grind centroid (5.0 - 5.2 dial range).
+  PresetFit f = fit(kRealShots, kRealN);
+  REQUIRE(f.valid);
+  INFO("β_g (standardized) = " << f.beta[0]
+       << "  β_T = " << f.beta[1]
+       << "  std_T = " << f.std_T
+       << "  mean_y = " << f.mean_y
+       << "  std_y = " << f.std_y
+       << "  σ[0] = " << f.sigma[0]
+       << "  real grind slope = " << (f.beta[0] * f.std_y / f.std_g) << " s/unit");
+
+  Suggestion s = suggest(f, kLiveClimate);
+  INFO("CURRENT: suggested=" << s.grind << " conf=" << int(s.confidence_pct));
+  REQUIRE(s.confidence_pct > 0);
+  REQUIRE(s.grind >= 4.5f);
+  REQUIRE(s.grind <= 6.0f);
+}
+
+TEST_CASE("real-data: quality-weighted target converges to baseline when all shots are good",
+          "[real-data]") {
+  // When every training shot is rated 4-5★, the quality-weighted mean is
+  // basically the unweighted mean of all time_deltas, and that's already
+  // what `target=0` targets after mean-centering. So the hack should
+  // produce a result very close to baseline — useful behavior to confirm
+  // (the hack doesn't *break* anything when there's no quality signal to
+  // separate good from bad shots).
+  PresetFit f = fit(kRealShots, kRealN);
+  REQUIRE(f.valid);
+
+  const float t_qw = quality_weighted_target(kRealShots, kRealStars, kRealN);
+  Suggestion baseline = suggest(f, kLiveClimate, /*target=*/0.0f);
+  Suggestion hacked   = suggest(f, kLiveClimate, /*target=*/t_qw);
+
+  INFO("quality-weighted target time_delta = " << t_qw);
+  INFO("BASELINE: suggested=" << baseline.grind);
+  INFO("HACK    : suggested=" << hacked.grind);
+  REQUIRE(std::fabs(hacked.grind - baseline.grind) < 0.5f);
+}
+
+TEST_CASE("real-data: target that exactly matches mean_y returns the centroid grind",
+          "[real-data]") {
+  // Sanity probe — if you set the target equal to mean_y, target_y_z = 0, so
+  // the solver should suggest exactly mean_g. This isolates "what does the
+  // model think is the centroid?" from any climate extrapolation effect.
+  PresetFit f = fit(kRealShots, kRealN);
+  REQUIRE(f.valid);
+
+  Suggestion s = suggest(f, kLiveClimate, /*target=*/f.mean_y);
+  INFO("mean_y=" << f.mean_y << "  mean_g=" << f.mean_g
+       << "  suggested=" << s.grind
+       << "  T_z=" << (kLiveClimate.temp_c - f.mean_T) / f.std_T);
+  // The climate is still in the equation; this probes how much the climate
+  // term alone is dragging the suggestion away from mean_g.
+  REQUIRE(std::isfinite(s.grind));  // triggers INFO printout
+}
+
+TEST_CASE("real-data: combined confidence differentiates extrapolation distance",
+          "[real-data][combined-conf]") {
+  // The 6-shot fixture (before the corrective hot shot) at T=25.5°C produced
+  // a 70% confidence in a 4.x suggestion — same number as the 7-shot fixture
+  // at T=26.57°C with a sensible 5.x suggestion. Combined confidence should
+  // discriminate: the 7-shot fit's β_T near zero AND a slightly closer T_z
+  // both reduce the extrapolation penalty (the 7-shot's penalty is smaller),
+  // and the user-facing number should be higher when the model is more
+  // honest about what it knows.
+  PresetFit f6 = fit(kRealShots, 6);  // pre-shot-6 fit
+  PresetFit f7 = fit(kRealShots, 7);  // current fit
+
+  const Suggestion past    = suggest(f6, {25.50f, 50.0f, 1008.0f});
+  const Suggestion current = suggest(f7, {26.57f, 50.54f, 1006.41f});
+  INFO("past=" << past.grind << "@" << int(past.confidence_pct) << "%"
+       << "  current=" << current.grind << "@" << int(current.confidence_pct) << "%");
+  // Both should still surface a suggestion (average can't zero out a known
+  // slope just because extrapolation is bad).
+  REQUIRE(past.confidence_pct > 0);
+  REQUIRE(current.confidence_pct > 0);
+  // Both are extrapolating, so both should be below the slope-only baseline
+  // (would have been 70% with the previous Σ[0,0]-only formula).
+  REQUIRE(past.confidence_pct < 70);
+  REQUIRE(current.confidence_pct < 70);
+}
+
+TEST_CASE("real-data: in-range climate query gets higher confidence than extrapolation",
+          "[real-data][combined-conf]") {
+  // Same fit, two query points: one at training centroid (z≈0 across the
+  // board) vs one extrapolating temp. Combined confidence at centroid should
+  // beat the extrapolating query.
+  PresetFit f = fit(kRealShots, kRealN);
+  REQUIRE(f.valid);
+
+  const Suggestion at_centroid    = suggest(f, {f.mean_T, f.mean_H, f.mean_P});
+  const Suggestion at_extrapolate = suggest(f, {f.mean_T + 3.0f * f.std_T,
+                                                 f.mean_H, f.mean_P});
+  INFO("centroid="  << at_centroid.grind    << "@" << int(at_centroid.confidence_pct)    << "%");
+  INFO("extrapol.=" << at_extrapolate.grind << "@" << int(at_extrapolate.confidence_pct) << "%");
+  REQUIRE(at_centroid.confidence_pct > at_extrapolate.confidence_pct);
+}
+
+TEST_CASE("real-data: target = recent-shots quality-weighted mean (last 3)",
+          "[real-data]") {
+  // What if we weight recency too — average only the last 3 high-quality
+  // shots' time_deltas? With the user's data those are -2, -8, -6 → mean
+  // -5.33s. Closer to current behavior but reflects the recent trend.
+  PresetFit f = fit(kRealShots, kRealN);
+  REQUIRE(f.valid);
+
+  // Last 3 shots: t_d = -8, -6, +8 → mean -2. The +8 outlier (today's hot
+  // brew at the finer grind) dramatically changes the recency-weighted view
+  // compared to the 6-shot fixture, where the recent-3 mean was -5.33s.
+  const float t_recent = (-8.0f + -6.0f + 8.0f) / 3.0f;
+  Suggestion s = suggest(f, kLiveClimate, /*target=*/t_recent);
+  INFO("recent-3 target=" << t_recent << "  suggested=" << s.grind);
+  // With the recent-only target, suggestion should be noticeably higher
+  // (coarser) than the all-shots baseline.
+  REQUIRE(std::isfinite(s.grind));
 }

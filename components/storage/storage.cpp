@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -217,6 +218,36 @@ esp_err_t init() {
              static_cast<unsigned>(shot_count()));
   } else {
     ESP_LOGI(kTag, "littlefs mounted at %s (info unavailable)", kBasePath);
+  }
+
+  // TEMPORARY DIAGNOSTIC — dump every shot on disk as a parseable line so the
+  // host-test fixture can be built from real device history. Capped at 64 so
+  // a future power user doesn't flood the boot log. Heap-allocated because a
+  // stack array of 64 × 40 B = 2.5 KB overflows the main task's ~3.5 KB
+  // stack (learned the hard way on the first flash). Remove once we've
+  // copied the data into a test.
+  constexpr size_t kMaxDump = 64;
+  auto* dump_buf = static_cast<ShotRecord*>(std::malloc(sizeof(ShotRecord) * kMaxDump));
+  if (dump_buf != nullptr) {
+    const size_t n_dump = read_shots(dump_buf, kMaxDump);
+    for (size_t i = 0; i < n_dump; ++i) {
+      const auto& r = dump_buf[i];
+      ESP_LOGI(kTag,
+               "dump[%u]: ver=%u preset=%u t_d=%d stars=%u flags=0x%02x "
+               "T=%.2f H=%.2f P=%.2f grind=%.2f sugg=%.2f rtc=%u",
+               static_cast<unsigned>(i), static_cast<unsigned>(r.version),
+               static_cast<unsigned>(r.preset_id),
+               static_cast<int>(r.time_delta_s),
+               static_cast<unsigned>(r.quality_stars),
+               static_cast<unsigned>(r.flags),
+               static_cast<double>(r.temp_c),
+               static_cast<double>(r.humidity_pct),
+               static_cast<double>(r.pressure_hpa),
+               static_cast<double>(r.user_grind),
+               static_cast<double>(r.suggested_grind),
+               static_cast<unsigned>(r.rtc_epoch_s));
+    }
+    std::free(dump_buf);
   }
 
   return ESP_OK;

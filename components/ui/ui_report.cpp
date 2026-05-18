@@ -97,6 +97,52 @@ void refresh_suggestion() {
   const bool have_suggestion =
       s_current_suggestion.confidence_pct > 0 &&
       !std::isnan(s_current_suggestion.grind);
+
+  // DIAGNOSTIC — live state log paired with the boot-time shot dump in
+  // storage::init(). Fires on three triggers so we see drift without
+  // flooding the monitor: (a) first time a valid suggestion materializes
+  // (boot baseline), (b) whenever the grind/conf output changes (state
+  // transitions — e.g. 5.1↔5.2 flip across the rounding boundary, or row
+  // flipping between visible and hidden), (c) every ~60s regardless (drift
+  // heartbeat). At 1 Hz refresh that's at most one line per state change
+  // plus ~one per minute of stability.
+  static bool    s_prev_valid       = false;
+  static float   s_prev_grind       = 0.0f;
+  static uint8_t s_prev_conf        = 0;
+  static int     s_ticks_since_log  = 60;  // start ready-to-log
+  const bool valid_changed  = have_suggestion != s_prev_valid;
+  const bool output_changed = have_suggestion &&
+      (s_current_suggestion.grind != s_prev_grind ||
+       s_current_suggestion.confidence_pct != s_prev_conf);
+  const bool periodic = s_ticks_since_log >= 60;
+  if (valid_changed || output_changed || periodic) {
+    const climate::Reading r = climate::latest();
+    if (r.timestamp_us != 0) {
+      if (have_suggestion) {
+        ESP_LOGI(kTag,
+                 "state: T=%.2f H=%.2f P=%.2f preset=%u → grind=%.2f conf=%u%%",
+                 static_cast<double>(r.temp_c),
+                 static_cast<double>(r.humidity_pct),
+                 static_cast<double>(r.pressure_hpa),
+                 static_cast<unsigned>(presets::selected_id()),
+                 static_cast<double>(s_current_suggestion.grind),
+                 static_cast<unsigned>(s_current_suggestion.confidence_pct));
+      } else {
+        ESP_LOGI(kTag,
+                 "state: T=%.2f H=%.2f P=%.2f preset=%u → (suggestion hidden)",
+                 static_cast<double>(r.temp_c),
+                 static_cast<double>(r.humidity_pct),
+                 static_cast<double>(r.pressure_hpa),
+                 static_cast<unsigned>(presets::selected_id()));
+      }
+      s_prev_valid      = have_suggestion;
+      s_prev_grind      = s_current_suggestion.grind;
+      s_prev_conf       = s_current_suggestion.confidence_pct;
+      s_ticks_since_log = 0;
+    }
+  } else {
+    ++s_ticks_since_log;
+  }
   if (have_suggestion) {
     char buf[40];
     std::snprintf(buf, sizeof(buf), "suggested %.1f  \xC2\xB7  %u%%",

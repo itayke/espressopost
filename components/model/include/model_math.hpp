@@ -86,6 +86,15 @@ PresetFit fit(const FitSample* samples, std::size_t n_real);
 // Always returns a Suggestion; `confidence_pct == 0` means "suppress, the
 // caller should hide the row" (insufficient data, β_g near zero, predictive
 // variance above threshold).
-Suggestion suggest(const PresetFit& f, ClimateInput climate);
+//
+// `target_time_delta` lets callers override the suggestion solver's
+// objective. The default (0) means "solve for the grind that lands the
+// preset's stated target time" — current production behavior. Pass a
+// non-zero value (e.g. the quality-weighted mean of historical time_deltas)
+// to nudge the model toward a different time target without re-fitting; the
+// host tests use this to compare the in-product behavior against the
+// "quality-weighted target" hack discussed in the parked-suggestion memory.
+Suggestion suggest(const PresetFit& f, ClimateInput climate,
+                   float target_time_delta = 0.0f);
 
 }  // namespace espressopost::model

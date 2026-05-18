@@ -39,10 +39,13 @@ constexpr float kPriorPrec = 3.0f;
 // Each phantom carries kPriorShotWeight, so two real shots already out-vote
 // the prior. The ±10 magnitude on time_delta is intentionally larger than
 // real-shot scatter — that pushes std_y up and dampens real-shot signal
-// while data is sparse, keeping the suggestion conservative. Once ~20 real
-// shots accumulate, real std_y dominates and phantoms fade to noise. If we
-// observe the model staying glued to the prior too long, dial the magnitude
-// (or the weight) down.
+// while data is sparse, keeping the suggestion conservative. Lowering it to
+// ±3 was tried (2026-05-18) and made things noticeably worse: the smaller
+// scale shrank std_y so β_T (the climate slope) had relatively *more*
+// influence per-σ, and the solver compensated with absurd grind moves
+// (suggested 1.7 instead of 4.4 in the hot-climate real-data test). The
+// real fix for that scenario lives in the climate-extrapolation clamp
+// (kClimateClampZ) below, not here.
 struct PriorShot {
   float user_grind;
   float time_delta_s;
@@ -85,6 +88,31 @@ constexpr uint8_t kConfidenceCap = 95;
 // Below this rounded percentage we suppress the suggestion entirely (return 0)
 // instead of showing a near-meaningless single-digit indicator.
 constexpr uint8_t kConfidenceFloor = 10;
+
+// Maximum standard-deviation magnitude we'll let a climate feature take when
+// solving for the suggested grind. Live climate readings outside this band
+// (i.e. |z| > kClimateClampZ) get pinned to the band's edge. The math here:
+// linear regression extrapolates linearly, but the assumption that the same
+// slope holds far outside training is unsupported — we'd rather under-react
+// to extreme climate than confidently project a slope from a 4-point dataset
+// into a region we've never sampled. Honest defensive measure, not a
+// principled probabilistic adjustment. 2.0σ keeps reasonable seasonal swings
+// fully respected (typical room T ranges across ~2σ over a year of home
+// brewing) while capping wild excursions.
+constexpr float kClimateClampZ = 2.0f;
+
+// Climate-extrapolation confidence band. The reported confidence is the
+// average of (a) the slope-quality factor derived from Σ[0,0] and (b) an
+// extrapolation factor that's 1.0 within ±kExtrapPenaltyStart σ of training
+// climate and decays linearly to 0 at ±kExtrapPenaltyEnd σ. Effect: a model
+// that knows its grind slope well but is being queried at hot-climate it's
+// never seen reports lower confidence than the same model in normal weather,
+// without losing the suggestion entirely (average never zeroes out a
+// well-known slope). Uses the *unclamped* z-values so the confidence channel
+// surfaces extrapolation distance honestly even though the point-estimate
+// solver clamps for safety.
+constexpr float kExtrapPenaltyStart = 1.0f;
+constexpr float kExtrapPenaltyEnd   = 3.0f;
 
 // In-place Gauss-Jordan inverse of an n×n matrix with partial pivoting. We
 // only ever invert n=kNFeat (4×4) so stack-allocating the augmented matrix is
@@ -129,19 +157,14 @@ bool invert(float* mat, int n) {
   return true;
 }
 
-// Maps a posterior parameter variance to a 0..100 integer in 5-unit steps.
-// The kPriorPrec value sets the natural scale: at zero data the relevant
-// posterior variance is 1/λ, so multiplying by λ normalizes the prior-only
-// case to 1 → confidence reads 0%. With more data, the variance shrinks
-// toward zero and confidence rises.
-//
-// We hard-cap at kConfidenceCap (95%) so users don't read a 100% as "the
-// model is certain" — there's still irreducible shot-to-shot noise we don't
-// surface in this number. We snap anything below kConfidenceFloor to 0 so
-// the UI suppresses the row entirely rather than show "5%".
-uint8_t confidence_from_variance(float v_param) {
-  const float scaled = std::clamp(1.0f - v_param * kPriorPrec, 0.0f, 1.0f);
-  const int pct      = static_cast<int>(std::lround(scaled * 100.0f / 5.0f) * 5);
+// Maps a 0..1 confidence factor to a rounded/floored/capped percentage. The
+// hard cap at kConfidenceCap (95%) reminds the user this is a model, not an
+// oracle — there's still irreducible shot-to-shot noise we don't surface in
+// this number. Anything below kConfidenceFloor snaps to 0 so the UI shows
+// the "learning..." placeholder rather than a near-meaningless single-digit.
+uint8_t confidence_pct_from_factor(float factor) {
+  factor = std::clamp(factor, 0.0f, 1.0f);
+  const int pct = static_cast<int>(std::lround(factor * 100.0f / 5.0f) * 5);
   if (pct < kConfidenceFloor) return 0;
   if (pct > kConfidenceCap)   return kConfidenceCap;
   return static_cast<uint8_t>(pct);
@@ -265,20 +288,27 @@ PresetFit fit(const FitSample* samples, std::size_t n_real) {
   return f;
 }
 
-Suggestion suggest(const PresetFit& f, ClimateInput c) {
+Suggestion suggest(const PresetFit& f, ClimateInput c, float target_time_delta) {
   Suggestion none = {std::nanf(""), 0};
   if (!f.valid) return none;
 
-  // grind_z is unknown — we're solving for it. Plug y=0 (target time hit) into
-  // the standardized regression equation:
+  // grind_z is unknown — we're solving for it. Plug the target time_delta
+  // into the standardized regression equation:
   //   y_z = β_g·g_z + β_T·T_z + β_H·H_z + β_P·P_z
-  //   target y_raw = 0 → target y_z = -mean_y / std_y
+  //   target y_raw = target_time_delta → target y_z = (target - mean_y) / std_y
   // Rearrange:
   //   g_z = (target_y_z - β_T·T_z - β_H·H_z - β_P·P_z) / β_g
-  const float T_z = (c.temp_c       - f.mean_T) / f.std_T;
-  const float H_z = (c.humidity_pct - f.mean_H) / f.std_H;
-  const float P_z = (c.pressure_hpa - f.mean_P) / f.std_P;
-  const float target_y_z = -f.mean_y / f.std_y;
+  // Standardize climate to raw z-values first — the confidence channel uses
+  // them un-clamped so it can surface "you're extrapolating" honestly. Then
+  // produce clamped versions for the point-estimate solver, which we want
+  // bounded against runaway extrapolation regardless of confidence.
+  const float T_z_raw = (c.temp_c       - f.mean_T) / f.std_T;
+  const float H_z_raw = (c.humidity_pct - f.mean_H) / f.std_H;
+  const float P_z_raw = (c.pressure_hpa - f.mean_P) / f.std_P;
+  const float T_z = std::clamp(T_z_raw, -kClimateClampZ, kClimateClampZ);
+  const float H_z = std::clamp(H_z_raw, -kClimateClampZ, kClimateClampZ);
+  const float P_z = std::clamp(P_z_raw, -kClimateClampZ, kClimateClampZ);
+  const float target_y_z = (target_time_delta - f.mean_y) / f.std_y;
 
   // β_g (grind coefficient) near zero means the model didn't learn a useful
   // grind→time relationship — usually because every shot used the same grind
@@ -295,16 +325,27 @@ Suggestion suggest(const PresetFit& f, ClimateInput c) {
   grind = std::clamp(grind, 0.0f, 99.9f);
   grind = std::round(grind * 10.0f) / 10.0f;  // 0.1 step — matches UI stepper
 
-  // Confidence uses Σ[0,0] — the marginal posterior variance of β_g alone —
-  // rather than the point-specific predictive variance x*ᵀ Σ x*. The latter
-  // is mathematically correct as "uncertainty in this prediction" but it
-  // collapses to ≈0 when the user's climate matches the training centroid
-  // (suggestion saturates at the 95% cap on day one) and spikes when
-  // climate drifts (model looks "unsure" purely because the user moved
-  // through ambient changes). Σ[0,0] answers "how well do I know the
-  // grind→time slope?" — it only moves when the data moves, which is the
-  // behavior users expect from a confidence indicator.
-  const uint8_t conf = confidence_from_variance(f.sigma[0]);
+  // Confidence is the average of two 0..1 factors:
+  //   (1) slope_factor: how well we know β_g, from Σ[0,0]. Same math as the
+  //       previous confidence-from-variance formula — at zero data it's 0
+  //       (prior-only), and it climbs as real shots pin down the slope.
+  //   (2) extrap_factor: how close the live climate is to training. Full
+  //       credit within kExtrapPenaltyStart σ, linear decay to zero by
+  //       kExtrapPenaltyEnd σ. Uses raw (unclamped) z-values so the
+  //       extrapolation honesty isn't hidden by the point-estimate clamp.
+  // Averaging means neither factor alone can hide the suggestion: a model
+  // with a well-known slope queried at extreme climate still surfaces a
+  // value (just at lower confidence), and a model still learning its slope
+  // doesn't get falsely boosted by an in-range climate query.
+  const float slope_factor = std::clamp(1.0f - f.sigma[0] * kPriorPrec, 0.0f, 1.0f);
+  const float z_max = std::max({std::fabs(T_z_raw),
+                                std::fabs(H_z_raw),
+                                std::fabs(P_z_raw)});
+  const float extrap_factor = std::clamp(
+      1.0f - std::max(0.0f, z_max - kExtrapPenaltyStart) /
+                 (kExtrapPenaltyEnd - kExtrapPenaltyStart),
+      0.0f, 1.0f);
+  const uint8_t conf = confidence_pct_from_factor((slope_factor + extrap_factor) / 2.0f);
   if (conf == 0) return none;
 
   return Suggestion{grind, conf};
