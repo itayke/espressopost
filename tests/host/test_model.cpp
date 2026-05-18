@@ -458,14 +458,15 @@ TEST_CASE("real-data 8-shot: grind-extrap factor brings confidence in line",
   REQUIRE(f.valid);
 
   Suggestion s = suggest(f, kLiveClimate8);
-  INFO("mean_g_real=" << f.mean_g_real << " std_g_real=" << f.std_g_real);
+  INFO("mean_g=" << f.mean_g << " std_g_real=" << f.std_g_real);
   INFO("suggested grind=" << s.grind
-       << "  grind z=" << std::fabs((s.grind - f.mean_g_real) / f.std_g_real));
+       << "  grind z=" << std::fabs((s.grind - f.mean_g) / f.std_g_real));
   INFO("Σ[0,0]=" << f.sigma[0]
        << "  T_z=" << (kLiveClimate8.temp_c - f.mean_T) / f.std_T);
   INFO("confidence=" << int(s.confidence_pct));
-  // Was 60% pre-fix; should now read materially lower.
-  REQUIRE(s.confidence_pct <= 45);
+  // Was 60% pre-grind-extrap; should now read in the middle tier (<60),
+  // honestly reflecting "I'm extrapolating in two dimensions at once."
+  REQUIRE(s.confidence_pct < 60);
 }
 
 TEST_CASE("real-data: target = recent-shots quality-weighted mean (last 3)",

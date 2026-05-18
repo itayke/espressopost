@@ -36,6 +36,15 @@ constexpr float kPriorPrec = 3.0f;
 //   2) Bias β_g to the right sign with non-trivial magnitude, so the very
 //      first suggestion is at least pointing the user the right way.
 //
+// Phantom grind positions are built at fit time, symmetric around the real-
+// shot grind mean (mean ± kPriorShotGrindSpread). That way the prior adapts
+// to wherever the user actually grinds — any 1-50 dial, any operating
+// point — instead of pinning to the historical 1-10 midpoint we picked when
+// scaffolding. Symmetric placement also makes the phantom contribution to
+// mean_g algebraically cancel: f.mean_g ends up equal to the real-shot
+// grind mean, so suggest() can use it directly as the "user's observed
+// dial centroid" without a separate field.
+//
 // Each phantom carries kPriorShotWeight, so two real shots already out-vote
 // the prior. The ±10 magnitude on time_delta is intentionally larger than
 // real-shot scatter — that pushes std_y up and dampens real-shot signal
@@ -46,15 +55,16 @@ constexpr float kPriorPrec = 3.0f;
 // (suggested 1.7 instead of 4.4 in the hot-climate real-data test). The
 // real fix for that scenario lives in the climate-extrapolation clamp
 // (kClimateClampZ) below, not here.
+//
+// Spread (±0.5) is a soft knob — after standardization, the algebra cancels
+// most of its effect on β_g. Picked to read as "small dial movement" to a
+// human; the model behaves nearly identically at ±0.1 or ±5.0.
 struct PriorShot {
   float user_grind;
   float time_delta_s;
 };
-constexpr PriorShot kPriorShots[] = {
-    {5.0f, +10.0f},  // finer  → longer
-    {6.0f, -10.0f},  // coarser → shorter
-};
-constexpr float kPriorShotWeight = 0.5f;
+constexpr float kPriorShotWeight     = 0.5f;
+constexpr float kPriorShotGrindSpread = 0.5f;
 
 // Typical room conditions phantom shots are pinned to. Real shots in most
 // homes land within a few % of these; after standardization the phantom
@@ -107,9 +117,10 @@ constexpr float kClimateClampZ = 2.0f;
 //   - climate z: max(|T_z_raw|, |H_z_raw|, |P_z_raw|) using the (phantom-
 //     blended) training mean/std. Asks "is the live climate in a region
 //     we've sampled?"
-//   - grind z: (suggested_grind - mean_g_real) / std_g_real using
-//     real-shots-only stats. Asks "is the recommendation inside the user's
-//     observed dial range?"
+//   - grind z: (suggested_grind - mean_g) / std_g_real. mean_g coincides
+//     with the real-shot grind centroid by construction (symmetric phantom
+//     placement); std_g_real excludes phantoms so this asks "is the
+//     recommendation inside the user's observed dial range?"
 // Both factors enter the reported confidence as an unweighted average with
 // the slope-quality factor (derived from Σ[0,0]). Averaging means no single
 // factor can hide a useful suggestion, but each one drags the displayed
@@ -192,6 +203,21 @@ PresetFit fit(const FitSample* samples, std::size_t n_real) {
   PresetFit f = {};
   if (n_real < kMinShotsForFit) return f;
 
+  // --- Step 0: real-shot grind centroid drives phantom placement -------
+  // Phantoms are built symmetrically around the user's actual operating
+  // point so the directional prior ("finer→longer") lands near real data
+  // regardless of where on the dial the user lives. The symmetric ±spread
+  // placement also makes the phantom contributions to mean_g cancel out,
+  // so f.mean_g (computed below across all weighted samples) will equal
+  // this real-only centroid algebraically.
+  double sum_g_real = 0.0;
+  for (std::size_t i = 0; i < n_real; ++i) sum_g_real += samples[i].user_grind;
+  const float g_real_mean = static_cast<float>(sum_g_real / n_real);
+  const PriorShot phantoms[] = {
+      {g_real_mean - kPriorShotGrindSpread, +10.0f},  // finer  → longer
+      {g_real_mean + kPriorShotGrindSpread, -10.0f},  // coarser → shorter
+  };
+
   // --- Step 1: weighted means + stds ------------------------------------
   // Standardizing per-feature lets the single λ act as the right ridge for
   // all coefficients regardless of their raw scale (pressure varies in
@@ -207,7 +233,7 @@ PresetFit fit(const FitSample* samples, std::size_t n_real) {
     sum_P += samples[i].pressure_hpa;
     sum_y += samples[i].time_delta_s;
   }
-  for (const auto& ph : kPriorShots) {
+  for (const auto& ph : phantoms) {
     w_sum += kPriorShotWeight;
     sum_g += kPriorShotWeight * ph.user_grind;
     sum_T += kPriorShotWeight * kPriorShotTempC;
@@ -235,7 +261,7 @@ PresetFit fit(const FitSample* samples, std::size_t n_real) {
     var_P += dP * dP;
     var_y += dy * dy;
   }
-  for (const auto& ph : kPriorShots) {
+  for (const auto& ph : phantoms) {
     const float dg = ph.user_grind       - f.mean_g;
     const float dT = kPriorShotTempC     - f.mean_T;
     const float dH = kPriorShotHumidity  - f.mean_H;
@@ -253,17 +279,14 @@ PresetFit fit(const FitSample* samples, std::size_t n_real) {
   f.std_P = std::max(kStdFloor, static_cast<float>(std::sqrt(var_P / w_sum)));
   f.std_y = std::max(kStdFloor, static_cast<float>(std::sqrt(var_y / w_sum)));
 
-  // Real-shots-only grind centroid and spread, for the grind-extrapolation
-  // confidence factor. Separate from f.mean_g / f.std_g (which fold phantoms
-  // in for the fit math) so the factor reflects user behavior, not the
-  // prior. Floored at kGrindStdFloor so single-dial-setting histories don't
-  // make the factor pathological.
-  double sum_g_r = 0.0;
-  for (std::size_t i = 0; i < n_real; ++i) sum_g_r += samples[i].user_grind;
-  f.mean_g_real = static_cast<float>(sum_g_r / n_real);
+  // Real-shots-only grind spread, for the grind-extrapolation confidence
+  // factor. Floored at kGrindStdFloor so single-dial-setting histories
+  // don't make the factor pathological. (No matching mean_g_real because
+  // symmetric phantom placement makes f.mean_g == this real-shot mean
+  // algebraically — see Step 0.)
   double var_g_r = 0.0;
   for (std::size_t i = 0; i < n_real; ++i) {
-    const float d = samples[i].user_grind - f.mean_g_real;
+    const float d = samples[i].user_grind - g_real_mean;
     var_g_r += d * d;
   }
   f.std_g_real = std::max(kGrindStdFloor,
@@ -298,7 +321,7 @@ PresetFit fit(const FitSample* samples, std::size_t n_real) {
                samples[i].humidity_pct, samples[i].pressure_hpa,
                samples[i].time_delta_s);
   }
-  for (const auto& ph : kPriorShots) {
+  for (const auto& ph : phantoms) {
     accumulate(kPriorShotWeight, ph.user_grind, kPriorShotTempC,
                kPriorShotHumidity, kPriorShotPressure, ph.time_delta_s);
   }
@@ -368,11 +391,12 @@ Suggestion suggest(const PresetFit& f, ClimateInput c, float target_time_delta) 
   //                              hidden by the point-estimate clamp.
   //   (3) grind_extrap_factor:   how close the *recommended grind* is to the
   //                              dial settings the user has actually pulled.
-  //                              Same shape as (2), but using the
-  //                              real-shots-only mean_g_real/std_g_real (no
-  //                              phantoms — so a model that's never seen
-  //                              the user move the dial gets honestly
-  //                              penalized when it recommends moving it).
+  //                              Same shape as (2); uses f.mean_g (which
+  //                              equals the real-shot centroid by symmetric
+  //                              phantom placement) and f.std_g_real (real
+  //                              shots only). A model that's never seen the
+  //                              user move the dial gets honestly penalized
+  //                              when it recommends moving it.
   // Averaging means no single factor can hide a useful suggestion, but each
   // one drags the displayed number toward honest territory when warranted.
   const float slope_factor = std::clamp(1.0f - f.sigma[0] * kPriorPrec, 0.0f, 1.0f);
@@ -383,7 +407,7 @@ Suggestion suggest(const PresetFit& f, ClimateInput c, float target_time_delta) 
       1.0f - std::max(0.0f, z_climate - kExtrapPenaltyStart) /
                  (kExtrapPenaltyEnd - kExtrapPenaltyStart),
       0.0f, 1.0f);
-  const float z_grind = std::fabs((grind - f.mean_g_real) / f.std_g_real);
+  const float z_grind = std::fabs((grind - f.mean_g) / f.std_g_real);
   const float grind_extrap_factor = std::clamp(
       1.0f - std::max(0.0f, z_grind - kExtrapPenaltyStart) /
                  (kExtrapPenaltyEnd - kExtrapPenaltyStart),
