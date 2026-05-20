@@ -176,12 +176,23 @@ bool predicted_visible(const model::Suggestion& s) {
 struct ArrowState {
   float      angle_deg;  // 180° = tip pointing straight down (outward at 6 o'clock)
   lv_color_t color;
+  int32_t    half_base;  // base half-width in px
+  int32_t    height;     // tip-to-base distance in px
 };
-ArrowState s_cursor_arrow_state    = {180.0f, LV_COLOR_MAKE(0xE0, 0xE0, 0xE0)};
-ArrowState s_predicted_arrow_state = {180.0f, LV_COLOR_MAKE(0xC8, 0x40, 0x40)};
+// Cursor is 2× the original triangle (14-px half-base, 28-px height) —
+// visible from across the room without crowding the dot strip. Predicted
+// indicator stays at the original size.
+ArrowState s_cursor_arrow_state    = {180.0f, LV_COLOR_MAKE(0xE0, 0xE0, 0xE0), 14, 28};
+ArrowState s_predicted_arrow_state = {180.0f, LV_COLOR_MAKE(0xC8, 0x40, 0x40),  7, 14};
 
-constexpr int32_t kArrowHalfBase = 7;   // base half-width (so base = 14 px)
-constexpr int32_t kArrowHeight   = 14;  // tip-to-base distance
+// Per-arrow widget sizes — declared at file scope (and used by both the
+// builders and the positioners) so the centering math never relies on a
+// possibly-stale lv_obj_get_width. The earlier bug had the cursor offset
+// 14 px right + 14 px down because lv_obj_get_width returned 0 before the
+// first layout pass.
+constexpr int32_t kCursorWidget    = 40;  // bounds the 28-px-tall cursor with margin
+constexpr int32_t kPredictedWidget = 28;
+constexpr int32_t kCursorUpOffset  = 20;  // px above kCursorRadius — pulls the cursor closer to the value text
 
 void draw_arrow_event(lv_event_t* e) {
   lv_layer_t* layer = lv_event_get_layer(e);
@@ -210,13 +221,15 @@ void draw_arrow_event(lv_event_t* e) {
     return p;
   };
 
+  const float hb = static_cast<float>(state->half_base);
+  const float h  = static_cast<float>(state->height);
   lv_draw_triangle_dsc_t dsc;
   lv_draw_triangle_dsc_init(&dsc);
   dsc.color = state->color;
   dsc.opa   = LV_OPA_COVER;
-  dsc.p[0] = rot(0.0f,                  +kArrowHeight   * 0.5f);
-  dsc.p[1] = rot(-kArrowHalfBase * 1.0f, -kArrowHeight  * 0.5f);
-  dsc.p[2] = rot(+kArrowHalfBase * 1.0f, -kArrowHeight  * 0.5f);
+  dsc.p[0] = rot(0.0f, +h * 0.5f);   // tip
+  dsc.p[1] = rot(-hb,  -h * 0.5f);   // base-left
+  dsc.p[2] = rot(+hb,  -h * 0.5f);   // base-right
   lv_draw_triangle(layer, &dsc);
 }
 
@@ -304,9 +317,12 @@ void refresh_predicted_arrow() {
   const float angle = value_angle_deg(v_p, s_grind_value);
   int32_t x, y;
   polar_to_screen(angle, kCursorRadius, &x, &y);
-  const int32_t w = lv_obj_get_width(s_predicted_arrow);
-  const int32_t h = lv_obj_get_height(s_predicted_arrow);
-  lv_obj_set_pos(s_predicted_arrow, x - w / 2, y - h / 2);
+  // Centering math uses the known widget size — lv_obj_get_width returns 0
+  // here on the very first call (before LVGL has done a layout pass), which
+  // would offset the triangle by +half_widget into the lower-right.
+  lv_obj_set_pos(s_predicted_arrow,
+                 x - kPredictedWidget / 2,
+                 y - kPredictedWidget / 2);
 
   // Push the new angle + color into the arrow's state and invalidate so the
   // DRAW_MAIN handler picks them up. No transforms / no fonts in play; the
@@ -691,13 +707,9 @@ lv_obj_t* make_round_btn(lv_obj_t* parent, int32_t size) {
   return b;
 }
 
-lv_obj_t* make_arrow(lv_obj_t* parent, ArrowState* state) {
+lv_obj_t* make_arrow(lv_obj_t* parent, ArrowState* state, int32_t widget_size) {
   lv_obj_t* a = lv_obj_create(parent);
-  // Widget needs to be big enough to contain the triangle at any rotation;
-  // the diagonal of a kArrowHalfBase·2 × kArrowHeight isoceles triangle
-  // bounds at roughly 1.5× the longer side, so 28×28 leaves comfortable
-  // headroom for the predicted indicator's full rotation range.
-  lv_obj_set_size(a, 28, 28);
+  lv_obj_set_size(a, widget_size, widget_size);
   lv_obj_set_style_bg_opa(a, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_border_width(a, 0, LV_PART_MAIN);
   lv_obj_set_style_pad_all(a, 0, LV_PART_MAIN);
@@ -760,22 +772,23 @@ void build_ring(lv_obj_t* scr) {
 
   // Static cursor at 6 o'clock, tip pointing OUTWARD (down) at the dot
   // strip. Drawn as a filled triangle (see draw_arrow_event); state stays
-  // fixed at 180° / kColorText, so no refresh needed after init.
-  s_cursor_arrow_state = {180.0f, kColorText};
-  s_static_cursor = make_arrow(scr, &s_cursor_arrow_state);
+  // fixed at 180° / kColorText, so no refresh needed after init. Pulled
+  // up by kCursorUpOffset px so the (now 2×-sized) cursor doesn't crowd
+  // the dot strip and sits closer to the value text.
+  s_cursor_arrow_state.color = kColorText;
+  s_static_cursor = make_arrow(scr, &s_cursor_arrow_state, kCursorWidget);
   {
     int32_t cx, cy;
     polar_to_screen(180.0f, kCursorRadius, &cx, &cy);
-    const int32_t w = lv_obj_get_width(s_static_cursor);
-    const int32_t h = lv_obj_get_height(s_static_cursor);
-    lv_obj_set_pos(s_static_cursor, cx - w / 2, cy - h / 2);
+    lv_obj_set_pos(s_static_cursor,
+                   cx - kCursorWidget / 2,
+                   cy - kCursorUpOffset - kCursorWidget / 2);
   }
 
   // Predicted arrow — created hidden; refresh_predicted_arrow() positions
   // it on the rim at the suggested grind's angle and recolors per
-  // confidence tier. Same orbit as the static cursor so the two visually
-  // stack when the user has dialed exactly the suggested value.
-  s_predicted_arrow = make_arrow(scr, &s_predicted_arrow_state);
+  // confidence tier.
+  s_predicted_arrow = make_arrow(scr, &s_predicted_arrow_state, kPredictedWidget);
   lv_obj_add_flag(s_predicted_arrow, LV_OBJ_FLAG_HIDDEN);
 
   // Current value as big text just above the cursor, visible in BOTH modes.
