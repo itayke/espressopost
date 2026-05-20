@@ -28,10 +28,13 @@ constexpr int32_t kCenter          = kScreen / 2;
 constexpr int32_t kDotRingRadius   = 215;  // rim dot strip (swipe assistant)
 constexpr int32_t kCursorRadius    = 195;  // static cursor + predicted arrow, just inside dot ring
 constexpr int32_t kRingInnerEdge   = 155;  // press inside this = center widget, not ring drag
-constexpr int32_t kBigDotRadius    = 5;    // every-5-units dot
+constexpr int32_t kBigDotRadius    = 5;    // integer-unit dot
 constexpr int32_t kSmallDotRadius  = 2;    // 0.1-step dot
-constexpr float   kArcHalfDeg      = 30.0f;  // dot strip is 60° wide centered at 6 o'clock
-constexpr float   kPressBufferDeg  = 15.0f;  // press-to-start-drag tolerance outside the arc
+constexpr float   kArcHalfDeg      = 37.5f;  // dot strip is 75° wide centered at 6 o'clock (+25%)
+// Press-to-start-drag is now gated by a y-coordinate threshold rather than
+// an angular slice — the user wants drags to start anywhere from the
+// current-grind text down through the arc, not just on the rim itself.
+constexpr int32_t kPressYThreshold = kCenter + 80;  // ~6 px above the value-text top
 
 // ---------------------------------------------------------------------------
 // Grind dial — 0..30 in 0.1 steps. The rim isn't a value display; it's a
@@ -49,9 +52,9 @@ constexpr float   kPressBufferDeg  = 15.0f;  // press-to-start-drag tolerance ou
 // ---------------------------------------------------------------------------
 constexpr float kGrindMin       =  0.0f;
 constexpr float kGrindMax       = 30.0f;
-constexpr float kGrindStep      =  0.1f;
-constexpr float kDegPerUnit     = 30.0f;          // °/grind unit — feel knob
-constexpr float kSubDotPitchDeg = kDegPerUnit / 10.0f;  // 0.1 step = 3°
+constexpr float kGrindStep      =  0.05f;  // dial resolution; dots stay at 0.1
+constexpr float kDegPerUnit     = 37.5f;          // °/grind unit — feel knob (+25% from 30 for more breathing room)
+constexpr float kSubDotPitchDeg = kDegPerUnit / 10.0f;  // 0.1 step = 3.75°
 
 // Time-delta range. Wider than realistic so a long-pull-and-channel doesn't
 // clip; the model downweights outliers via the quality field anyway.
@@ -89,7 +92,8 @@ lv_obj_t* s_ring_overlay      = nullptr;  // transparent full-screen rim-gesture
 lv_obj_t* s_dot_strip         = nullptr;  // tiny custom-drawn widget for the 30° dot window
 lv_obj_t* s_static_cursor     = nullptr;
 lv_obj_t* s_predicted_arrow   = nullptr;
-lv_obj_t* s_grind_value_label = nullptr;  // big "5.2" above the cursor — visible in both modes
+lv_obj_t* s_grind_value_label = nullptr;  // big "5.10" above the cursor — visible in idle mode
+lv_obj_t* s_suggested_label   = nullptr;  // "Suggested 5.15 · 75%" below the value, above the cursor
 
 // Idle group:
 lv_obj_t* s_idle_group          = nullptr;
@@ -129,6 +133,24 @@ float s_drag_last_angle     = 0.0f;  // degrees, CW from 12 o'clock
 // the snap quantum still accumulates across frames instead of being
 // discarded. Seeded from s_grind_value on PRESSED.
 float s_grind_value_raw     = 0.0f;
+
+// ---------------------------------------------------------------------------
+// Flick momentum. After release, carry the user's swipe velocity for ~500 ms
+// with exponential decay so the dial feels like a flywheel coasting to rest.
+// Velocity is tracked in grind units / second via an EMA over PRESSING
+// samples (single jittery samples shouldn't define the release velocity).
+// The momentum timer feeds the same s_grind_value_raw accumulator that a
+// live drag uses, so snapping / clamping / label refresh all run identically.
+// ---------------------------------------------------------------------------
+constexpr uint32_t kMomentumPeriodMs = 30;     // tick cadence — matches LVGL task
+constexpr int      kMomentumMaxTicks = 17;     // ≈500 ms at 30 ms/tick
+constexpr float    kMomentumDecay    = 0.85f;  // per tick → ~6% left after 17 ticks
+constexpr float    kMomentumMinSpeed = 0.5f;   // grind units/sec — below this we stop
+
+float       s_drag_velocity  = 0.0f;  // grind units per second, signed
+uint64_t    s_drag_last_us   = 0;     // timestamp of previous PRESSING sample
+lv_timer_t* s_momentum_timer = nullptr;
+int         s_momentum_ticks_left = 0;
 
 // ---------------------------------------------------------------------------
 // Math helpers.
@@ -192,7 +214,12 @@ ArrowState s_predicted_arrow_state = {180.0f, LV_COLOR_MAKE(0xC8, 0x40, 0x40),  
 // first layout pass.
 constexpr int32_t kCursorWidget    = 40;  // bounds the 28-px-tall cursor with margin
 constexpr int32_t kPredictedWidget = 28;
-constexpr int32_t kCursorUpOffset  = 20;  // px above kCursorRadius — pulls the cursor closer to the value text
+// Push the cursor down by (cursor_h - predicted_h) / 2 = (28 - 14) / 2 = 7
+// so that when the predicted arrow lands directly on the cursor (same angle),
+// both tips sit at the same y. The smaller predicted arrow then nests inside
+// the lower half of the cursor's silhouette; z-order (predicted created after
+// the cursor in build_ring) keeps the suggested arrow visually on top.
+constexpr int32_t kCursorUpOffset  = 7;
 
 void draw_arrow_event(lv_event_t* e) {
   lv_layer_t* layer = lv_event_get_layer(e);
@@ -203,8 +230,11 @@ void draw_arrow_event(lv_event_t* e) {
 
   lv_area_t coords;
   lv_obj_get_coords(obj, &coords);
-  const float cx = (coords.x1 + coords.x2) * 0.5f;
-  const float cy = (coords.y1 + coords.y2) * 0.5f;
+  // LVGL areas are inclusive on both ends, so (x1+x2)/2 lands half a pixel
+  // short of the geometric center. Use the actual width/height (x2-x1+1)
+  // so the triangle's tip sits exactly on the widget's centerline.
+  const float cx = coords.x1 + lv_area_get_width(&coords)  * 0.5f;
+  const float cy = coords.y1 + lv_area_get_height(&coords) * 0.5f;
 
   // Default orientation: tip at (0, +h/2), base from (−w/2, −h/2) to
   // (+w/2, −h/2) — so the triangle points straight DOWN (screen +y).
@@ -239,23 +269,28 @@ void draw_arrow_event(lv_event_t* e) {
 // outward from the cursor at multiples of kSubDotPitchDeg, marking the ones
 // whose distance-from-cursor is a full integer in grind units as big.
 //
-// Crucially, dot positions only depend on s_grind_value mod 0.1 (which is
-// always 0 after snap) and on which sub-step the cursor sits on (for the
-// "is integer" check). The rim therefore looks identical at v=5.1 and
-// v=4.1 — exactly the swipe-feedback semantics we want: the rim is just
-// "your finger is doing something," the actual number lives in the text
-// above the cursor.
+// Dots are spaced at every 0.1 grind units — but the cursor's value snaps
+// to 0.05, so half the time the cursor sits *between* two dots. We iterate
+// 0.1-step indices (integers numbered in tenths of a grind unit) and
+// project each one to its angular position relative to the cursor's
+// current value. The cursor doesn't have to coincide with a dot.
+//
+// As the user drags by 0.05, every dot shifts 1.5° — half the gap to the
+// next 0.1 dot — so the rim still gives smooth swipe feedback even when
+// the cursor is in the in-between position.
 // ---------------------------------------------------------------------------
 void draw_dot_strip(lv_event_t* e) {
   lv_layer_t* layer = lv_event_get_layer(e);
   if (layer == nullptr) return;
 
-  // Cursor's sub-step index in absolute terms (51 for v=5.1). Only used to
-  // decide which neighbours are integer-aligned — never for positioning.
-  const int32_t center_substep =
-      static_cast<int32_t>(std::lround(s_grind_value * 10.0f));
-  const int32_t max_n =
-      static_cast<int32_t>(std::ceil(kArcHalfDeg / kSubDotPitchDeg)) + 1;
+  // Visible range of grind values inside the arc, picked up by the dot
+  // indexer below. A small over-scan keeps a dot from popping in/out at
+  // the very edge of the arc.
+  const float v_half = kArcHalfDeg / kDegPerUnit;
+  const int32_t idx_min = static_cast<int32_t>(
+      std::floor((s_grind_value - v_half) * 10.0f)) - 1;
+  const int32_t idx_max = static_cast<int32_t>(
+      std::ceil((s_grind_value + v_half) * 10.0f)) + 1;
 
   lv_draw_rect_dsc_t big_dsc;
   lv_draw_rect_dsc_init(&big_dsc);
@@ -269,15 +304,20 @@ void draw_dot_strip(lv_event_t* e) {
   small_dsc.bg_opa   = LV_OPA_COVER;
   small_dsc.radius   = LV_RADIUS_CIRCLE;
 
-  // Sign: positive n = higher grind value than cursor = CCW of cursor in
-  // screen-angle convention (lower angle). Negative n = lower value = CW.
-  for (int32_t n = -max_n; n <= max_n; ++n) {
-    const float angle_offset = -n * kSubDotPitchDeg;
+  for (int32_t idx = idx_min; idx <= idx_max; ++idx) {
+    // Sign: higher grind value than cursor = CCW of cursor in screen
+    // convention (lower screen angle), so negate the (v_i − v_cur)·pitch.
+    const float v_i = idx * 0.1f;
+    const float angle_offset = -(v_i - s_grind_value) * kDegPerUnit;
     if (std::fabs(angle_offset) > kArcHalfDeg + 0.5f) continue;
     const float angle_deg = 180.0f + angle_offset;
     int32_t x, y;
     polar_to_screen(angle_deg, kDotRingRadius, &x, &y);
-    const bool is_big = ((center_substep + n) % 10 == 0);
+    // Big dot at every integer grind unit (= every 10 tenths). With the new
+    // 30°/unit pitch the sub-dots are spaced enough that majors-every-1
+    // no longer crowd them — used to be every-5 back when sub-dots merged
+    // into a gray rail at the old 9°/unit density.
+    const bool is_big = (idx % 10 == 0);
     const int32_t r = is_big ? kBigDotRadius : kSmallDotRadius;
     lv_area_t a = {x - r, y - r, x + r, y + r};
     lv_draw_rect(layer, is_big ? &big_dsc : &small_dsc, &a);
@@ -307,16 +347,55 @@ void refresh_ring() {
 // by confidence tier. Hidden entirely when confidence ≤ 30 (the user sees an
 // empty rim, which IS the signal: "model has nothing useful to say").
 // ---------------------------------------------------------------------------
+// Small "Suggested x.xx · NN%" line below the value text. Hidden when the
+// model has no usable suggestion or when the post-mode form is up.
+void refresh_suggested_label() {
+  if (s_suggested_label == nullptr) return;
+  if (s_mode != Mode::Idle || !predicted_visible(s_current_suggestion)) {
+    lv_obj_add_flag(s_suggested_label, LV_OBJ_FLAG_HIDDEN);
+    return;
+  }
+  // U+00B7 (middle-dot) isn't in Montserrat 14's range — it rendered as a
+  // missing-glyph rect. Parentheses are ASCII-clean and read just as well.
+  char buf[40];
+  std::snprintf(buf, sizeof(buf),
+                "Suggested %.2f (%u%%)",
+                static_cast<double>(s_current_suggestion.grind),
+                static_cast<unsigned>(s_current_suggestion.confidence_pct));
+  lv_label_set_text(s_suggested_label, buf);
+  // Match the arrow's confidence tier so the label and the rim indicator
+  // carry the same color signal — useful when the arrow is hidden because
+  // the suggestion fell outside the arc.
+  lv_obj_set_style_text_color(s_suggested_label,
+                              confidence_color(s_current_suggestion.confidence_pct),
+                              LV_PART_MAIN);
+  lv_obj_remove_flag(s_suggested_label, LV_OBJ_FLAG_HIDDEN);
+}
+
 void refresh_predicted_arrow() {
   if (s_predicted_arrow == nullptr) return;
   if (!predicted_visible(s_current_suggestion)) {
     lv_obj_add_flag(s_predicted_arrow, LV_OBJ_FLAG_HIDDEN);
+    refresh_suggested_label();
     return;
   }
-  const float v_p   = s_current_suggestion.grind;
-  const float angle = value_angle_deg(v_p, s_grind_value);
+
+  // Signed angular offset from the cursor (no wrap — the rim is no longer a
+  // value scale, so wrapping makes no sense). If the suggestion falls
+  // outside the visible arc, hide the arrow entirely; the suggested-value
+  // text below the cursor still carries the numeric estimate (and matching
+  // color tier) so the user has the info without a misleading clamped arrow.
+  const float v_diff      = s_current_suggestion.grind - s_grind_value;
+  const float natural_off = -v_diff * kDegPerUnit;  // + = lower angle => higher value
+  if (std::fabs(natural_off) > kArcHalfDeg) {
+    lv_obj_add_flag(s_predicted_arrow, LV_OBJ_FLAG_HIDDEN);
+    refresh_suggested_label();
+    return;
+  }
+
+  const float position_angle = 180.0f + natural_off;
   int32_t x, y;
-  polar_to_screen(angle, kCursorRadius, &x, &y);
+  polar_to_screen(position_angle, kCursorRadius, &x, &y);
   // Centering math uses the known widget size — lv_obj_get_width returns 0
   // here on the very first call (before LVGL has done a layout pass), which
   // would offset the triangle by +half_widget into the lower-right.
@@ -327,11 +406,12 @@ void refresh_predicted_arrow() {
   // Push the new angle + color into the arrow's state and invalidate so the
   // DRAW_MAIN handler picks them up. No transforms / no fonts in play; the
   // triangle is rasterized fresh each frame from these two scalars.
-  s_predicted_arrow_state.angle_deg = angle;
+  s_predicted_arrow_state.angle_deg = position_angle;
   s_predicted_arrow_state.color =
       confidence_color(s_current_suggestion.confidence_pct);
   lv_obj_invalidate(s_predicted_arrow);
   lv_obj_remove_flag(s_predicted_arrow, LV_OBJ_FLAG_HIDDEN);
+  refresh_suggested_label();
 }
 
 // ---------------------------------------------------------------------------
@@ -340,7 +420,8 @@ void refresh_predicted_arrow() {
 void refresh_grind_value_label() {
   if (s_grind_value_label == nullptr) return;
   char buf[12];
-  std::snprintf(buf, sizeof(buf), "%.1f", static_cast<double>(s_grind_value));
+  // Two-decimal readout (e.g. "5.10", "5.15") — value snaps to 0.05.
+  std::snprintf(buf, sizeof(buf), "%.2f", static_cast<double>(s_grind_value));
   lv_label_set_text(s_grind_value_label, buf);
 }
 
@@ -463,6 +544,9 @@ void apply_mode() {
     // touch so the user has feedback that dragging works.
     if (s_grind_value_label) lv_obj_add_flag(s_grind_value_label, LV_OBJ_FLAG_HIDDEN);
   }
+  // Suggested label has its own visibility (mode + suggestion availability);
+  // let it recompute.
+  refresh_suggested_label();
 }
 
 void enter_idle() {
@@ -589,6 +673,48 @@ void on_submit(lv_event_t*) {
   refresh_ring();
 }
 
+// Apply one frame of post-release momentum. Decays the velocity, advances
+// s_grind_value_raw by velocity·dt, and re-uses the same snap + redraw path
+// that the live drag uses so the visual behavior is identical. Persists the
+// grind value to NVS at the end of the glide (matching the RELEASED contract).
+void momentum_tick(lv_timer_t* t) {
+  const float dt_s = static_cast<float>(kMomentumPeriodMs) / 1000.0f;
+  s_grind_value_raw = std::clamp(s_grind_value_raw + s_drag_velocity * dt_s,
+                                 kGrindMin, kGrindMax);
+  const float new_value = std::round(s_grind_value_raw * 20.0f) / 20.0f;
+  if (new_value != s_grind_value) {
+    s_grind_value = new_value;
+    refresh_ring();
+    refresh_grind_value_label();
+  }
+  s_drag_velocity *= kMomentumDecay;
+  --s_momentum_ticks_left;
+
+  // Stop when we've coasted long enough, the velocity has decayed below the
+  // noise floor, or we've pinned to the dial range. Persist on the way out
+  // so the per-preset NVS slot reflects the post-glide value, not the value
+  // at finger-up.
+  const bool at_edge = (s_grind_value_raw <= kGrindMin + 1e-4f) ||
+                       (s_grind_value_raw >= kGrindMax - 1e-4f);
+  if (s_momentum_ticks_left <= 0 ||
+      std::fabs(s_drag_velocity) < kMomentumMinSpeed ||
+      at_edge) {
+    presets::set_last_grind(presets::selected_id(), s_grind_value);
+    s_drag_velocity = 0.0f;
+    s_momentum_timer = nullptr;
+    lv_timer_delete(t);
+  }
+}
+
+void cancel_momentum() {
+  if (s_momentum_timer != nullptr) {
+    lv_timer_delete(s_momentum_timer);
+    s_momentum_timer = nullptr;
+  }
+  s_drag_velocity = 0.0f;
+  s_momentum_ticks_left = 0;
+}
+
 // Ring drag. We can't use LVGL's high-level gestures (those fire only on
 // swipe-up/down/left/right). Instead we attach PRESSED/PRESSING/RELEASED to
 // the full-screen overlay and convert the touch's angle-from-center into
@@ -603,28 +729,24 @@ void on_ring_event(lv_event_t* e) {
   lv_indev_get_point(indev, &p);
   const float dx = static_cast<float>(p.x - kCenter);
   const float dy = static_cast<float>(p.y - kCenter);
-  const float r  = std::sqrt(dx * dx + dy * dy);
 
   switch (code) {
     case LV_EVENT_PRESSED: {
-      if (r < kRingInnerEdge) {
-        s_ring_dragging = false;  // press inside center → not a ring drag
+      // Drag starts only when the press lands at or below the current-
+      // grind text — the whole lower band of the screen is now a "swipe
+      // surface" so the user can scrub starting from the number, the
+      // cursor, or the dot strip without needing to land exactly on the
+      // rim. Once dragging, the finger can wander anywhere.
+      if (p.y < kPressYThreshold) {
+        s_ring_dragging = false;
         return;
       }
-      // Restrict the start of a drag to the dot strip arc (plus a buffer so
-      // the user doesn't need pixel-perfect aim). Once dragging, the finger
-      // can wander anywhere — that's still tracked via angular delta.
-      // Touch angle in [-180, 180], 0 = top; "distance to 6 o'clock" is
-      // (180° − |angle|).
-      const float touch_angle =
-          std::atan2(dx, -dy) * (180.0f / kPi);
-      const float dist_from_bottom = 180.0f - std::fabs(touch_angle);
-      if (dist_from_bottom > kArcHalfDeg + kPressBufferDeg) {
-        s_ring_dragging = false;  // press is somewhere on the silent rim
-        return;
-      }
+      // Grabbing again mid-glide stops the flywheel — the new touch should
+      // own the motion, not fight a tail from the last release.
+      cancel_momentum();
       s_ring_dragging   = true;
-      s_drag_last_angle = touch_angle;
+      s_drag_last_angle = std::atan2(dx, -dy) * (180.0f / kPi);
+      s_drag_last_us    = esp_timer_get_time();
       // Seed the raw value at the snapped one so sub-snap motion can
       // accumulate from there. Without this we'd lose any partial-step
       // motion the user has built up in a previous drag.
@@ -650,18 +772,42 @@ void on_ring_event(lv_event_t* e) {
       const float dv = delta / kDegPerUnit;
       s_grind_value_raw =
           std::clamp(s_grind_value_raw + dv, kGrindMin, kGrindMax);
-      const float new_value = std::round(s_grind_value_raw * 10.0f) / 10.0f;
+      const float new_value = std::round(s_grind_value_raw * 20.0f) / 20.0f;
       if (new_value != s_grind_value) {
         s_grind_value = new_value;
         refresh_ring();
         refresh_grind_value_label();
       }
+      // Track velocity for the post-release flick. EMA with α=0.5 smooths
+      // single-frame jitter (touch driver can briefly stall) while still
+      // responding within ~2-3 frames to a real change in finger speed.
+      const uint64_t now_us = esp_timer_get_time();
+      if (s_drag_last_us != 0) {
+        const float dt_s = static_cast<float>(now_us - s_drag_last_us) / 1e6f;
+        if (dt_s > 1e-4f) {
+          const float instant = dv / dt_s;
+          s_drag_velocity = 0.5f * s_drag_velocity + 0.5f * instant;
+        }
+      }
+      s_drag_last_us = now_us;
       break;
     }
     case LV_EVENT_RELEASED:
     case LV_EVENT_PRESS_LOST: {
-      if (s_ring_dragging) {
-        s_ring_dragging = false;
+      if (!s_ring_dragging) break;
+      s_ring_dragging = false;
+      s_drag_last_us  = 0;
+      // If the finger lifted with non-trivial speed, hand off to the
+      // momentum timer — it'll persist the final value to NVS when it
+      // settles. Otherwise persist immediately; there's nothing to glide.
+      if (std::fabs(s_drag_velocity) >= kMomentumMinSpeed) {
+        s_momentum_ticks_left = kMomentumMaxTicks;
+        if (s_momentum_timer == nullptr) {
+          s_momentum_timer =
+              lv_timer_create(momentum_tick, kMomentumPeriodMs, nullptr);
+        }
+      } else {
+        s_drag_velocity = 0.0f;
         presets::set_last_grind(presets::selected_id(), s_grind_value);
       }
       break;
@@ -749,14 +895,15 @@ void build_ring(lv_obj_t* scr) {
   // image rotation — the per-frame cost drops to a few hundred pixels of
   // fill work.
   //
-  // Bounding box math: dots sit at radius kDotRingRadius (215). The 60° arc
-  // centered at 6 o'clock spans screen-angles [150°, 210°]. The widest x
-  // excursion is r·sin(30°) ≈ 108 from center; the highest dot is at
-  // r·cos(30°) ≈ 186 below center, the lowest at r·cos(0°) = r (at exactly
-  // 6 o'clock). Pad ±10 for the big-dot radius and a couple of safety pixels.
+  // Bounding box math: dots sit at radius kDotRingRadius (215). The 75° arc
+  // centered at 6 o'clock spans screen-angles [142.5°, 217.5°]. The widest x
+  // excursion is r·sin(37.5°) ≈ 131 from center; the highest dot is at
+  // r·cos(37.5°) ≈ 170 below center, the lowest at r·cos(0°) = r (at
+  // exactly 6 o'clock). Pad ±10 for the big-dot radius and a couple of
+  // safety pixels.
   {
-    constexpr int32_t kHalfW = 125;
-    constexpr int32_t kStripH = 42;
+    constexpr int32_t kHalfW = 145;
+    constexpr int32_t kStripH = 60;
     const int32_t y0 = kCenter + kDotRingRadius - kStripH + 10;
     s_dot_strip = lv_obj_create(scr);
     lv_obj_set_size(s_dot_strip, kHalfW * 2, kStripH);
@@ -773,8 +920,10 @@ void build_ring(lv_obj_t* scr) {
   // Static cursor at 6 o'clock, tip pointing OUTWARD (down) at the dot
   // strip. Drawn as a filled triangle (see draw_arrow_event); state stays
   // fixed at 180° / kColorText, so no refresh needed after init. Pulled
-  // up by kCursorUpOffset px so the (now 2×-sized) cursor doesn't crowd
-  // the dot strip and sits closer to the value text.
+  // up by kCursorUpOffset (= half the height difference between the two
+  // arrows) so that when the predicted arrow lands at the same angle, the
+  // two tips coincide and the smaller suggested arrow nests inside the
+  // cursor's lower half.
   s_cursor_arrow_state.color = kColorText;
   s_static_cursor = make_arrow(scr, &s_cursor_arrow_state, kCursorWidget);
   {
@@ -802,6 +951,19 @@ void build_ring(lv_obj_t* scr) {
   lv_obj_set_style_bg_opa(s_grind_value_label, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_align(s_grind_value_label, LV_ALIGN_CENTER, 0, 110);
   lv_obj_clear_flag(s_grind_value_label, LV_OBJ_FLAG_CLICKABLE);
+
+  // "Suggested 5.15 · 75%" line — slotted between the big value text and
+  // the cursor, hidden when there's no usable suggestion or in post mode.
+  // 14 pt fits in the ~21 px gap between value-text bottom (~y=367) and
+  // cursor top (~y=388).
+  s_suggested_label = lv_label_create(scr);
+  lv_obj_set_style_text_color(s_suggested_label, kColorMuted, LV_PART_MAIN);
+  lv_obj_set_style_text_font(s_suggested_label, &lv_font_montserrat_14,
+                             LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(s_suggested_label, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_align(s_suggested_label, LV_ALIGN_CENTER, 0, 145);
+  lv_obj_clear_flag(s_suggested_label, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_flag(s_suggested_label, LV_OBJ_FLAG_HIDDEN);
 }
 
 void build_idle_group(lv_obj_t* scr) {
