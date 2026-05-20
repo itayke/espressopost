@@ -6,17 +6,23 @@ learns a per-preset grind adjustment from local data. Offline-first.
 
 ## Status
 
-**Steps 1 – 5 (model v1) + idle policy + RTC + grind capture.** Display +
-capacitive touch up under LVGL 9 (round 466 × 466, 2-px-aligned partial
-redraws), 1 Hz BME280 read loop feeding a P / H / T status strip, an
-NVS-backed preset table (3 defaults seeded on first boot, selection
-persistent across reboots), and a Report screen (tappable preset row at
-top, time-delta stepper + grind stepper + suggestion row + 1–5 stars +
-Submit) that appends a 40-byte v3 `ShotRecord` to LittleFS on every save.
-The grind stepper defaults to the active preset's `grind_anchor` (so
-off-recipe shots take one tap; on-recipe shots take zero), records as an
-absolute float, and the model's recommendation lands as a separate
-`suggested_grind` field next to it. An idle watchdog dims the AMOLED 
+**Steps 1 – 5 (model v1) + idle policy + RTC + grind capture + ring UI.**
+Display + capacitive touch up under LVGL 9 (round 466 × 466, 2-px-aligned
+partial redraws), 1 Hz BME280 read loop, an NVS-backed preset table (3
+defaults seeded on first boot, selection persistent across reboots), and
+a two-mode screen built around a rotating grind bezel: **Idle** shows
+the preset name, climate strip, the current grind value big in the
+center, and a Post button; the outer rim is a 0 – 30 ring (0.1 steps)
+that rotates under finger drag with a static down-arrow at 6 o'clock
+indicating the live dial value. A second arrow on the ring — green,
+orange, or red by confidence tier (`>80 / >50 / >30`, hidden below) —
+points at the model's recommended grind, so the user can see at a
+glance how far they are from it. Tapping **Post** swaps the center
+content for a time-delta stepper + 1–5 stars + Submit; the ring stays
+live so they can keep dialing. Submit appends a 40-byte v3 `ShotRecord`
+to LittleFS and returns to Idle. The grind value persists per preset
+(NVS key `gN`); the model's recommendation lands in a separate
+`suggested_grind` field on the record. An idle watchdog dims the AMOLED 
 after 30 s and turns the panel off after 2 min; any touch wakes it
 (the wake-tap is swallowed for 500 ms so it doesn't accidentally hit a
 widget). PCF85063 RTC driven over the shared internal I²C bus: on first
@@ -37,17 +43,18 @@ floor while real shots cluster at one dial setting, (b) seed `β_g`
 with the right sign (finer→longer) so the first suggestion points the
 user the right way, and (c) fade as real data accumulates (two real
 shots already out-vote them). Refits on boot and after every submit.
-The Report screen shows a small accent-colored row beneath the grind
-stepper — `suggested 5.3 · 35%` — when the **combined confidence**
-clears the 10 % floor. Combined confidence is the average of three
-0..1 factors: (1) slope-quality from `Σ[0,0]` (how well we know the
-grind→time slope), (2) climate-extrapolation distance (how far live
-T/H/P sits outside the trained range, full credit within ±1σ decaying
-to 0 by ±3σ), and (3) grind-extrapolation distance (how far the
-recommended dial position sits outside the user's observed range,
-same shape). Rounded to nearest 5 %, capped at 95 %, suppressed below
-10 %. The cached suggestion at submit time is what gets stored in
-`ShotRecord.suggested_grind` (NaN when the row is hidden), so each
+The ring shows a colored arrow at the model's recommended grind whenever
+the **combined confidence** clears the `>30` threshold: green above 80,
+orange above 50, red above 30, hidden below. Combined confidence is the
+average of three 0..1 factors: (1) slope-quality from `Σ[0,0]` (how well
+we know the grind→time slope), (2) climate-extrapolation distance (how
+far live T/H/P sits outside the trained range, full credit within ±1σ
+decaying to 0 by ±3σ), and (3) grind-extrapolation distance (how far the
+recommended dial position sits outside the user's observed range, same
+shape). Internally still rounded to nearest 5 %, capped at 95 % — the
+numeric value is no longer on screen, only in the `state:` debug log.
+The cached suggestion at submit time is what gets stored in
+`ShotRecord.suggested_grind` (NaN when the arrow was hidden), so each
 shot records the model state the user actually saw. Quality model,
 cross-preset pooling, and recency-weighted shots from the spec are
 deferred — the time-only model gets us a useful directional indicator
@@ -189,50 +196,56 @@ instead.
 ## What to verify on this build
 
 1. Boot log shows: `display: display + LVGL ready (466x466, 50-line partial buffer)`, `touch: CST9217 touch ready`, `storage: littlefs mounted at /littlefs (...KB used, N shots logged)`, `presets: 3 presets loaded, selected=N ("espresso")`, (if a BME280 is wired) `climate: BME280 ready at 0x76 on I2C1 (SDA=17 SCL=18 @ 400000 Hz)`, the RTC line — either `rtc: first boot (OS=1) — seeding from build time …` on a virgin chip, or `rtc: PCF85063 already set: 2026-MM-DD HH:MM:SS UTC (epoch …)` on subsequent boots — and `model: refit: N records on disk, M presets fit, K shots used in fits`.
-2. Screen shows, top to bottom: a tappable preset row (e.g. `espresso ·
-   target 30s`), the climate strip, a `-` placeholder for time delta with
-   a `-` / `+` stepper around it, a `grind: 5.2` row with its own
-   smaller `-` / `+` stepper, optionally a small amber
-   `suggested 5.3 · 35%` line below it (only when the model has enough
-   data and a non-zero confidence), five gray quality circles, and a
-   muted **Submit** button (disabled until time delta and stars are
-   set — grind always has a value because it defaults to the preset's
-   anchor).
+2. **Idle screen** shows, from the outer rim inward: a 0 – 30 grind ring
+   with major-tick numerals (0, 1, …, 30), a static white down-arrow at
+   6 o'clock pointing into the ring at the live dial value, and —
+   whenever combined confidence exceeds 30 — a second colored arrow on
+   the ring pointing at the model's recommended grind (green above 80,
+   orange above 50, red above 30). Inside the ring: the active preset
+   row (e.g. `espresso · target 30s`, tappable), the climate strip, the
+   big grind value (e.g. `5.2`), and an amber **Post** button.
 3. Tapping the preset row cycles through the seeded presets (`espresso`
    → `lungo` → `ristretto` → back). Target seconds and the grind value
    both update — each preset carries its own `grind_anchor` (all three
    ship seeded to 5.2 on first boot or after migration) and remembers
    the last grind value you dialed for it (NVS key `gN`, falls back to
-   `grind_anchor` until you change anything).
-4. Tapping `−` / `+` on the time row sets a signed seconds reading
-   (range −30 … +30). Tapping `−` / `+` on the grind row steps the
-   absolute value by 0.1 (range 0.0 … 99.9), and each step is persisted
-   to NVS so a reboot resumes on the same value. Tapping a star fills
-   it amber and any star to its left.
-5. Once time delta and stars are set, Submit lights amber. Tapping it
+   `grind_anchor` until you change anything). The predicted arrow on the
+   ring may move or change color as the new preset's model takes over.
+4. Drag anywhere on the rim to rotate the ring; values snap to 0.1 and
+   the big readout updates live. Direction follows the finger (drag CW
+   = dial UP), and the value is clamped to 0.0 … 30.0. The final value
+   on release is persisted to NVS so a reboot resumes on the same dial
+   setting per preset.
+5. Tapping **Post** swaps the center for a time-delta stepper (`-` / `+`
+   around a value, range −30 … +30), five gray quality circles, and a
+   muted **Submit** button (disabled until both delta and stars are
+   set). The ring + cursor + predicted arrow stay live — if the user
+   forgot to dial before tapping Post, they can finish from here. A
+   small `×` near the top cancels back to Idle without saving.
+6. Once time delta and stars are set, Submit lights amber. Tapping it
    appends a 40-byte v3 record to `/littlefs/shots.bin` (carrying
-   `user_grind` from the stepper and `suggested_grind` from whatever the
-   suggestion line was showing at submit time — NaN when it was
-   hidden), briefly shows `Saved #N` near the top, and clears the
-   time-delta / stars fields. The grind stepper keeps its last value
-   (most shots stay near the same dial setting). The model refits
-   immediately after the append, so the next preset cycle / climate tick
-   reflects the new data point.
-6. Power-cycling restores the last-selected preset (NVS persists it),
+   `user_grind` from the dial and `suggested_grind` from whatever the
+   predicted arrow was pointing at at submit time — NaN when the arrow
+   was hidden), briefly shows `Saved #N` near the top, returns to Idle,
+   and clears the post-form fields. The model refits immediately after
+   the append, so the predicted arrow on the next climate tick reflects
+   the new data point.
+7. Power-cycling restores the last-selected preset (NVS persists it),
    the last grind value for each preset, and the shot count carries
-   over (`Saved #2`, `#3`, …).
-7. Leaving the device untouched for 30 s drops brightness;
+   over (`Saved #2`, `#3`, …). Older firmware (pre-30.0 cap) that left a
+   grind value above 30 in NVS gets clamped on load — the raw NVS bytes
+   stay put, but the UI won't show or persist a value outside the ring.
+8. Leaving the device untouched for 30 s drops brightness;
    another 90 s and the panel turns off entirely. Touching it
    anywhere brings it back to full brightness, and the first 500 ms of
    touch after wake doesn't register as a tap (so you can pick the
-   device up without inadvertently submitting a shot).
-8. The `suggested` line should appear on the very first usable shot
+   device up without inadvertently rotating the ring or hitting Post).
+9. The predicted arrow should appear on the very first usable shot
    thanks to the phantom prior (two synthetic shots centered on the
    real-shot grind mean: `{real_mean − 0.5, +10s}` and
-   `{real_mean + 0.5, −10s}`, injected into every fit). Expect the
-   displayed confidence to be low (10–20 %) until you've logged real
-   shots that either confirm or pull against the prior; the percentage
-   climbs as real data accumulates. The convention encoded in the
+   `{real_mean + 0.5, −10s}`, injected into every fit). Expect it to
+   come up red (low band) for the first few shots and warm to orange /
+   green as real data accumulates. The convention encoded in the
    phantoms is "lower grind number = finer = longer shot" — if your
    grinder runs the opposite direction, flip the `time_delta_s` signs
    in the `phantoms[]` array inside `fit()` in

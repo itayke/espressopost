@@ -38,3 +38,10 @@ CONFIG_FREERTOS_HZ=1000
 # Enable both explicitly so the linker can find them.
 CONFIG_LV_FONT_MONTSERRAT_24=y
 CONFIG_LV_FONT_MONTSERRAT_48=y
+
+# --- LVGL extra modules ---
+# Snapshot bakes the rotated-number ring into a single 466×466 RGB565 sprite
+# at boot, so dialing the grind ring is one lv_image_set_rotation call per
+# frame instead of repositioning 31 label widgets. Without this, dragging the
+# rim collapses to 3–4 fps.
+CONFIG_LV_USE_SNAPSHOT=y

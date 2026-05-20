@@ -55,10 +55,10 @@ void flush_cb(lv_display_t* /*disp*/, const lv_area_t* area, uint8_t* px_map) {
   const int y1 = area->y1;
   const int x2 = area->x2 + 1;
   const int y2 = area->y2 + 1;
-  // LVGL 9 renders RGB565 little-endian by default; the CO5300 over QSPI
-  // expects big-endian RGB565. Swap in place before pushing — without this
-  // every color appears as its byte-swapped twin (amber → green, etc.).
-  lv_draw_sw_rgb565_swap(px_map, lv_area_get_size(area));
+  // LVGL is configured with LV_COLOR_FORMAT_RGB565_SWAPPED so the sw renderer
+  // writes pixels in the big-endian order the CO5300 expects directly — no
+  // CPU byte-swap on the flush hot path. (Earlier the swap ate ~10 ms per
+  // partial flush; killed the ring drag's frame rate.)
   esp_lcd_panel_draw_bitmap(s_panel, x1, y1, x2, y2, px_map);
 }
 
@@ -167,7 +167,7 @@ esp_err_t init_lvgl() {
 
   lv_display_set_buffers(s_lvgl_disp, s_draw_buf_a, s_draw_buf_b,
                          kDrawBufBytes, LV_DISPLAY_RENDER_MODE_PARTIAL);
-  lv_display_set_color_format(s_lvgl_disp, LV_COLOR_FORMAT_RGB565);
+  lv_display_set_color_format(s_lvgl_disp, LV_COLOR_FORMAT_RGB565_SWAPPED);
   lv_display_set_flush_cb(s_lvgl_disp, flush_cb);
   lv_display_add_event_cb(s_lvgl_disp, rounder_event_cb,
                           LV_EVENT_INVALIDATE_AREA, nullptr);
