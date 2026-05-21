@@ -234,7 +234,7 @@ esp_err_t init() {
       const auto& r = dump_buf[i];
       ESP_LOGI(kTag,
                "dump[%u]: ver=%u preset=%u t_d=%d stars=%u flags=0x%02x "
-               "T=%.2f H=%.2f P=%.2f grind=%.2f sugg=%.2f rtc=%u",
+               "T=%.2f H=%.2f P=%.2f grind=%.2f sugg=%.2f conf=%u rtc=%u",
                static_cast<unsigned>(i), static_cast<unsigned>(r.version),
                static_cast<unsigned>(r.preset_id),
                static_cast<int>(r.time_delta_s),
@@ -245,6 +245,7 @@ esp_err_t init() {
                static_cast<double>(r.pressure_hpa),
                static_cast<double>(r.user_grind),
                static_cast<double>(r.suggested_grind),
+               static_cast<unsigned>(r.confidence_pct),
                static_cast<unsigned>(r.rtc_epoch_s));
     }
     std::free(dump_buf);
@@ -260,7 +261,6 @@ esp_err_t append_shot(const ShotRecord& record) {
   r.version       = kRecordVersion;
   r._reserved[0]  = 0;
   r._reserved[1]  = 0;
-  r._reserved[2]  = 0;
 
   Guard g;
   if (!g.ok) return ESP_ERR_TIMEOUT;

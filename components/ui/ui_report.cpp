@@ -647,6 +647,10 @@ void on_submit(lv_event_t*) {
   rec.suggested_grind = predicted_visible(s_current_suggestion)
                             ? s_current_suggestion.grind
                             : std::nanf("");
+  // Confidence is recorded unconditionally — even when the arrow was hidden
+  // (low conf), the raw % is what lets post-hoc analysis separate "model said
+  // X with 80% conf" from "X with 20% conf" rather than just "X or NaN".
+  rec.confidence_pct  = s_current_suggestion.confidence_pct;
   if (r.timestamp_us != 0) {
     rec.temp_c       = r.temp_c;
     rec.humidity_pct = r.humidity_pct;

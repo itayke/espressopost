@@ -39,7 +39,8 @@ struct __attribute__((packed)) ShotRecord {
   int8_t   time_delta_s;     // user-reported shot time vs target, signed seconds
   uint8_t  quality_stars;    // user-reported taste, 1..5
   uint8_t  flags;            // see kFlag* above; 0 = normal, immutable in v1
-  uint8_t  _reserved[3];     // future use; zero on write
+  uint8_t  confidence_pct;   // model's confidence at submit time, 0..95 in 5-unit steps; 0 = unknown/suppressed. Carved out of the v3 reserved space — old records naturally read 0 ("unknown"), no migration needed.
+  uint8_t  _reserved[2];     // future use; zero on write
   int64_t  timestamp_us;     // esp_timer microseconds since boot at submit
   uint32_t rtc_epoch_s;      // wall-clock seconds since 1970 — 0 until RTC set
   float    temp_c;
