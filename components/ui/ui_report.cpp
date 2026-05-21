@@ -77,6 +77,16 @@ const lv_color_t kColorGreen  = LV_COLOR_MAKE(0x40, 0xB0, 0x60);
 const lv_color_t kColorOrange = LV_COLOR_MAKE(0xD8, 0x90, 0x30);
 const lv_color_t kColorRed    = LV_COLOR_MAKE(0xC8, 0x40, 0x40);
 
+// Climate-tile icon + label accents — muted enough to stay AMOLED-friendly
+// (no max-intensity sub-pixels) while reading as the named hue from a meter
+// away. Labels (`PRESSURE` / `TEMPERATURE` / `HUMIDITY`) share a "bright gray"
+// that sits between kColorText and kColorMuted — the icon is the colored
+// signal, the label is the supporting role.
+const lv_color_t kColorIconPurple = LV_COLOR_MAKE(0xA8, 0x80, 0xE0);
+const lv_color_t kColorIconRed    = LV_COLOR_MAKE(0xE0, 0x70, 0x55);
+const lv_color_t kColorIconBlue   = LV_COLOR_MAKE(0x60, 0xA8, 0xE0);
+const lv_color_t kColorLabelGray  = LV_COLOR_MAKE(0xB0, 0xB0, 0xB0);
+
 // ---------------------------------------------------------------------------
 // UI modes. The ring + cursor + predicted arrow stay live across both;
 // only the center widgets swap.
@@ -98,8 +108,28 @@ lv_obj_t* s_suggested_label   = nullptr;  // "Suggested 5.15 · 75%" below the v
 // Idle group:
 lv_obj_t* s_idle_group          = nullptr;
 lv_obj_t* s_preset_label        = nullptr;
-lv_obj_t* s_climate_label       = nullptr;
 lv_obj_t* s_post_btn            = nullptr;
+
+// Climate strip — three tap-to-toggle tiles in the top 40% of the screen.
+// Each tile is a button (taps cycle the unit); inside lives a custom-drawn
+// icon, the section label, and a centered value+suffix block. Tiles are
+// children of s_idle_group so they hide/show with the idle/post mode swap.
+enum ClimateIconKind { kIconGauge, kIconThermo, kIconDrop };
+struct ClimateIconState {
+  ClimateIconKind kind;
+  lv_color_t      color;
+};
+struct ClimateTile {
+  lv_obj_t*        container;    // tap-target button (whole column rect)
+  lv_obj_t*        icon;         // 32×32 custom-drawn widget
+  lv_obj_t*        label;        // section caption (all caps, font 14)
+  lv_obj_t*        value_lbl;    // big number, font 46
+  lv_obj_t*        suffix_lbl;   // inline unit suffix (°F, °C, %) — font 14
+  lv_obj_t*        subtext_lbl;  // new-line suffix (inHg, hPa, "Dew Point") — font 14, centered under value
+  ClimateIconState icon_state;
+  int32_t          content_cx;   // local x within the container for centering
+};
+ClimateTile s_climate_tiles[3] = {};
 
 // Post group:
 lv_obj_t* s_post_group          = nullptr;
@@ -822,24 +852,333 @@ void on_ring_event(lv_event_t* e) {
 }
 
 // ---------------------------------------------------------------------------
-// Climate strip update — 1 Hz. Also drives suggestion refresh on the same
-// cadence so the arrow tracks ambient changes without the user touching
-// anything.
+// Climate tiles — geometry, icon drawing, value formatting, tap-to-toggle.
 // ---------------------------------------------------------------------------
-void update_climate_strip(lv_timer_t*) {
-  if (s_climate_label != nullptr) {
-    const climate::Reading r = climate::latest();
-    if (r.timestamp_us == 0) {
-      lv_label_set_text(s_climate_label, "P --  H --  T --");
-    } else {
-      const float p_inhg = climate::hpa_to_inhg(r.pressure_hpa);
-      const float t_f    = climate::c_to_f(r.temp_c);
-      char buf[48];
-      std::snprintf(buf, sizeof(buf), "P %.2finHg  H %.0f%%  T %.1f\xC2\xB0""F",
-                    p_inhg, r.humidity_pct, t_f);
-      lv_label_set_text(s_climate_label, buf);
+// Climate area occupies the top 40% of the 466-px-tall screen. The 3-column
+// split is geometric thirds (466/3 ≈ 155.3); separators land at x=155 and
+// x=311 in screen coords. Tile content (icon, label, value) is centered at
+// these columns, with one wrinkle: the round-display chord at the icon y is
+// only ~370 px wide, so the outer two columns would clip their icons if
+// centered at the tile midpoint. We shift content-center inward by
+// kOuterTileInset for the left+right tiles — the separator lines stay on the
+// geometric thirds, but the icons, labels, and values sit visually inset
+// from the round-clipped edge.
+// Geometric thirds for the column splits stay put; the bottom-of-area line
+// has moved down to fit the bigger glyphs (50%-up icons + 50%-up value font
+// can't fit under y=186 without crowding).
+constexpr int32_t kClimateBottomY  = 222;
+constexpr int32_t kColLeftEdge0    = 0;
+constexpr int32_t kColLeftEdge1    = 155;
+constexpr int32_t kColLeftEdge2    = 311;
+constexpr int32_t kColRightEdge2   = kScreen;
+// Icon + label rows sit higher than the value row — feels balanced against
+// the round-clip chord. Temperature's icon nudges another 10 px up so the
+// stem doesn't look low next to the visually shorter gauge/drop glyphs.
+constexpr int32_t kTileIconY       = 60;    // top y of icon widget within tile (pressure / humidity)
+constexpr int32_t kTempIconExtraUp = 12;    // temperature icon ONLY: this much higher than the others (2 px extra over the visual nudge keeps the now-bigger thermometer's bulb bottom on the same screen y)
+constexpr int32_t kTileLabelY      = 116;   // top y of section caption
+// Value label uses Montserrat 46 (25% bigger than the previous 36 pt). The
+// label-top y moves up ~9 px from 158 so the BASELINE of the value stays at
+// the same screen y — the bigger font grows upward only, leaving the row
+// below (new-line subtext) where it was.
+constexpr int32_t kTileValueY      = 149;
+constexpr int32_t kIconSize        = 48;
+// Each separator line is pulled in by this much from both of its endpoints,
+// so the verticals stop short of the icon row and the bottom horizontal
+// stops short of the screen edge. Keeps the strip from looking like a
+// rigid table-cell grid; the lines now read as quiet dividers, not borders.
+constexpr int32_t kSeparatorInset  = 20;
+// Outer-tile content shifts *outward* from the tile center so the pressure
+// readout reads at the screen's left side and humidity at the right. Small
+// magnitude — the icon/label pair lands ~5 px off tile center, just enough
+// to differentiate the column groupings.
+constexpr int32_t kOuterContentShift = -5;
+
+// Bright-gray section caption color is the only "supporting" tone in the
+// climate strip — kColorLabelGray sits between kColorText and kColorMuted.
+
+// Custom-drawn DRAW_MAIN handler — single dispatcher for all three icons.
+// State lives in widget user_data (kind + color); the widget is a plain 32×32
+// transparent container, the draw callback paints the outline glyph.
+//
+// Coordinates inside each branch are LOCAL to the icon widget (cx/cy = widget
+// center); the dispatcher computes them from the widget's bounds so the icon
+// doesn't need to know its absolute position.
+void draw_climate_icon(lv_event_t* e) {
+  lv_layer_t* layer = lv_event_get_layer(e);
+  if (layer == nullptr) return;
+  auto* obj = static_cast<lv_obj_t*>(lv_event_get_target(e));
+  auto* state = static_cast<ClimateIconState*>(lv_obj_get_user_data(obj));
+  if (state == nullptr) return;
+
+  lv_area_t coords;
+  lv_obj_get_coords(obj, &coords);
+  // Use width/height (x2-x1+1) rather than (x1+x2)/2 so the glyph centers
+  // on the geometric midpoint, not half a pixel low/right.
+  const int32_t cx = coords.x1 + lv_area_get_width(&coords)  / 2;
+  const int32_t cy = coords.y1 + lv_area_get_height(&coords) / 2;
+
+  // Stroke width tracks the 50%-up icon size so the line weight scales with
+  // the glyph — a 2-px stroke would look spindly at 48 px.
+  constexpr int32_t kStroke = 3;
+
+  lv_draw_line_dsc_t ld;
+  lv_draw_line_dsc_init(&ld);
+  ld.color = state->color;
+  ld.opa   = LV_OPA_COVER;
+  ld.width = kStroke;
+  ld.round_start = 1;
+  ld.round_end   = 1;
+
+  lv_draw_arc_dsc_t ad;
+  lv_draw_arc_dsc_init(&ad);
+  ad.color = state->color;
+  ad.opa   = LV_OPA_COVER;
+  ad.width = kStroke;
+
+  // Helper: outline circle via rounded-rect with bg transparent + border. Cheaper
+  // than a 360° arc and avoids the start/end-cap pixel artifact.
+  auto circle_outline = [&](int32_t ox, int32_t oy, int32_t r) {
+    lv_draw_rect_dsc_t rd;
+    lv_draw_rect_dsc_init(&rd);
+    rd.bg_opa       = LV_OPA_TRANSP;
+    rd.border_width = kStroke;
+    rd.border_color = state->color;
+    rd.border_opa   = LV_OPA_COVER;
+    rd.radius       = LV_RADIUS_CIRCLE;
+    lv_area_t a = {ox - r, oy - r, ox + r, oy + r};
+    lv_draw_rect(layer, &rd, &a);
+  };
+
+  auto line = [&](int32_t x1, int32_t y1, int32_t x2, int32_t y2) {
+    ld.p1.x = x1; ld.p1.y = y1;
+    ld.p2.x = x2; ld.p2.y = y2;
+    lv_draw_line(layer, &ld);
+  };
+
+  // Coordinates below are tuned for a ~48-px effective drawing area (icon
+  // widget is 48×48, with a few pixels of internal margin). Original 32-px
+  // sizing was scaled by 1.5x and re-rounded so the geometry stays integer-
+  // pixel-aligned at the new size.
+  switch (state->kind) {
+    case kIconGauge: {
+      // Half-circle pressure gauge: arc across the top, three ticks at the
+      // 9/12/3 positions, and a needle pointing up-and-to-the-right (~45°)
+      // for a "reading in the safe zone" feel. Sized 20% larger than the
+      // other two glyphs — the dial reads as the visual anchor of the
+      // climate row, and the arc + needle motif needs a bit more radius to
+      // land before it reads as "a half-pancake".
+      ad.center.x   = cx;
+      ad.center.y   = cy + 7;
+      ad.radius     = 22;
+      ad.start_angle = 180;
+      ad.end_angle   = 360;
+      lv_draw_arc(layer, &ad);
+      // Ticks — short inward segments at 9, 12, and 3 o'clock (6 px long).
+      line(cx - 22, cy + 7, cx - 16, cy + 7);
+      line(cx,      cy - 15, cx,     cy - 9);
+      line(cx + 22, cy + 7, cx + 16, cy + 7);
+      // Needle: from pivot up-and-right at 45°.
+      line(cx, cy + 7, cx + 13, cy - 6);
+      break;
+    }
+    case kIconThermo: {
+      // Thermometer: bulb circle at bottom, stem as two parallel verticals,
+      // rounded top cap as a 180° arc. Open at the stem/bulb seam — true
+      // outline (no fill). Sized ~20% larger than the original 48-px glyph,
+      // anchored at the bulb bottom so the baseline stays put — the widget
+      // itself shifts up via kTempIconExtraUp to keep that bottom-of-bulb
+      // pixel at the same screen y while the cap reaches further upward.
+      circle_outline(cx, cy + 12, 10);
+      line(cx - 5, cy - 18, cx - 5, cy + 4);
+      line(cx + 5, cy - 18, cx + 5, cy + 4);
+      ad.center.x   = cx;
+      ad.center.y   = cy - 18;
+      ad.radius     = 5;
+      ad.start_angle = 180;
+      ad.end_angle   = 360;
+      lv_draw_arc(layer, &ad);
+      break;
+    }
+    case kIconDrop: {
+      // Water drop: circle outline (body) + two converging lines (the
+      // teardrop tip). Tip at (cx, cy-18); body circle at (cx, cy+4) r=11.
+      circle_outline(cx, cy + 4, 11);
+      line(cx, cy - 18, cx - 9, cy - 1);
+      line(cx, cy - 18, cx + 9, cy - 1);
+      break;
     }
   }
+}
+
+// Position the value + its two optional suffixes for one tile.
+//
+// Layout contract:
+//   * VALUE is centered on the column (under the section caption), regardless
+//     of either suffix's length — so "29.92" / "85" / "71.5" line up vertically
+//     under "PRESSURE" / "HUMIDITY" / "TEMPERATURE" across the row.
+//   * INLINE SUFFIX (°F / °C / %) tacks on to the value's right, bottoms
+//     aligned. It does NOT count toward the centering budget — a long inline
+//     suffix would push the row right of center rather than tugging the value
+//     leftward.
+//   * NEWLINE SUFFIX ("inHg" / "hPa" / "Dew Point") sits on a fresh line just
+//     under the value, centered on the value's mid (which is the column
+//     center). Used for long suffixes that would crowd the inline slot.
+//
+// Either suffix may be empty/null; the corresponding widget is hidden.
+void position_value_block(ClimateTile& t, const char* val,
+                          const char* inline_suf, const char* newline_suf) {
+  lv_label_set_text(t.value_lbl, val);
+  lv_obj_update_layout(t.value_lbl);
+  const int32_t vw   = lv_obj_get_width(t.value_lbl);
+  const int32_t left = t.content_cx - vw / 2;
+  lv_obj_set_pos(t.value_lbl, left, kTileValueY);
+
+  if (inline_suf == nullptr || inline_suf[0] == '\0') {
+    lv_obj_add_flag(t.suffix_lbl, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_label_set_text(t.suffix_lbl, inline_suf);
+    lv_obj_update_layout(t.suffix_lbl);
+    lv_obj_remove_flag(t.suffix_lbl, LV_OBJ_FLAG_HIDDEN);
+    // Bottoms-aligned: no cap-height delta to bake in across font-size pairs.
+    lv_obj_align_to(t.suffix_lbl, t.value_lbl, LV_ALIGN_OUT_RIGHT_BOTTOM, 4, 0);
+  }
+
+  if (newline_suf == nullptr || newline_suf[0] == '\0') {
+    lv_obj_add_flag(t.subtext_lbl, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_label_set_text(t.subtext_lbl, newline_suf);
+    lv_obj_update_layout(t.subtext_lbl);
+    lv_obj_remove_flag(t.subtext_lbl, LV_OBJ_FLAG_HIDDEN);
+    // Centered under the VALUE's mid (= the column center), 2 px gap below.
+    lv_obj_align_to(t.subtext_lbl, t.value_lbl, LV_ALIGN_OUT_BOTTOM_MID, 0, 2);
+  }
+}
+
+void refresh_climate_pressure(const climate::Reading& r) {
+  ClimateTile& t = s_climate_tiles[0];
+  if (t.container == nullptr) return;
+  if (r.timestamp_us == 0) {
+    position_value_block(t, "--", "", "");
+    return;
+  }
+  // Pressure units ("inHg" / "hPa") are wordy — they always render as the
+  // new-line subtext below the value, never inline. Keeps the big readout
+  // uncluttered and reads naturally ("29.92" \n "inHg").
+  char vbuf[12];
+  const char* newline_suf;
+  if (climate::pressure_unit() == climate::PressureUnit::InHg) {
+    std::snprintf(vbuf, sizeof(vbuf), "%.2f",
+                  static_cast<double>(climate::hpa_to_inhg(r.pressure_hpa)));
+    newline_suf = "inHg";
+  } else {
+    std::snprintf(vbuf, sizeof(vbuf), "%.0f",
+                  static_cast<double>(r.pressure_hpa));
+    newline_suf = "hPa";
+  }
+  position_value_block(t, vbuf, /*inline*/"", newline_suf);
+}
+
+void refresh_climate_temp(const climate::Reading& r) {
+  ClimateTile& t = s_climate_tiles[1];
+  if (t.container == nullptr) return;
+  if (r.timestamp_us == 0) {
+    position_value_block(t, "--", "", "");
+    return;
+  }
+  // °F / °C are compact symbols — they ride inline against the value.
+  char vbuf[12];
+  const char* inline_suf;
+  if (climate::temp_unit() == climate::TempUnit::Fahrenheit) {
+    std::snprintf(vbuf, sizeof(vbuf), "%.1f",
+                  static_cast<double>(climate::c_to_f(r.temp_c)));
+    inline_suf = "\xC2\xB0""F";
+  } else {
+    std::snprintf(vbuf, sizeof(vbuf), "%.1f", static_cast<double>(r.temp_c));
+    inline_suf = "\xC2\xB0""C";
+  }
+  position_value_block(t, vbuf, inline_suf, /*newline*/"");
+}
+
+void refresh_climate_humidity(const climate::Reading& r) {
+  ClimateTile& t = s_climate_tiles[2];
+  if (t.container == nullptr) return;
+
+  // The section caption stays "HUMIDITY" in both modes — the dew-point case
+  // is disambiguated by a new-line "Dew Point" subtext under the value, not
+  // by relabelling the column header. Keeps the row of tile captions stable
+  // as the user taps through units.
+  const bool dewpt = climate::humidity_unit() == climate::HumidityUnit::DewPoint;
+
+  if (r.timestamp_us == 0) {
+    position_value_block(t, "--", "", "");
+    return;
+  }
+  char vbuf[12];
+  const char* inline_suf;
+  const char* newline_suf;
+  if (!dewpt) {
+    std::snprintf(vbuf, sizeof(vbuf), "%.0f",
+                  static_cast<double>(r.humidity_pct));
+    inline_suf  = "%";
+    newline_suf = "";
+  } else {
+    // Dew point shares the temperature tile's unit choice — the user thinks
+    // about temperature in one unit at a time. "Dew Point" rides below the
+    // value as a new-line subtext so the reader knows the reading isn't the
+    // ambient temperature.
+    const float dp_c = climate::dew_point_c(r.temp_c, r.humidity_pct);
+    if (climate::temp_unit() == climate::TempUnit::Fahrenheit) {
+      std::snprintf(vbuf, sizeof(vbuf), "%.0f",
+                    static_cast<double>(climate::c_to_f(dp_c)));
+      inline_suf = "\xC2\xB0""F";
+    } else {
+      std::snprintf(vbuf, sizeof(vbuf), "%.0f", static_cast<double>(dp_c));
+      inline_suf = "\xC2\xB0""C";
+    }
+    newline_suf = "Dew Point";
+  }
+  position_value_block(t, vbuf, inline_suf, newline_suf);
+}
+
+void refresh_climate_tiles() {
+  const climate::Reading r = climate::latest();
+  refresh_climate_pressure(r);
+  refresh_climate_temp(r);
+  refresh_climate_humidity(r);
+}
+
+void on_pressure_tap(lv_event_t*) {
+  climate::set_pressure_unit(
+      climate::pressure_unit() == climate::PressureUnit::InHg
+          ? climate::PressureUnit::HPa
+          : climate::PressureUnit::InHg);
+  refresh_climate_pressure(climate::latest());
+}
+
+void on_temp_tap(lv_event_t*) {
+  climate::set_temp_unit(climate::temp_unit() == climate::TempUnit::Fahrenheit
+                             ? climate::TempUnit::Celsius
+                             : climate::TempUnit::Fahrenheit);
+  const climate::Reading r = climate::latest();
+  refresh_climate_temp(r);
+  // Dew-point readout follows the temperature unit, so flipping temp also
+  // updates humidity when it's in dew-point mode.
+  refresh_climate_humidity(r);
+}
+
+void on_humidity_tap(lv_event_t*) {
+  climate::set_humidity_unit(
+      climate::humidity_unit() == climate::HumidityUnit::Percent
+          ? climate::HumidityUnit::DewPoint
+          : climate::HumidityUnit::Percent);
+  refresh_climate_humidity(climate::latest());
+}
+
+// 1 Hz tick: refresh climate readouts + nudge the model so the arrow tracks
+// ambient drift without the user touching anything.
+void update_climate_strip(lv_timer_t*) {
+  refresh_climate_tiles();
   refresh_suggestion();
 }
 
@@ -970,6 +1309,97 @@ void build_ring(lv_obj_t* scr) {
   lv_obj_add_flag(s_suggested_label, LV_OBJ_FLAG_HIDDEN);
 }
 
+lv_obj_t* make_separator(lv_obj_t* parent, int32_t x, int32_t y,
+                         int32_t w, int32_t h) {
+  lv_obj_t* s = lv_obj_create(parent);
+  lv_obj_set_size(s, w, h);
+  lv_obj_set_pos(s, x, y);
+  lv_obj_set_style_bg_color(s, kColorDim, LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(s, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_border_width(s, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(s, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(s, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(s, LV_OBJ_FLAG_CLICKABLE);
+  return s;
+}
+
+// Build one climate tile (icon + caption + value+suffix). Tile container is
+// a full-column-rect button so anywhere in the column counts as a tap.
+void build_climate_tile(lv_obj_t* parent, uint8_t idx,
+                        int32_t left_edge, int32_t right_edge,
+                        ClimateIconKind kind, lv_color_t accent,
+                        const char* caption, lv_event_cb_t on_tap) {
+  const int32_t tile_w = right_edge - left_edge;
+  ClimateTile& t = s_climate_tiles[idx];
+
+  t.container = lv_obj_create(parent);
+  lv_obj_set_size(t.container, tile_w, kClimateBottomY);
+  lv_obj_set_pos(t.container, left_edge, 0);
+  lv_obj_set_style_bg_opa(t.container, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(t.container, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(t.container, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(t.container, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(t.container, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(t.container, on_tap, LV_EVENT_CLICKED, nullptr);
+
+  // Outer tiles' content centers shift slightly outward (left for pressure,
+  // right for humidity) so the columns visually weight toward their side of
+  // the screen. Separators stay on the geometric thirds; only the content
+  // shifts.
+  if (idx == 0)      t.content_cx = tile_w / 2 - kOuterContentShift;
+  else if (idx == 2) t.content_cx = tile_w / 2 + kOuterContentShift;
+  else               t.content_cx = tile_w / 2;
+
+  t.icon_state.kind  = kind;
+  t.icon_state.color = accent;
+  t.icon = lv_obj_create(t.container);
+  lv_obj_set_size(t.icon, kIconSize, kIconSize);
+  // Temperature's thermometer has a tall stem reaching upward, so its glyph
+  // visually anchors higher than the gauge/drop. Compensate by floating its
+  // widget kTempIconExtraUp px higher than the other two — purely cosmetic.
+  const int32_t icon_y =
+      (kind == kIconThermo) ? (kTileIconY - kTempIconExtraUp) : kTileIconY;
+  lv_obj_set_pos(t.icon, t.content_cx - kIconSize / 2, icon_y);
+  lv_obj_set_style_bg_opa(t.icon, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(t.icon, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(t.icon, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(t.icon, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(t.icon, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_user_data(t.icon, &t.icon_state);
+  lv_obj_add_event_cb(t.icon, draw_climate_icon, LV_EVENT_DRAW_MAIN, nullptr);
+
+  t.label = lv_label_create(t.container);
+  lv_obj_set_style_text_color(t.label, kColorLabelGray, LV_PART_MAIN);
+  lv_obj_set_style_text_font(t.label, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_label_set_text(t.label, caption);
+  lv_obj_update_layout(t.label);
+  lv_obj_set_pos(t.label,
+                 t.content_cx - lv_obj_get_width(t.label) / 2,
+                 kTileLabelY);
+
+  // Value + the two suffix slots — populated and positioned each refresh by
+  // position_value_block().
+  t.value_lbl = lv_label_create(t.container);
+  lv_obj_set_style_text_color(t.value_lbl, kColorText, LV_PART_MAIN);
+  lv_obj_set_style_text_font(t.value_lbl, &lv_font_montserrat_46, LV_PART_MAIN);
+  lv_label_set_text(t.value_lbl, "--");
+  lv_obj_clear_flag(t.value_lbl, LV_OBJ_FLAG_CLICKABLE);
+
+  t.suffix_lbl = lv_label_create(t.container);
+  lv_obj_set_style_text_color(t.suffix_lbl, kColorMuted, LV_PART_MAIN);
+  lv_obj_set_style_text_font(t.suffix_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_label_set_text(t.suffix_lbl, "");
+  lv_obj_clear_flag(t.suffix_lbl, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_flag(t.suffix_lbl, LV_OBJ_FLAG_HIDDEN);
+
+  t.subtext_lbl = lv_label_create(t.container);
+  lv_obj_set_style_text_color(t.subtext_lbl, kColorMuted, LV_PART_MAIN);
+  lv_obj_set_style_text_font(t.subtext_lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_label_set_text(t.subtext_lbl, "");
+  lv_obj_clear_flag(t.subtext_lbl, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_flag(t.subtext_lbl, LV_OBJ_FLAG_HIDDEN);
+}
+
 void build_idle_group(lv_obj_t* scr) {
   s_idle_group = lv_obj_create(scr);
   lv_obj_set_size(s_idle_group, kScreen, kScreen);
@@ -982,25 +1412,27 @@ void build_idle_group(lv_obj_t* scr) {
   // unless they hit a child widget.
   lv_obj_clear_flag(s_idle_group, LV_OBJ_FLAG_CLICKABLE);
 
-  // Preset row — tap to cycle.
-  lv_obj_t* preset_btn = lv_button_create(s_idle_group);
-  lv_obj_set_style_bg_opa(preset_btn, LV_OPA_TRANSP, LV_PART_MAIN);
-  lv_obj_set_style_shadow_width(preset_btn, 0, LV_PART_MAIN);
-  lv_obj_set_style_border_width(preset_btn, 0, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(preset_btn, 6, LV_PART_MAIN);
-  lv_obj_align(preset_btn, LV_ALIGN_CENTER, 0, -110);
-  lv_obj_add_event_cb(preset_btn, on_preset_tap, LV_EVENT_CLICKED, nullptr);
-  s_preset_label = lv_label_create(preset_btn);
-  lv_obj_set_style_text_color(s_preset_label, kColorMuted, LV_PART_MAIN);
-  lv_obj_set_style_text_font(s_preset_label, &lv_font_montserrat_14, LV_PART_MAIN);
-  lv_obj_center(s_preset_label);
+  // --- Climate area (top 40% of the screen) ---
+  // Two vertical separators on the geometric thirds, one horizontal below.
+  // Lines are 2 px tall/wide. Each end of every separator is pulled in by
+  // kSeparatorInset px so the strokes don't run all the way to the icon row
+  // (verticals) or to the round-display chord (horizontal).
+  make_separator(s_idle_group, kColLeftEdge1 - 1, kSeparatorInset,
+                 2, kClimateBottomY - 2 * kSeparatorInset);
+  make_separator(s_idle_group, kColLeftEdge2 - 1, kSeparatorInset,
+                 2, kClimateBottomY - 2 * kSeparatorInset);
+  make_separator(s_idle_group, kSeparatorInset, kClimateBottomY,
+                 kScreen - 2 * kSeparatorInset, 2);
 
-  // Climate strip — small muted line.
-  s_climate_label = lv_label_create(s_idle_group);
-  lv_obj_set_style_text_color(s_climate_label, kColorMuted, LV_PART_MAIN);
-  lv_obj_set_style_text_font(s_climate_label, &lv_font_montserrat_14, LV_PART_MAIN);
-  lv_obj_align(s_climate_label, LV_ALIGN_CENTER, 0, -76);
-  lv_label_set_text(s_climate_label, "P --  H --  T --");
+  build_climate_tile(s_idle_group, 0, kColLeftEdge0,  kColLeftEdge1,
+                     kIconGauge,  kColorIconPurple, "PRESSURE",
+                     on_pressure_tap);
+  build_climate_tile(s_idle_group, 1, kColLeftEdge1,  kColLeftEdge2,
+                     kIconThermo, kColorIconRed,    "TEMPERATURE",
+                     on_temp_tap);
+  build_climate_tile(s_idle_group, 2, kColLeftEdge2,  kColRightEdge2,
+                     kIconDrop,   kColorIconBlue,   "HUMIDITY",
+                     on_humidity_tap);
 
   // (Grind value sits above the cursor; it's created in build_ring as an
   // always-visible widget so it survives the idle→post toggle.)
@@ -1021,6 +1453,21 @@ void build_idle_group(lv_obj_t* scr) {
   lv_obj_set_style_text_font(post_lbl, &lv_font_montserrat_24, LV_PART_MAIN);
   lv_label_set_text(post_lbl, "Post");
   lv_obj_center(post_lbl);
+
+  // Preset selector — small tap-to-cycle label parked at the vertical middle
+  // of the screen, just left of POST. Aligned to POST so any future move of
+  // the button drags the preset along with it.
+  lv_obj_t* preset_btn = lv_button_create(s_idle_group);
+  lv_obj_set_style_bg_opa(preset_btn, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_shadow_width(preset_btn, 0, LV_PART_MAIN);
+  lv_obj_set_style_border_width(preset_btn, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(preset_btn, 6, LV_PART_MAIN);
+  lv_obj_add_event_cb(preset_btn, on_preset_tap, LV_EVENT_CLICKED, nullptr);
+  s_preset_label = lv_label_create(preset_btn);
+  lv_obj_set_style_text_color(s_preset_label, kColorMuted, LV_PART_MAIN);
+  lv_obj_set_style_text_font(s_preset_label, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_center(s_preset_label);
+  lv_obj_align_to(preset_btn, s_post_btn, LV_ALIGN_OUT_LEFT_MID, -8, 0);
 }
 
 void build_post_group(lv_obj_t* scr) {
@@ -1153,6 +1600,10 @@ void start_report() {
   // its own layout tick.
   lv_obj_update_layout(scr);
   refresh_ring();
+  // Seed climate tiles immediately — BME280 has been sampling at 1 Hz since
+  // its own task started, so a reading is usually ready by the time the UI
+  // builds. Without this the strip flashes "--" for up to a second on boot.
+  refresh_climate_tiles();
 
   apply_mode();  // s_mode starts Idle; hides post group
 

@@ -9,13 +9,28 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "nvs.h"
 
+#include <cmath>
 #include <cstring>
 
 namespace espressopost::climate {
 namespace {
 
 constexpr const char* kTag = "climate";
+
+// Display-pref NVS. Single-letter keys so the namespace stays parseable from
+// `nvs_partition_gen.py` dumps. Defaults match the units the firmware shipped
+// with for the user's first month of use (°F, inHg, %) — no migration needed
+// from older builds that never wrote these keys.
+constexpr const char* kPrefNamespace = "climate";
+constexpr const char* kPrefKeyTemp   = "tu";
+constexpr const char* kPrefKeyPres   = "pu";
+constexpr const char* kPrefKeyHum    = "hu";
+
+TempUnit     s_temp_unit  = TempUnit::Fahrenheit;
+PressureUnit s_pres_unit  = PressureUnit::InHg;
+HumidityUnit s_hum_unit   = HumidityUnit::Percent;
 
 // --- BME280 registers (datasheet §5.3) ---
 constexpr uint8_t kRegChipId   = 0xD0;  // expect 0x60 for BME280
@@ -299,6 +314,26 @@ esp_err_t init() {
   // config: standby unused in forced mode, filter off, SPI3W off.
   ESP_RETURN_ON_ERROR(write_reg(kRegConfig, 0x00), kTag, "config");
 
+  // Load display-unit prefs from NVS. Missing keys = defaults; we don't write
+  // back here, so a fresh device stays at "no key" until the user actually
+  // taps a tile. Wrapped so a wedged NVS doesn't take down the sample task.
+  {
+    nvs_handle_t h;
+    if (nvs_open(kPrefNamespace, NVS_READONLY, &h) == ESP_OK) {
+      uint8_t v = 0;
+      if (nvs_get_u8(h, kPrefKeyTemp, &v) == ESP_OK && v <= 1) {
+        s_temp_unit = static_cast<TempUnit>(v);
+      }
+      if (nvs_get_u8(h, kPrefKeyPres, &v) == ESP_OK && v <= 1) {
+        s_pres_unit = static_cast<PressureUnit>(v);
+      }
+      if (nvs_get_u8(h, kPrefKeyHum, &v) == ESP_OK && v <= 1) {
+        s_hum_unit = static_cast<HumidityUnit>(v);
+      }
+      nvs_close(h);
+    }
+  }
+
   s_mutex = xSemaphoreCreateMutex();
   if (s_mutex == nullptr) return ESP_ERR_NO_MEM;
 
@@ -321,6 +356,50 @@ Reading latest() {
     xSemaphoreGive(s_mutex);
   }
   return r;
+}
+
+float dew_point_c(float temp_c, float humidity_pct) {
+  if (humidity_pct <= 0.0f) return std::nanf("");
+  // Magnus-Tetens (a, b) parameters — Lawrence 2005 fit for T ∈ [0, 50] °C.
+  constexpr float a = 17.625f;
+  constexpr float b = 243.04f;
+  const float gamma = std::log(humidity_pct / 100.0f) +
+                      (a * temp_c) / (b + temp_c);
+  return (b * gamma) / (a - gamma);
+}
+
+TempUnit     temp_unit()     { return s_temp_unit; }
+PressureUnit pressure_unit() { return s_pres_unit; }
+HumidityUnit humidity_unit() { return s_hum_unit; }
+
+namespace {
+
+void persist_u8(const char* key, uint8_t v) {
+  nvs_handle_t h;
+  if (nvs_open(kPrefNamespace, NVS_READWRITE, &h) != ESP_OK) return;
+  nvs_set_u8(h, key, v);
+  nvs_commit(h);
+  nvs_close(h);
+}
+
+}  // namespace
+
+void set_temp_unit(TempUnit u) {
+  if (u == s_temp_unit) return;
+  s_temp_unit = u;
+  persist_u8(kPrefKeyTemp, static_cast<uint8_t>(u));
+}
+
+void set_pressure_unit(PressureUnit u) {
+  if (u == s_pres_unit) return;
+  s_pres_unit = u;
+  persist_u8(kPrefKeyPres, static_cast<uint8_t>(u));
+}
+
+void set_humidity_unit(HumidityUnit u) {
+  if (u == s_hum_unit) return;
+  s_hum_unit = u;
+  persist_u8(kPrefKeyHum, static_cast<uint8_t>(u));
 }
 
 }  // namespace espressopost::climate
