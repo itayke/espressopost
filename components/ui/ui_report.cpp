@@ -108,6 +108,7 @@ lv_obj_t* s_suggested_label   = nullptr;  // "Suggested 5.15 · 75%" below the v
 
 // Idle group:
 lv_obj_t* s_idle_group          = nullptr;
+lv_obj_t* s_preset_btn          = nullptr;
 lv_obj_t* s_preset_label        = nullptr;
 lv_obj_t* s_post_btn            = nullptr;
 
@@ -468,6 +469,12 @@ void refresh_preset_label() {
   std::snprintf(buf, sizeof(buf), "%s  \xC2\xB7  target %us", p.name,
                 static_cast<unsigned>(p.target_time_s));
   lv_label_set_text(s_preset_label, buf);
+  // Button auto-sizes to fit the new text; re-anchor so its right edge stays
+  // pinned 8 px left of POST instead of drifting onto the button.
+  if (s_preset_btn != nullptr && s_post_btn != nullptr) {
+    lv_obj_update_layout(s_preset_btn);
+    lv_obj_align_to(s_preset_btn, s_post_btn, LV_ALIGN_OUT_LEFT_MID, -8, 0);
+  }
 }
 
 void refresh_delta_label() {
@@ -1473,19 +1480,21 @@ void build_idle_group(lv_obj_t* scr) {
   lv_obj_center(post_lbl);
 
   // Preset selector — small tap-to-cycle label parked at the vertical middle
-  // of the screen, just left of POST. Aligned to POST so any future move of
-  // the button drags the preset along with it.
-  lv_obj_t* preset_btn = lv_button_create(s_idle_group);
-  lv_obj_set_style_bg_opa(preset_btn, LV_OPA_TRANSP, LV_PART_MAIN);
-  lv_obj_set_style_shadow_width(preset_btn, 0, LV_PART_MAIN);
-  lv_obj_set_style_border_width(preset_btn, 0, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(preset_btn, 6, LV_PART_MAIN);
-  lv_obj_add_event_cb(preset_btn, on_preset_tap, LV_EVENT_CLICKED, nullptr);
-  s_preset_label = lv_label_create(preset_btn);
+  // of the screen, just left of POST. The button auto-sizes to its label, so
+  // refresh_preset_label re-runs the LV_ALIGN_OUT_LEFT_MID alignment after
+  // every text change — otherwise the button keeps its construction-time
+  // (empty-label) position and overflows rightward onto POST as it grows.
+  s_preset_btn = lv_button_create(s_idle_group);
+  lv_obj_set_style_bg_opa(s_preset_btn, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_shadow_width(s_preset_btn, 0, LV_PART_MAIN);
+  lv_obj_set_style_border_width(s_preset_btn, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(s_preset_btn, 6, LV_PART_MAIN);
+  lv_obj_add_event_cb(s_preset_btn, on_preset_tap, LV_EVENT_CLICKED, nullptr);
+  s_preset_label = lv_label_create(s_preset_btn);
   lv_obj_set_style_text_color(s_preset_label, kColorMuted, LV_PART_MAIN);
   lv_obj_set_style_text_font(s_preset_label, &lv_font_montserrat_14, LV_PART_MAIN);
   lv_obj_center(s_preset_label);
-  lv_obj_align_to(preset_btn, s_post_btn, LV_ALIGN_OUT_LEFT_MID, -8, 0);
+  lv_obj_align_to(s_preset_btn, s_post_btn, LV_ALIGN_OUT_LEFT_MID, -8, 0);
 }
 
 void build_post_group(lv_obj_t* scr) {
