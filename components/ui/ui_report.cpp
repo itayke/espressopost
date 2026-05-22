@@ -195,14 +195,6 @@ int         s_momentum_ticks_left = 0;
 // ---------------------------------------------------------------------------
 constexpr float kPi = 3.14159265f;
 
-// Screen angle (CW from 12 o'clock, degrees) where value `v_i` is decaled
-// given the current ring position `v_cur`. The convention is "higher values
-// CCW from cursor" so a CW finger drag = CW ring rotation = HIGHER value at
-// cursor — i.e. dialing UP feels like the bezel spins WITH the finger.
-float value_angle_deg(float v_i, float v_cur) {
-  return 180.0f - (v_i - v_cur) * kDegPerUnit;
-}
-
 void polar_to_screen(float angle_deg, int32_t radius, int32_t* out_x, int32_t* out_y) {
   const float rad = angle_deg * (kPi / 180.0f);
   *out_x = kCenter + static_cast<int32_t>(std::lround(radius * std::sin(rad)));
@@ -1023,11 +1015,74 @@ void draw_climate_icon(lv_event_t* e) {
       break;
     }
     case kIconDrop: {
-      // Water drop: circle outline (body) + two converging lines (the
-      // teardrop tip). Tip at (cx, cy-12); body circle at (cx, cy+10) r=11.
-      circle_outline(cx, cy + 10, 11);
-      line(cx, cy - 12, cx -  9, cy + 5);
-      line(cx, cy - 12, cx +  9, cy + 5);
+      // Water drop = outer outline shell + inner FILLED teardrop with a
+      // ~2 px gap between. The shell never moves; the inner fill is
+      // clipped from the top down by humidity, so the icon reads like a
+      // vessel filling up — empty at 0%, brim-full at 100%.
+      //
+      // Outer shell: two converging tip lines + a 240° arc closing the
+      // bottom. Line endpoints (tip±9, cy+5) sit at the body circle's
+      // tangent points from the tip (cos⁻¹(r/d) = 60°, so tangents land
+      // 30° off due-south from the body center) — drawing the arc from
+      // 330° CW to 570° (=210°+360°) covers the bottom 240° and leaves
+      // the top 120° open between the tip lines, so the seam reads as a
+      // continuous outline.
+      line(cx, cy - 12, cx - 9, cy + 4);
+      line(cx, cy - 12, cx + 9, cy + 4);
+      ad.center.x    = cx;
+      ad.center.y    = cy + 10;
+      ad.radius      = 12;
+      ad.start_angle = 335;
+      ad.end_angle   = 565;
+      lv_draw_arc(layer, &ad);
+
+      // Inner FILLED teardrop — filled circle (LV_RADIUS_CIRCLE on an 11×11
+      // square gives r=5) + filled triangle whose base vertices sit at the
+      // inner circle's tangent points from the inner tip. The tip lands at
+      // (cx, cy) — the y where the outer side lines, shifted ~5.5 px
+      // perpendicular inward, intersect — and the base at (cx±4, cy+7),
+      // which is `(r_inner/r_outer) × outer_tangent` (= 5/11 × (cx+9.5, cy+4.5)
+      // relative to the body center cy+10). Resulting inner-side slope is
+      // 4/7 ≈ 0.57 vs outer 9/17 ≈ 0.53 — nearly parallel, so the gap stays
+      // ~4 px around the whole perimeter rather than pinching toward the tip.
+      //
+      // Horizontal clip: y_level interpolates from cy at 100% down to cy+16
+      // at 0%. Setting layer->_clip_area.y1 = y_level masks every draw above
+      // it, so the fill drains top-down. Save/restore the prior clip so we
+      // don't leak into the next tile's draws.
+      const float pct = std::clamp(state->dynamic, 0.0f, 100.0f);
+      const int32_t inner_top = cy - 4;
+      const int32_t inner_bot = cy + 15;
+      const int32_t y_level   = inner_top +
+          static_cast<int32_t>(std::lround(
+              (1.0f - pct / 100.0f) * (inner_bot - inner_top + 1)));
+
+      const lv_area_t saved_clip = layer->_clip_area;
+      lv_area_t       clip       = saved_clip;
+      if (y_level > clip.y1) clip.y1 = y_level;
+      if (clip.y1 <= clip.y2) {
+        layer->_clip_area = clip;
+
+        lv_draw_rect_dsc_t fillc;
+        lv_draw_rect_dsc_init(&fillc);
+        fillc.bg_opa       = LV_OPA_COVER;
+        fillc.bg_color     = state->color;
+        fillc.border_width = 0;
+        fillc.radius       = LV_RADIUS_CIRCLE;
+        lv_area_t ca = {cx - 6, cy + 5, cx + 5, cy + 15};
+        lv_draw_rect(layer, &fillc, &ca);
+
+        lv_draw_triangle_dsc_t tri;
+        lv_draw_triangle_dsc_init(&tri);
+        tri.color = state->color;
+        tri.opa   = LV_OPA_COVER;
+        tri.p[0].x = cx;     tri.p[0].y = inner_top;
+        tri.p[1].x = cx - 6; tri.p[1].y = cy + 7;
+        tri.p[2].x = cx + 6; tri.p[2].y = cy + 7;
+        lv_draw_triangle(layer, &tri);
+
+        layer->_clip_area = saved_clip;
+      }
       break;
     }
   }
@@ -1178,6 +1233,16 @@ void refresh_climate_humidity(const climate::Reading& r) {
     newline_suf = "Dew Point";
   }
   position_value_block(t, vbuf, inline_suf, newline_suf);
+
+  // Drive the drop's water-level line from raw humidity %. The unit toggle
+  // (% vs dew point) is presentation-only — the shell fill always reads
+  // actual humidity. Only invalidate on a 1%+ change so noise doesn't
+  // repaint the icon every reading.
+  const float new_pct = std::clamp(r.humidity_pct, 0.0f, 100.0f);
+  if (std::fabs(new_pct - t.icon_state.dynamic) >= 1.0f) {
+    t.icon_state.dynamic = new_pct;
+    lv_obj_invalidate(t.icon);
+  }
 }
 
 void refresh_climate_tiles() {
