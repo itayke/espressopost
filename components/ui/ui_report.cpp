@@ -73,6 +73,7 @@ const lv_color_t kColorAccent = LV_COLOR_MAKE(0xC8, 0x80, 0x36);
 const lv_color_t kColorText   = LV_COLOR_MAKE(0xE0, 0xE0, 0xE0);
 const lv_color_t kColorMuted  = LV_COLOR_MAKE(0x70, 0x70, 0x70);
 const lv_color_t kColorDim    = LV_COLOR_MAKE(0x30, 0x30, 0x30);
+const lv_color_t kColorDark   = LV_COLOR_MAKE(0x20, 0x20, 0x20);
 const lv_color_t kColorGreen  = LV_COLOR_MAKE(0x40, 0xB0, 0x60);
 const lv_color_t kColorOrange = LV_COLOR_MAKE(0xD8, 0x90, 0x30);
 const lv_color_t kColorRed    = LV_COLOR_MAKE(0xC8, 0x40, 0x40);
@@ -118,6 +119,10 @@ enum ClimateIconKind { kIconGauge, kIconThermo, kIconDrop };
 struct ClimateIconState {
   ClimateIconKind kind;
   lv_color_t      color;
+  // Per-kind dynamic state read by draw_climate_icon. For kIconGauge this is
+  // the needle angle in degrees (0 = straight up, +90 = right, -90 = left),
+  // mapped from pressure. Unused (left at 0) for kinds without a dynamic.
+  float           dynamic;
 };
 struct ClimateTile {
   lv_obj_t*        container;    // tap-target button (whole column rect)
@@ -866,33 +871,37 @@ void on_ring_event(lv_event_t* e) {
 // Geometric thirds for the column splits stay put; the bottom-of-area line
 // has moved down to fit the bigger glyphs (50%-up icons + 50%-up value font
 // can't fit under y=186 without crowding).
-constexpr int32_t kClimateBottomY  = 222;
+constexpr int32_t kClimateBottomY  = 210;
 constexpr int32_t kColLeftEdge0    = 0;
 constexpr int32_t kColLeftEdge1    = 155;
 constexpr int32_t kColLeftEdge2    = 311;
 constexpr int32_t kColRightEdge2   = kScreen;
 // Icon + label rows sit higher than the value row — feels balanced against
-// the round-clip chord. Temperature's icon nudges another 10 px up so the
-// stem doesn't look low next to the visually shorter gauge/drop glyphs.
-constexpr int32_t kTileIconY       = 60;    // top y of icon widget within tile (pressure / humidity)
-constexpr int32_t kTempIconExtraUp = 12;    // temperature icon ONLY: this much higher than the others (2 px extra over the visual nudge keeps the now-bigger thermometer's bulb bottom on the same screen y)
-constexpr int32_t kTileLabelY      = 116;   // top y of section caption
+// the round-clip chord. Icon widgets are 60 tall (vs the 48-px visible glyph
+// area) so the thermometer's cap arc and the drop's body circle both fit
+// inside the widget's draw bounds — LV_EVENT_DRAW_MAIN's layer.clip_area is
+// set to the widget rect, so anything past the edges gets masked.
+constexpr int32_t kTileIconY       = 46;    // top y of icon widget (all three)
+constexpr int32_t kTileLabelY      = 108;   // top y of section caption
 // Value label uses Montserrat 46 (25% bigger than the previous 36 pt). The
 // label-top y moves up ~9 px from 158 so the BASELINE of the value stays at
 // the same screen y — the bigger font grows upward only, leaving the row
 // below (new-line subtext) where it was.
-constexpr int32_t kTileValueY      = 149;
-constexpr int32_t kIconSize        = 48;
+constexpr int32_t kTileValueY      = 130;
+constexpr int32_t kIconSize        = 60;
 // Each separator line is pulled in by this much from both of its endpoints,
 // so the verticals stop short of the icon row and the bottom horizontal
 // stops short of the screen edge. Keeps the strip from looking like a
 // rigid table-cell grid; the lines now read as quiet dividers, not borders.
-constexpr int32_t kSeparatorInset  = 20;
+constexpr int32_t kSeparatorInset  = 10;
 // Outer-tile content shifts *outward* from the tile center so the pressure
 // readout reads at the screen's left side and humidity at the right. Small
 // magnitude — the icon/label pair lands ~5 px off tile center, just enough
 // to differentiate the column groupings.
 constexpr int32_t kOuterContentShift = -5;
+
+// Width of separator lines
+constexpr int32_t kSeparatorThickness = 2;
 
 // Bright-gray section caption color is the only "supporting" tone in the
 // climate strip — kColorLabelGray sits between kColorText and kColorMuted.
@@ -963,32 +972,34 @@ void draw_climate_icon(lv_event_t* e) {
   switch (state->kind) {
     case kIconGauge: {
       // Half-circle pressure gauge: arc across the top, three ticks at the
-      // 9/12/3 positions, and a needle pointing up-and-to-the-right (~45°)
-      // for a "reading in the safe zone" feel. Sized 20% larger than the
+      // 9/12/3 positions, and a needle that rotates with pressure (state
+      // dynamic in degrees: 0 = up, ±90 = sides). Sized 20% larger than the
       // other two glyphs — the dial reads as the visual anchor of the
-      // climate row, and the arc + needle motif needs a bit more radius to
-      // land before it reads as "a half-pancake".
+      // climate row.
       ad.center.x   = cx;
-      ad.center.y   = cy + 7;
+      ad.center.y   = cy + 13;
       ad.radius     = 22;
       ad.start_angle = 180;
       ad.end_angle   = 360;
       lv_draw_arc(layer, &ad);
       // Ticks — short inward segments at 9, 12, and 3 o'clock (6 px long).
-      line(cx - 22, cy + 7, cx - 16, cy + 7);
-      line(cx,      cy - 15, cx,     cy - 9);
-      line(cx + 22, cy + 7, cx + 16, cy + 7);
-      // Needle: from pivot up-and-right at 45°.
-      line(cx, cy + 7, cx + 13, cy - 6);
+      line(cx - 22, cy + 13, cx - 16, cy + 13);
+      line(cx,      cy -  9, cx,      cy -  3);
+      line(cx + 22, cy + 13, cx + 16, cy + 13);
+      // Needle: length 18 px from pivot, rotated by state->dynamic degrees
+      // (clockwise from straight up). At ±90° the tip lands 4 px shy of the
+      // arc rim, so the dial reads as "inside the gauge" at every reading.
+      constexpr float kNeedleLen = 18.0f;
+      const float ang = state->dynamic * (3.14159265f / 180.0f);
+      const int32_t tx = cx + static_cast<int32_t>(kNeedleLen * std::sin(ang));
+      const int32_t ty = cy + 13 - static_cast<int32_t>(kNeedleLen * std::cos(ang));
+      line(cx, cy + 13, tx, ty);
       break;
     }
     case kIconThermo: {
       // Thermometer: bulb circle at bottom, stem as two parallel verticals,
       // rounded top cap as a 180° arc. Open at the stem/bulb seam — true
-      // outline (no fill). Sized ~20% larger than the original 48-px glyph,
-      // anchored at the bulb bottom so the baseline stays put — the widget
-      // itself shifts up via kTempIconExtraUp to keep that bottom-of-bulb
-      // pixel at the same screen y while the cap reaches further upward.
+      // outline (no fill). Sized ~20% larger than the original 48-px glyph.
       circle_outline(cx, cy + 12, 10);
       line(cx - 5, cy - 18, cx - 5, cy + 4);
       line(cx + 5, cy - 18, cx + 5, cy + 4);
@@ -1002,10 +1013,10 @@ void draw_climate_icon(lv_event_t* e) {
     }
     case kIconDrop: {
       // Water drop: circle outline (body) + two converging lines (the
-      // teardrop tip). Tip at (cx, cy-18); body circle at (cx, cy+4) r=11.
-      circle_outline(cx, cy + 4, 11);
-      line(cx, cy - 18, cx - 9, cy - 1);
-      line(cx, cy - 18, cx + 9, cy - 1);
+      // teardrop tip). Tip at (cx, cy-12); body circle at (cx, cy+10) r=11.
+      circle_outline(cx, cy + 10, 11);
+      line(cx, cy - 12, cx -  9, cy + 5);
+      line(cx, cy - 12, cx +  9, cy + 5);
       break;
     }
   }
@@ -1077,6 +1088,18 @@ void refresh_climate_pressure(const climate::Reading& r) {
     newline_suf = "hPa";
   }
   position_value_block(t, vbuf, /*inline*/"", newline_suf);
+
+  // Drive the gauge needle from pressure: ±1 inHg around 30.00 sweeps the
+  // full ±90° range. The mapping always uses inHg internally — the unit
+  // toggle is presentation-only, not physical, so the dial reads from the
+  // same source either way. Only invalidate when the rounded angle changes
+  // a visible amount, so the icon doesn't repaint on imperceptible drift.
+  const float inhg     = climate::hpa_to_inhg(r.pressure_hpa);
+  const float new_deg  = std::clamp((inhg - 30.0f) * 90.0f, -90.0f, 90.0f);
+  if (std::fabs(new_deg - t.icon_state.dynamic) >= 1.0f) {
+    t.icon_state.dynamic = new_deg;
+    lv_obj_invalidate(t.icon);
+  }
 }
 
 void refresh_climate_temp(const climate::Reading& r) {
@@ -1314,7 +1337,7 @@ lv_obj_t* make_separator(lv_obj_t* parent, int32_t x, int32_t y,
   lv_obj_t* s = lv_obj_create(parent);
   lv_obj_set_size(s, w, h);
   lv_obj_set_pos(s, x, y);
-  lv_obj_set_style_bg_color(s, kColorDim, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(s, kColorDark, LV_PART_MAIN);
   lv_obj_set_style_bg_opa(s, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_set_style_border_width(s, 0, LV_PART_MAIN);
   lv_obj_set_style_pad_all(s, 0, LV_PART_MAIN);
@@ -1354,12 +1377,7 @@ void build_climate_tile(lv_obj_t* parent, uint8_t idx,
   t.icon_state.color = accent;
   t.icon = lv_obj_create(t.container);
   lv_obj_set_size(t.icon, kIconSize, kIconSize);
-  // Temperature's thermometer has a tall stem reaching upward, so its glyph
-  // visually anchors higher than the gauge/drop. Compensate by floating its
-  // widget kTempIconExtraUp px higher than the other two — purely cosmetic.
-  const int32_t icon_y =
-      (kind == kIconThermo) ? (kTileIconY - kTempIconExtraUp) : kTileIconY;
-  lv_obj_set_pos(t.icon, t.content_cx - kIconSize / 2, icon_y);
+  lv_obj_set_pos(t.icon, t.content_cx - kIconSize / 2, kTileIconY);
   lv_obj_set_style_bg_opa(t.icon, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_border_width(t.icon, 0, LV_PART_MAIN);
   lv_obj_set_style_pad_all(t.icon, 0, LV_PART_MAIN);
@@ -1417,12 +1435,12 @@ void build_idle_group(lv_obj_t* scr) {
   // Lines are 2 px tall/wide. Each end of every separator is pulled in by
   // kSeparatorInset px so the strokes don't run all the way to the icon row
   // (verticals) or to the round-display chord (horizontal).
-  make_separator(s_idle_group, kColLeftEdge1 - 1, kSeparatorInset,
-                 2, kClimateBottomY - 2 * kSeparatorInset);
-  make_separator(s_idle_group, kColLeftEdge2 - 1, kSeparatorInset,
-                 2, kClimateBottomY - 2 * kSeparatorInset);
-  make_separator(s_idle_group, kSeparatorInset, kClimateBottomY,
-                 kScreen - 2 * kSeparatorInset, 2);
+  make_separator(s_idle_group, kColLeftEdge1 - kSeparatorThickness / 2, kSeparatorInset,
+                 kSeparatorThickness, kClimateBottomY - 2 * kSeparatorInset);
+  make_separator(s_idle_group, kColLeftEdge2 - kSeparatorThickness / 2, kSeparatorInset,
+                 kSeparatorThickness, kClimateBottomY - 2 * kSeparatorInset);
+  make_separator(s_idle_group, kSeparatorInset, kClimateBottomY - kSeparatorThickness / 2,
+                 kScreen - 2 * kSeparatorInset, kSeparatorThickness);
 
   build_climate_tile(s_idle_group, 0, kColLeftEdge0,  kColLeftEdge1,
                      kIconGauge,  kColorIconPurple, "PRESSURE",
