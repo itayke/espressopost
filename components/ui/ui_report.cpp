@@ -948,20 +948,6 @@ void draw_climate_icon(lv_event_t* e) {
   ad.opa   = LV_OPA_COVER;
   ad.width = kStroke;
 
-  // Helper: outline circle via rounded-rect with bg transparent + border. Cheaper
-  // than a 360° arc and avoids the start/end-cap pixel artifact.
-  auto circle_outline = [&](int32_t ox, int32_t oy, int32_t r) {
-    lv_draw_rect_dsc_t rd;
-    lv_draw_rect_dsc_init(&rd);
-    rd.bg_opa       = LV_OPA_TRANSP;
-    rd.border_width = kStroke;
-    rd.border_color = state->color;
-    rd.border_opa   = LV_OPA_COVER;
-    rd.radius       = LV_RADIUS_CIRCLE;
-    lv_area_t a = {ox - r, oy - r, ox + r, oy + r};
-    lv_draw_rect(layer, &rd, &a);
-  };
-
   auto line = [&](int32_t x1, int32_t y1, int32_t x2, int32_t y2) {
     ld.p1.x = x1; ld.p1.y = y1;
     ld.p2.x = x2; ld.p2.y = y2;
@@ -1000,18 +986,64 @@ void draw_climate_icon(lv_event_t* e) {
       break;
     }
     case kIconThermo: {
-      // Thermometer: bulb circle at bottom, stem as two parallel verticals,
-      // rounded top cap as a 180° arc. Open at the stem/bulb seam — true
-      // outline (no fill). Sized ~20% larger than the original 48-px glyph.
-      circle_outline(cx, cy + 12, 10);
-      line(cx - 5, cy - 18, cx - 5, cy + 4);
-      line(cx + 5, cy - 18, cx + 5, cy + 4);
-      ad.center.x   = cx;
-      ad.center.y   = cy - 18;
-      ad.radius     = 5;
-      ad.start_angle = 180;
-      ad.end_angle   = 360;
+      // Thermometer = outline shell + static mercury reservoir + dynamic
+      // column. The shell is a 300° bulb arc (open at the top so the stem
+      // verticals connect cleanly) + two stem lines + a 180° cap arc.
+      //
+      // Bulb arc endpoints (cx±5, cy+3) are where the stem verticals meet
+      // the bulb circle: solving x²+y²=100 with x=±5 gives y=∓√75≈∓8.66,
+      // so the join sits at (cy+12)−8.66 ≈ cy+3.34, rounded to cy+3. Arc
+      // sweeps CW from 300° (upper-right join) through 90° (bulb bottom)
+      // to 240°+360°=600° (upper-left join) — 300° of arc, leaving a 60°
+      // opening at the top for the stem.
+      ad.center.x    = cx;
+      ad.center.y    = cy + 12;
+      ad.radius      = 10;
+      ad.start_angle = 300;
+      ad.end_angle   = 600;
       lv_draw_arc(layer, &ad);
+      line(cx - 5, cy - 18, cx - 5, cy + 3);
+      line(cx + 5, cy - 18, cx + 5, cy + 3);
+      ad.center.x    = cx;
+      ad.center.y    = cy - 17;
+      ad.radius      = 6;
+      ad.start_angle = 200;
+      ad.end_angle   = 340;
+      lv_draw_arc(layer, &ad);
+
+      // Static inner disc — 4 px gap to the bulb outline (r=6 inside the
+      // r=10 outer), filled in thermo color so it reads as the mercury
+      // reservoir even at 0 °F when the column collapses to nothing.
+      lv_draw_rect_dsc_t fillc;
+      lv_draw_rect_dsc_init(&fillc);
+      fillc.bg_opa       = LV_OPA_COVER;
+      fillc.bg_color     = state->color;
+      fillc.border_width = 0;
+      fillc.radius       = LV_RADIUS_CIRCLE;
+      lv_area_t disc = {cx - 4, cy + 8, cx + 3, cy + 15};
+      lv_draw_rect(layer, &fillc, &disc);
+
+      // Dynamic mercury column — rounded-corner rect rising from the
+      // center of the disc up toward the cap inside-edge at 100%. Bottom
+      // anchored inside the disc (cy+12) so the rounded bottom corners
+      // are hidden under the disc; only the column emerging above the
+      // disc top (cy+6) is visible. Height = 0 at 0 % means we skip the
+      // rect entirely so 0 °F reads as "reservoir only".
+      //
+      // pct maps °F linearly 0..100 → 0..100 % (set by
+      // refresh_climate_temp). The unit toggle (°F vs °C) is text-only;
+      // the column always reads the underlying temperature.
+      const float pct = std::clamp(state->dynamic, 0.0f, 100.0f);
+      constexpr int32_t kColBotOff    = +12;   // col bottom y offset
+      constexpr int32_t kColTopOff100 = -18;   // col top y offset at 100%
+      const int32_t col_height_max = kColBotOff - kColTopOff100;  // 33
+      const int32_t col_height = static_cast<int32_t>(std::lround(
+          (pct / 100.0f) * col_height_max));
+      if (col_height > 0) {
+        lv_area_t col = {cx - 1, cy + kColBotOff - col_height,
+                         cx + 1, cy + kColBotOff};
+        lv_draw_rect(layer, &fillc, &col);
+      }
       break;
     }
     case kIconDrop: {
@@ -1192,6 +1224,21 @@ void refresh_climate_temp(const climate::Reading& r) {
     inline_suf = "\xC2\xB0""C";
   }
   position_value_block(t, vbuf, inline_suf, /*newline*/"");
+
+  // Drive the mercury column from raw temp in °F regardless of the
+  // displayed unit. Scale is centered on a room-temp reference: 20 °F →
+  // 0 %, 70 °F → 50 %, 120 °F → 100 % (linear, clamped). The 100 °F
+  // span keeps everyday readings (~60–80 °F) near the middle of the
+  // stem, so cold and hot rooms both produce visible swing instead of
+  // pinning the column at one end. The unit toggle (°F vs °C) only
+  // affects the numeric readout — the column always reads the
+  // underlying °F. Only invalidate on a ≥1 % change so the icon
+  // doesn't repaint on sub-percent drift.
+  const float new_pct = std::clamp(climate::c_to_f(r.temp_c) - 20.0f, 0.0f, 100.0f);
+  if (std::fabs(new_pct - t.icon_state.dynamic) >= 1.0f) {
+    t.icon_state.dynamic = new_pct;
+    lv_obj_invalidate(t.icon);
+  }
 }
 
 void refresh_climate_humidity(const climate::Reading& r) {
