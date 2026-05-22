@@ -52,7 +52,9 @@ constexpr int32_t kPressYThreshold = kCenter + 80;  // ~6 px above the value-tex
 // ---------------------------------------------------------------------------
 constexpr float kGrindMin       =  0.0f;
 constexpr float kGrindMax       = 30.0f;
-constexpr float kGrindStep      =  0.05f;  // dial resolution; dots stay at 0.1
+// Dial resolution lives in model::kGrindStep (model_math.hpp) so the snap
+// rounding on this end and the model's "round suggestion to a dial-reachable
+// value" on the other end share one source of truth.
 constexpr float kDegPerUnit     = 37.5f;          // °/grind unit — feel knob (+25% from 30 for more breathing room)
 constexpr float kSubDotPitchDeg = kDegPerUnit / 10.0f;  // 0.1 step = 3.75°
 
@@ -727,7 +729,8 @@ void momentum_tick(lv_timer_t* t) {
   const float dt_s = static_cast<float>(kMomentumPeriodMs) / 1000.0f;
   s_grind_value_raw = std::clamp(s_grind_value_raw + s_drag_velocity * dt_s,
                                  kGrindMin, kGrindMax);
-  const float new_value = std::round(s_grind_value_raw * 20.0f) / 20.0f;
+  const float new_value =
+      std::round(s_grind_value_raw / model::kGrindStep) * model::kGrindStep;
   if (new_value != s_grind_value) {
     s_grind_value = new_value;
     refresh_ring();
@@ -818,7 +821,8 @@ void on_ring_event(lv_event_t* e) {
       const float dv = delta / kDegPerUnit;
       s_grind_value_raw =
           std::clamp(s_grind_value_raw + dv, kGrindMin, kGrindMax);
-      const float new_value = std::round(s_grind_value_raw * 20.0f) / 20.0f;
+      const float new_value =
+          std::round(s_grind_value_raw / model::kGrindStep) * model::kGrindStep;
       if (new_value != s_grind_value) {
         s_grind_value = new_value;
         refresh_ring();
@@ -1096,13 +1100,18 @@ void refresh_climate_pressure(const climate::Reading& r) {
   }
   position_value_block(t, vbuf, /*inline*/"", newline_suf);
 
-  // Drive the gauge needle from pressure: ±1 inHg around 30.00 sweeps the
-  // full ±90° range. The mapping always uses inHg internally — the unit
-  // toggle is presentation-only, not physical, so the dial reads from the
-  // same source either way. Only invalidate when the rounded angle changes
-  // a visible amount, so the icon doesn't repaint on imperceptible drift.
+  // Drive the gauge needle from pressure: ±1 inHg around 30.00 still pegs
+  // the dial at ±90°, but the curve is sqrt-shaped (|Δ|^0.5, sign preserved)
+  // so small deviations move the needle visibly — e.g. ±0.1 inHg lands at
+  // ~28° instead of the linear 9°. The mapping always uses inHg internally;
+  // the unit toggle is presentation-only, not physical, so the dial reads
+  // from the same source either way. Only invalidate when the rounded angle
+  // changes a visible amount, so the icon doesn't repaint on imperceptible
+  // drift.
   const float inhg     = climate::hpa_to_inhg(r.pressure_hpa);
-  const float new_deg  = std::clamp((inhg - 30.0f) * 90.0f, -90.0f, 90.0f);
+  const float diff     = inhg - 30.0f;
+  const float curved   = std::copysign(std::sqrt(std::fabs(diff)), diff);
+  const float new_deg  = std::clamp(curved * 90.0f, -90.0f, 90.0f);
   if (std::fabs(new_deg - t.icon_state.dynamic) >= 1.0f) {
     t.icon_state.dynamic = new_deg;
     lv_obj_invalidate(t.icon);

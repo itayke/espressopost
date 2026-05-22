@@ -378,7 +378,7 @@ Suggestion suggest(const PresetFit& f, ClimateInput c, float target_time_delta) 
   // De-standardize back to the grinder's dial units.
   float grind = g_z * f.std_g + f.mean_g;
   grind = std::clamp(grind, 0.0f, 99.9f);
-  grind = std::round(grind * 10.0f) / 10.0f;  // 0.1 step — matches UI stepper
+  grind = std::round(grind / kGrindStep) * kGrindStep;  // snap to dial step
 
   // Confidence is the average of three 0..1 factors:
   //   (1) slope_factor:        how well we know β_g, from Σ[0,0]. At zero

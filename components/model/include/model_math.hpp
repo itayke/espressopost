@@ -16,6 +16,12 @@
 
 namespace espressopost::model {
 
+// Resolution of the grinder dial — single source of truth for "snap to dial
+// step" rounding. The UI uses it when finalizing dragged values; the model
+// uses it when emitting a suggestion so suggestions land on a setting the
+// user can actually dial in. Changing this changes both ends in lockstep.
+constexpr float kGrindStep = 0.05f;
+
 // Minimum feature row the fit needs from one shot. Decoupled from
 // storage::ShotRecord to keep the math layer free of storage's (and therefore
 // IDF's) includes.
