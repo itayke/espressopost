@@ -1429,20 +1429,29 @@ void fade_label_in(lv_obj_t* obj, lv_anim_exec_xcb_t cb, uint32_t delay_ms) {
   lv_anim_start(&a);
 }
 
+// Re-run the slide+fade combo for one tile's value/suffix/subtext. Called both
+// from the boot intro (with per-tile stagger delay) and from the tap handlers
+// (delay = 0) so a unit toggle replays the same wake-up motion against the
+// freshly rendered text. Section caption (t.label) is intentionally untouched.
+// Safe to call mid-flight: lv_anim_start replaces any existing anim with the
+// same (var, exec_cb), and position_value_block has just snapped each label
+// back to its true final Y, so lv_obj_get_y inside slide_label_in reads the
+// correct destination even if a prior anim was still running.
+void animate_tile_text_in(ClimateTile& t, uint32_t delay_ms) {
+  if (t.container == nullptr) return;
+  slide_label_in(t.value_lbl,   delay_ms);
+  slide_label_in(t.suffix_lbl,  delay_ms);
+  slide_label_in(t.subtext_lbl, delay_ms);
+  fade_label_in(t.value_lbl,   fade_text_to_text,  delay_ms);
+  fade_label_in(t.suffix_lbl,  fade_text_to_muted, delay_ms);
+  fade_label_in(t.subtext_lbl, fade_text_to_muted, delay_ms);
+}
+
 void start_climate_text_intro_anim() {
   for (size_t i = 0; i < 3; i++) {
-    ClimateTile& t = s_climate_tiles[i];
-    if (t.container == nullptr) continue;
     const uint32_t delay =
         kIntroTextDelayMs + static_cast<uint32_t>(i) * kIntroTextStaggerMs;
-    // Section caption (t.label) stays put — it's the column header, so
-    // anchoring it gives the numbers something to slide up *into*.
-    slide_label_in(t.value_lbl,   delay);
-    slide_label_in(t.suffix_lbl,  delay);
-    slide_label_in(t.subtext_lbl, delay);
-    fade_label_in(t.value_lbl,   fade_text_to_text,  delay);
-    fade_label_in(t.suffix_lbl,  fade_text_to_muted, delay);
-    fade_label_in(t.subtext_lbl, fade_text_to_muted, delay);
+    animate_tile_text_in(s_climate_tiles[i], delay);
   }
 }
 
@@ -1471,6 +1480,7 @@ void on_pressure_tap(lv_event_t*) {
           ? climate::PressureUnit::HPa
           : climate::PressureUnit::InHg);
   refresh_climate_pressure(climate::latest());
+  animate_tile_text_in(s_climate_tiles[0], 0);
 }
 
 void on_temp_tap(lv_event_t*) {
@@ -1480,8 +1490,12 @@ void on_temp_tap(lv_event_t*) {
   const climate::Reading r = climate::latest();
   refresh_climate_temp(r);
   // Dew-point readout follows the temperature unit, so flipping temp also
-  // updates humidity when it's in dew-point mode.
+  // updates humidity when it's in dew-point mode. The humidity tile's value
+  // is updated in place (no slide/fade replay) — only the directly-tapped
+  // tile animates, so the °C↔°F-driven dew-point change reads as a quiet
+  // side effect rather than a competing wave next to the tapped tile.
   refresh_climate_humidity(r);
+  animate_tile_text_in(s_climate_tiles[1], 0);
 }
 
 void on_humidity_tap(lv_event_t*) {
@@ -1490,6 +1504,7 @@ void on_humidity_tap(lv_event_t*) {
           ? climate::HumidityUnit::DewPoint
           : climate::HumidityUnit::Percent);
   refresh_climate_humidity(climate::latest());
+  animate_tile_text_in(s_climate_tiles[2], 0);
 }
 
 // 1 Hz tick: refresh climate readouts + nudge the model so the arrow tracks
