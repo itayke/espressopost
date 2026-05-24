@@ -126,6 +126,12 @@ struct ClimateIconState {
   // the needle angle in degrees (0 = straight up, +90 = right, -90 = left),
   // mapped from pressure. Unused (left at 0) for kinds without a dynamic.
   float           dynamic;
+  // 0..1 boot-intro factor. The draw routine lerps each icon's visualization
+  // from its "empty" pose (needle parked at −90°, mercury at 0 %, drop empty)
+  // toward `dynamic` using this progress, so the strip animates from blank to
+  // its first reading on power-on. Stays at 1 once the intro anim finishes;
+  // subsequent updates just write `dynamic` and redraw at full progress.
+  float           intro_progress;
 };
 struct ClimateTile {
   lv_obj_t*        container;    // tap-target button (whole column rect)
@@ -954,6 +960,11 @@ void draw_climate_icon(lv_event_t* e) {
     lv_draw_line(layer, &ld);
   };
 
+  // Boot-intro lerp factor. At 0 each icon draws its "empty" pose; at 1 it
+  // draws `dynamic` verbatim. The anim runs once on first valid climate
+  // reading, so steady-state redraws always see progress == 1.
+  const float progress = std::clamp(state->intro_progress, 0.0f, 1.0f);
+
   // Coordinates below are tuned for a ~48-px effective drawing area (icon
   // widget is 48×48, with a few pixels of internal margin). Original 32-px
   // sizing was scaled by 1.5x and re-rounded so the geometry stays integer-
@@ -978,8 +989,11 @@ void draw_climate_icon(lv_event_t* e) {
       // Needle: length 18 px from pivot, rotated by state->dynamic degrees
       // (clockwise from straight up). At ±90° the tip lands 4 px shy of the
       // arc rim, so the dial reads as "inside the gauge" at every reading.
+      // Intro lerp sweeps the needle from parked-left (−90°) to the target
+      // reading, so power-on reads as an "odometer-hand" wipe across the dial.
       constexpr float kNeedleLen = 18.0f;
-      const float ang = state->dynamic * (3.14159265f / 180.0f);
+      const float angle_deg = -90.0f + (state->dynamic - (-90.0f)) * progress;
+      const float ang = angle_deg * (3.14159265f / 180.0f);
       const int32_t tx = cx + static_cast<int32_t>(kNeedleLen * std::sin(ang));
       const int32_t ty = cy + 13 - static_cast<int32_t>(kNeedleLen * std::cos(ang));
       line(cx, cy + 13, tx, ty);
@@ -1032,8 +1046,9 @@ void draw_climate_icon(lv_event_t* e) {
       //
       // pct maps °F linearly 0..100 → 0..100 % (set by
       // refresh_climate_temp). The unit toggle (°F vs °C) is text-only;
-      // the column always reads the underlying temperature.
-      const float pct = std::clamp(state->dynamic, 0.0f, 100.0f);
+      // the column always reads the underlying temperature. Intro lerp
+      // scales the column from 0 → target so the mercury rises on boot.
+      const float pct = std::clamp(state->dynamic, 0.0f, 100.0f) * progress;
       constexpr int32_t kColBotOff    = +12;   // col bottom y offset
       constexpr int32_t kColTopOff100 = -18;   // col top y offset at 100%
       const int32_t col_height_max = kColBotOff - kColTopOff100;  // 33
@@ -1081,8 +1096,9 @@ void draw_climate_icon(lv_event_t* e) {
       // Horizontal clip: y_level interpolates from cy at 100% down to cy+16
       // at 0%. Setting layer->_clip_area.y1 = y_level masks every draw above
       // it, so the fill drains top-down. Save/restore the prior clip so we
-      // don't leak into the next tile's draws.
-      const float pct = std::clamp(state->dynamic, 0.0f, 100.0f);
+      // don't leak into the next tile's draws. Intro lerp scales 0 → target
+      // so the drop fills from empty on boot.
+      const float pct = std::clamp(state->dynamic, 0.0f, 100.0f) * progress;
       const int32_t inner_top = cy - 4;
       const int32_t inner_bot = cy + 15;
       const int32_t y_level   = inner_top +
@@ -1292,11 +1308,161 @@ void refresh_climate_humidity(const climate::Reading& r) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Climate strip boot-intro animation — single source of truth for timings.
+// ---------------------------------------------------------------------------
+// On power-on the strip wakes up in two sequential passes:
+//
+//   1. TEXT pass (starts at t=kIntroTextDelayMs) — each tile's value,
+//      inline suffix, and newline subtext slide up from kIntroTextSlideY
+//      px below their final Y *and* fade in from black to their final
+//      color in parallel (same duration, same easing, same per-tile
+//      stagger). Section captions stay static so the column headers
+//      anchor the eye while the numbers fly in. The tile container is
+//      non-scrollable with its default overflow clip, so labels at
+//      final_y + kIntroTextSlideY sit outside the 210-px container
+//      bounds and get masked until they cross the bottom edge. Each tile
+//      takes kIntroTextDurationMs ms and is offset by
+//      kIntroTextStaggerMs ms from the previous tile (left → right), so
+//      the strip reads as a wave rather than a single jump.
+//
+//   2. ICON pass (starts at t=kIntroIconDelayMs) — one anim ramps a 0..1
+//      progress factor across all three ClimateIconState entries
+//      simultaneously; the draw routine lerps each icon from its empty
+//      pose (needle parked left, column at 0 %, drop drained) to its live
+//      `dynamic` reading. Runs for kIntroIconDurationMs ms with no stagger.
+//      Sequenced after the text slide so the numbers settle first and the
+//      icons then bring them to life — feels like the dial reacting to
+//      the readout rather than racing it.
+constexpr uint32_t kIntroTextDelayMs    = 250;
+constexpr uint32_t kIntroIconDelayMs    = 500;
+constexpr uint32_t kIntroTextDurationMs = 250;
+constexpr uint32_t kIntroTextStaggerMs  = 125;
+constexpr int32_t  kIntroTextSlideY     = 15;
+constexpr uint32_t kIntroIconDurationMs = 1000;
+
+void climate_intro_anim_cb(void* /*var*/, int32_t v) {
+  const float progress = static_cast<float>(v) / 1000.0f;
+  for (auto& tile : s_climate_tiles) {
+    if (tile.icon == nullptr) continue;
+    tile.icon_state.intro_progress = progress;
+    lv_obj_invalidate(tile.icon);
+  }
+}
+
+void start_climate_icon_intro_anim() {
+  lv_anim_t a;
+  lv_anim_init(&a);
+  // Var is just an identity for LVGL's anim de-dup; the cb ignores it and
+  // updates all three tiles directly.
+  lv_anim_set_var(&a, &s_climate_tiles);
+  lv_anim_set_exec_cb(&a, climate_intro_anim_cb);
+  lv_anim_set_values(&a, 0, 1000);
+  lv_anim_set_duration(&a, kIntroIconDurationMs);
+  lv_anim_set_delay(&a, kIntroIconDelayMs);
+  lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+  lv_anim_start(&a);
+}
+
+// Slide one label up into its final Y from kIntroTextSlideY px below. We
+// capture the obj's current y (set by build_climate_tile / position_value_block
+// just before we run) as the final position, snap it down, then ease it back.
+// Hidden labels (suffix/subtext can be empty depending on the unit toggle) are
+// skipped — animating them would be a no-op visually but still cost an
+// lv_anim slot.
+void slide_label_in(lv_obj_t* obj, uint32_t delay_ms) {
+  if (obj == nullptr) return;
+  if (lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN)) return;
+  const int32_t final_y = lv_obj_get_y(obj);
+  const int32_t start_y = final_y + kIntroTextSlideY;
+  // Snap to the slid-down start before LVGL gets a chance to flush a frame,
+  // so the first paint already shows the label off-screen rather than
+  // flickering through its final position.
+  lv_obj_set_y(obj, start_y);
+  lv_anim_t a;
+  lv_anim_init(&a);
+  lv_anim_set_var(&a, obj);
+  lv_anim_set_exec_cb(&a, reinterpret_cast<lv_anim_exec_xcb_t>(lv_obj_set_y));
+  lv_anim_set_values(&a, start_y, final_y);
+  lv_anim_set_duration(&a, kIntroTextDurationMs);
+  lv_anim_set_delay(&a, delay_ms);
+  lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+  lv_anim_start(&a);
+}
+
+// Per-target-color fade exec_cbs. The text fade runs in parallel with the
+// slide, so we get a second concurrent lv_anim per label (LVGL keys anims by
+// (var, exec_cb) — these have a different cb pointer than lv_obj_set_y, so
+// they don't clobber the slide anim). v ranges 0..255: 0 = pure black,
+// 255 = the label's final color. We need one cb per target because lv_anim's
+// exec_cb takes (var, value) and there's no per-anim color slot to carry the
+// target through; for two final colors (kColorText vs kColorMuted) it's
+// cleaner to bind the color at the function level than to thread it through
+// lv_anim_set_user_data.
+void fade_text_to_text(void* var, int32_t v) {
+  lv_obj_set_style_text_color(
+      static_cast<lv_obj_t*>(var),
+      lv_color_mix(kColorText, lv_color_black(), static_cast<uint8_t>(v)),
+      LV_PART_MAIN);
+}
+void fade_text_to_muted(void* var, int32_t v) {
+  lv_obj_set_style_text_color(
+      static_cast<lv_obj_t*>(var),
+      lv_color_mix(kColorMuted, lv_color_black(), static_cast<uint8_t>(v)),
+      LV_PART_MAIN);
+}
+
+void fade_label_in(lv_obj_t* obj, lv_anim_exec_xcb_t cb, uint32_t delay_ms) {
+  if (obj == nullptr) return;
+  if (lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN)) return;
+  // Snap to pure black before LVGL flushes so the first paint matches the
+  // anim's starting frame.
+  lv_obj_set_style_text_color(obj, lv_color_black(), LV_PART_MAIN);
+  lv_anim_t a;
+  lv_anim_init(&a);
+  lv_anim_set_var(&a, obj);
+  lv_anim_set_exec_cb(&a, cb);
+  lv_anim_set_values(&a, 0, 255);
+  lv_anim_set_duration(&a, kIntroTextDurationMs);
+  lv_anim_set_delay(&a, delay_ms);
+  lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+  lv_anim_start(&a);
+}
+
+void start_climate_text_intro_anim() {
+  for (size_t i = 0; i < 3; i++) {
+    ClimateTile& t = s_climate_tiles[i];
+    if (t.container == nullptr) continue;
+    const uint32_t delay =
+        kIntroTextDelayMs + static_cast<uint32_t>(i) * kIntroTextStaggerMs;
+    // Section caption (t.label) stays put — it's the column header, so
+    // anchoring it gives the numbers something to slide up *into*.
+    slide_label_in(t.value_lbl,   delay);
+    slide_label_in(t.suffix_lbl,  delay);
+    slide_label_in(t.subtext_lbl, delay);
+    fade_label_in(t.value_lbl,   fade_text_to_text,  delay);
+    fade_label_in(t.suffix_lbl,  fade_text_to_muted, delay);
+    fade_label_in(t.subtext_lbl, fade_text_to_muted, delay);
+  }
+}
+
 void refresh_climate_tiles() {
   const climate::Reading r = climate::latest();
   refresh_climate_pressure(r);
   refresh_climate_temp(r);
   refresh_climate_humidity(r);
+
+  // Kick the boot-intro anims once, the first time we land a real reading.
+  // Before that, the BME280 task is still warming up and the tiles render
+  // "--" with their icons parked at the empty pose (progress = 0). The text
+  // anim must fire AFTER the refresh calls above, since slide_label_in reads
+  // each label's freshly placed Y as the final destination.
+  static bool intro_played = false;
+  if (!intro_played && r.timestamp_us != 0) {
+    intro_played = true;
+    start_climate_icon_intro_anim();
+    start_climate_text_intro_anim();
+  }
 }
 
 void on_pressure_tap(lv_event_t*) {
