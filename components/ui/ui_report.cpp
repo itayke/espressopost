@@ -31,7 +31,7 @@ constexpr int32_t kCenter          = kScreen / 2;
 // sits just below the separator that caps the grinder area, so the entire
 // region from there down (including the value text, bar, and upward cursor)
 // is a horizontal-swipe surface.
-constexpr int32_t kGrinderSeparatorY = 290;  // horizontal divider under POST
+constexpr int32_t kGrinderSeparatorY = 296;  // horizontal divider under POST
 constexpr int32_t kPressYThreshold   = kGrinderSeparatorY + 2;
 
 // ---------------------------------------------------------------------------
@@ -47,12 +47,22 @@ constexpr int32_t kPressYThreshold   = kGrinderSeparatorY + 2;
 constexpr float kGrindMin       =  0.0f;
 constexpr float kGrindMax       = 30.0f;
 
+// Y-offset of the big "5.10" current-value text, measured from screen
+// center (LV_ALIGN_CENTER's y arg). Picked so the value sits between the
+// grinder-cap separator above and the bar below.
+constexpr int32_t kGrindValueY           = 100;
+// Y-offset of the "Suggested 5.15 (75%)" line, also measured from screen
+// center. Sits just below the cursor triangle (which sits below the bar),
+// out of the bar's drag-feedback path — the suggestion is a status
+// readout, not part of the live scrub.
+constexpr int32_t kSuggestedY            = 190;
+
 // Bar geometry. Chord-width at kBarY on the round display is
 // 2·sqrt(r² − (kBarY − kCenter)²) ≈ 335 px at y=395; the half-width below
 // (160) covers ~95 % of that chord, hugging the round-display edge while
 // keeping small-tick spacing (every 16 px) readable.
-constexpr int32_t kBarY                  = 395;
-constexpr int32_t kBarHalfWidth          = 160;
+constexpr int32_t kBarY                  = 375;
+constexpr int32_t kBarHalfWidth          = 180;
 constexpr int32_t kBarStripHeight        = 36;   // widget bounds, hosts the tick rects
 // ±1 grind unit visible across the bar → kBarHalfWidth px per grind unit.
 // Same density target as the previous (narrower) bar — moving the bar up
@@ -60,17 +70,25 @@ constexpr int32_t kBarStripHeight        = 36;   // widget bounds, hosts the tic
 // still covers the bar's half-width worth of pixels.
 constexpr float   kBarPxPerUnit          = static_cast<float>(kBarHalfWidth);
 
-// Tick sizes. Big = integer grind unit, small = 0.1 step. Big ticks are
-// taller AND thicker so the user reads "this is a whole-number landmark"
-// pre-attentively; small ticks are short hairlines that just give a sense
-// of scroll-progress between landmarks.
-constexpr int32_t kBigTickHalfHeight    = 14;
-constexpr int32_t kBigTickThickness     = 3;
-constexpr int32_t kSmallTickHalfHeight  = 6;
-constexpr int32_t kSmallTickThickness   = 1;
-// Colored dot on the bar at the model's suggested value. Radius matches the
-// big-tick half-thickness so it reads as a sibling to the integer landmarks.
-constexpr int32_t kSuggestionDotRadius  = 6;
+// Tick sizes. Big = integer grind unit (1.0 step), mid = 0.5 step, small =
+// 0.1 step. Big ticks are taller AND thicker so the user reads "this is a
+// whole-number landmark" pre-attentively; mid ticks share the small tier's
+// thickness/color but are 8 px longer, reading as "long hairlines" that
+// help the eye lock on the half-unit boundary without competing with the
+// integer landmarks; small ticks are short hairlines for fine scroll feel.
+constexpr int32_t kBigTickLen         = 26;
+constexpr int32_t kBigTickThickness   = 3;
+constexpr int32_t kMidTickLen         = 18;
+constexpr int32_t kMidTickThickness   = 1;
+constexpr int32_t kSmallTickLen       = 8;
+constexpr int32_t kSmallTickThickness = 1;
+// Tick colors live further down (after the palette is declared): see
+// kBigTickColor / kMidTickColor / kSmallTickColor near the kColor* block.
+// Colored diamond on the bar at the model's suggested value. Half-width is
+// 25 % narrower than the previous 6-px-radius circle (so the diamond is
+// 9 px wide instead of 12), reading as a quieter sibling to the integer
+// landmarks rather than competing with them.
+constexpr float kSuggestionDiamondHalfWidth = 7.0f;
 
 // Time-delta range. Wider than realistic so a long-pull-and-channel doesn't
 // clip; the model downweights outliers via the quality field anyway.
@@ -88,8 +106,9 @@ const lv_color_t kColorBg     = LV_COLOR_MAKE(0x00, 0x00, 0x00);
 const lv_color_t kColorAccent = LV_COLOR_MAKE(0xC8, 0x80, 0x36);
 const lv_color_t kColorText   = LV_COLOR_MAKE(0xE0, 0xE0, 0xE0);
 const lv_color_t kColorMuted  = LV_COLOR_MAKE(0x70, 0x70, 0x70);
-const lv_color_t kColorDim    = LV_COLOR_MAKE(0x30, 0x30, 0x30);
-const lv_color_t kColorDark   = LV_COLOR_MAKE(0x20, 0x20, 0x20);
+const lv_color_t kColorMuted2 = LV_COLOR_MAKE(0x50, 0x50, 0x50);
+const lv_color_t kColorMuted3 = LV_COLOR_MAKE(0x30, 0x30, 0x30);
+const lv_color_t kColorMuted4   = LV_COLOR_MAKE(0x20, 0x20, 0x20);
 const lv_color_t kColorGreen  = LV_COLOR_MAKE(0x40, 0xB0, 0x60);
 const lv_color_t kColorOrange = LV_COLOR_MAKE(0xD8, 0x90, 0x30);
 const lv_color_t kColorRed    = LV_COLOR_MAKE(0xC8, 0x40, 0x40);
@@ -103,6 +122,13 @@ const lv_color_t kColorIconPurple = LV_COLOR_MAKE(0xA8, 0x80, 0xE0);
 const lv_color_t kColorIconRed    = LV_COLOR_MAKE(0xE0, 0x70, 0x55);
 const lv_color_t kColorIconBlue   = LV_COLOR_MAKE(0x60, 0xA8, 0xE0);
 const lv_color_t kColorLabelGray  = LV_COLOR_MAKE(0xB0, 0xB0, 0xB0);
+
+// Grinder tick colors. Big stands out at the text-bright tier; mid and
+// small share the muted tier so the half-unit ticks read as "longer
+// hairlines" rather than a third distinct stratum.
+const lv_color_t kBigTickColor   = kColorMuted;
+const lv_color_t kMidTickColor   = kColorMuted2;
+const lv_color_t kSmallTickColor = kColorMuted2;
 
 // ---------------------------------------------------------------------------
 // UI modes. The grinder bar + cursor + value text stay live across both;
@@ -244,19 +270,20 @@ struct ArrowState {
   int32_t    half_base;  // base half-width in px
   int32_t    height;     // tip-to-base distance in px
 };
-// 14-px half-base × 28-px height — readable from across the room without
-// crowding the bar's tick rail. The triangle points UP at the bar from the
-// row below it; with the bar at kBarY=410 and the cursor widget at kBarY +
-// half_height + gap (see build_grinder), the tip sits a few px below the
-// bar's big-tick extent.
-ArrowState s_cursor_arrow_state = {0.0f, LV_COLOR_MAKE(0xE0, 0xE0, 0xE0), 14, 28};
+// 7-px half-base × 14-px height — small enough to read as a pointer
+// underline rather than a competing visual element next to the bar's big
+// ticks. The triangle points UP at the bar from the row below it; with
+// the bar at kBarY and the cursor widget at kBarY + half_height + gap
+// (see build_grinder), the tip sits a few px below the bar's big-tick
+// extent.
+ArrowState s_cursor_arrow_state = {0.0f, LV_COLOR_MAKE(0xE0, 0xE0, 0xE0), 7, 14};
 
 // Widget size for the cursor triangle. Wider than the triangle itself so the
 // rotated rasterizer has antialias headroom and so the centering math (which
 // uses this constant rather than lv_obj_get_width) is correct before LVGL's
 // first layout pass — the earlier bug had the cursor offset by half its
 // width because lv_obj_get_width returned 0 on the first call.
-constexpr int32_t kCursorWidget = 40;
+constexpr int32_t kCursorWidget = 20;
 
 void draw_arrow_event(lv_event_t* e) {
   lv_layer_t* layer = lv_event_get_layer(e);
@@ -337,12 +364,17 @@ void draw_grind_bar(lv_event_t* e) {
 
   lv_draw_rect_dsc_t big_dsc;
   lv_draw_rect_dsc_init(&big_dsc);
-  big_dsc.bg_color = kColorText;
+  big_dsc.bg_color = kBigTickColor;
   big_dsc.bg_opa   = LV_OPA_COVER;
+
+  lv_draw_rect_dsc_t mid_dsc;
+  lv_draw_rect_dsc_init(&mid_dsc);
+  mid_dsc.bg_color = kMidTickColor;
+  mid_dsc.bg_opa   = LV_OPA_COVER;
 
   lv_draw_rect_dsc_t small_dsc;
   lv_draw_rect_dsc_init(&small_dsc);
-  small_dsc.bg_color = kColorMuted;
+  small_dsc.bg_color = kSmallTickColor;
   small_dsc.bg_opa   = LV_OPA_COVER;
 
   for (int32_t idx = idx_min; idx <= idx_max; ++idx) {
@@ -351,30 +383,60 @@ void draw_grind_bar(lv_event_t* e) {
     const float x_offset = (v_i - s_grind_value) * kBarPxPerUnit;
     if (std::fabs(x_offset) > static_cast<float>(kBarHalfWidth) + 0.5f) continue;
     const int32_t tick_x = cx + static_cast<int32_t>(std::lround(x_offset));
-    const bool    is_big = (idx % 10 == 0);
-    const int32_t half_h = is_big ? kBigTickHalfHeight : kSmallTickHalfHeight;
-    const int32_t half_w = (is_big ? kBigTickThickness : kSmallTickThickness) / 2;
+    // Tier: integer (every 10 0.1-steps) > half-unit (every 5) > 0.1 step.
+    // Mid and small share thickness; only length and dsc differ.
+    const bool is_big = (idx % 10 == 0);
+    const bool is_mid = !is_big && (idx % 5 == 0);
+    int32_t half_h, half_w;
+    lv_draw_rect_dsc_t* dsc;
+    if (is_big) {
+      half_h = kBigTickLen / 2;
+      half_w = kBigTickThickness / 2;
+      dsc    = &big_dsc;
+    } else if (is_mid) {
+      half_h = kMidTickLen / 2;
+      half_w = kMidTickThickness / 2;
+      dsc    = &mid_dsc;
+    } else {
+      half_h = kSmallTickLen / 2;
+      half_w = kSmallTickThickness / 2;
+      dsc    = &small_dsc;
+    }
     lv_area_t a = {tick_x - half_w, cy - half_h,
                    tick_x + half_w, cy + half_h};
-    lv_draw_rect(layer, is_big ? &big_dsc : &small_dsc, &a);
+    lv_draw_rect(layer, dsc, &a);
   }
 
-  // Suggestion mark — colored filled circle ON the bar centerline at the
+  // Suggestion mark — colored diamond ON the bar centerline at the
   // suggested grind's x. Hidden when the suggestion is invalid or scrolls
   // outside the visible range (the "Suggested 5.15 (75%)" text below still
-  // carries the number + matching color tier in that case).
+  // carries the number + matching color tier in that case). Drawn as two
+  // back-to-back filled triangles since LVGL 9 has no rotated-rect primitive.
   if (predicted_visible(s_current_suggestion)) {
     const float dot_offset = (s_current_suggestion.grind - s_grind_value) * kBarPxPerUnit;
     if (std::fabs(dot_offset) <= static_cast<float>(kBarHalfWidth)) {
-      lv_draw_rect_dsc_t dot_dsc;
-      lv_draw_rect_dsc_init(&dot_dsc);
-      dot_dsc.bg_color = confidence_color(s_current_suggestion.confidence_pct);
-      dot_dsc.bg_opa   = LV_OPA_COVER;
-      dot_dsc.radius   = LV_RADIUS_CIRCLE;
-      const int32_t dot_x = cx + static_cast<int32_t>(std::lround(dot_offset));
-      lv_area_t a = {dot_x - kSuggestionDotRadius, cy - kSuggestionDotRadius,
-                     dot_x + kSuggestionDotRadius, cy + kSuggestionDotRadius};
-      lv_draw_rect(layer, &dot_dsc, &a);
+      const float dot_x = static_cast<float>(cx) + dot_offset;
+      const float dot_y = static_cast<float>(cy);
+      const float hw   = kSuggestionDiamondHalfWidth;
+
+      lv_draw_triangle_dsc_t dia_dsc;
+      lv_draw_triangle_dsc_init(&dia_dsc);
+      dia_dsc.color = confidence_color(s_current_suggestion.confidence_pct);
+      dia_dsc.opa   = LV_OPA_COVER;
+
+      // Upper half: top vertex + horizontal midline (right, left).
+      dia_dsc.p[0] = {static_cast<lv_value_precise_t>(dot_x),
+                      static_cast<lv_value_precise_t>(dot_y - hw)};
+      dia_dsc.p[1] = {static_cast<lv_value_precise_t>(dot_x + hw),
+                      static_cast<lv_value_precise_t>(dot_y)};
+      dia_dsc.p[2] = {static_cast<lv_value_precise_t>(dot_x - hw),
+                      static_cast<lv_value_precise_t>(dot_y)};
+      lv_draw_triangle(layer, &dia_dsc);
+
+      // Lower half: bottom vertex + horizontal midline (right, left).
+      dia_dsc.p[0] = {static_cast<lv_value_precise_t>(dot_x),
+                      static_cast<lv_value_precise_t>(dot_y + hw)};
+      lv_draw_triangle(layer, &dia_dsc);
     }
   }
 }
@@ -460,7 +522,7 @@ void refresh_stars() {
   for (uint8_t i = 0; i < kMaxStars; ++i) {
     if (s_star_btns[i] == nullptr) continue;
     const bool lit = (i < s_stars_value);
-    lv_obj_set_style_bg_color(s_star_btns[i], lit ? kColorAccent : kColorDim,
+    lv_obj_set_style_bg_color(s_star_btns[i], lit ? kColorAccent : kColorMuted3,
                               LV_PART_MAIN);
   }
 }
@@ -474,7 +536,7 @@ void refresh_submit_enabled() {
     lv_obj_set_style_text_color(s_submit_label, kColorBg, LV_PART_MAIN);
   } else {
     lv_obj_add_state(s_submit_btn, LV_STATE_DISABLED);
-    lv_obj_set_style_bg_color(s_submit_btn, kColorDim, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_submit_btn, kColorMuted3, LV_PART_MAIN);
     lv_obj_set_style_text_color(s_submit_label, kColorMuted, LV_PART_MAIN);
   }
 }
@@ -1484,7 +1546,7 @@ lv_obj_t* make_round_btn(lv_obj_t* parent, int32_t size) {
   lv_obj_t* b = lv_button_create(parent);
   lv_obj_set_size(b, size, size);
   lv_obj_set_style_radius(b, size / 2, LV_PART_MAIN);
-  lv_obj_set_style_bg_color(b, kColorDim, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(b, kColorMuted3, LV_PART_MAIN);
   lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_set_style_shadow_width(b, 0, LV_PART_MAIN);
   lv_obj_set_style_border_width(b, 0, LV_PART_MAIN);
@@ -1555,7 +1617,7 @@ void build_grinder(lv_obj_t* scr) {
   s_static_cursor = make_arrow(scr, &s_cursor_arrow_state, kCursorWidget);
   {
     constexpr int32_t kCursorTipGap = 6;  // px between bar bottom edge and triangle tip
-    const int32_t tip_y = kBarY + kBigTickHalfHeight + kCursorTipGap;
+    const int32_t tip_y = kBarY + kBigTickLen / 2 + kCursorTipGap;
     const int32_t cursor_tip_inset = (kCursorWidget - s_cursor_arrow_state.height) / 2;
     lv_obj_set_pos(s_static_cursor,
                    kCenter - kCursorWidget / 2,
@@ -1571,19 +1633,19 @@ void build_grinder(lv_obj_t* scr) {
   lv_obj_set_style_text_font(s_grind_value_label, &lv_font_montserrat_48,
                              LV_PART_MAIN);
   lv_obj_set_style_bg_opa(s_grind_value_label, LV_OPA_TRANSP, LV_PART_MAIN);
-  lv_obj_align(s_grind_value_label, LV_ALIGN_CENTER, 0, 95);
+  lv_obj_align(s_grind_value_label, LV_ALIGN_CENTER, 0, kGrindValueY);
   lv_obj_clear_flag(s_grind_value_label, LV_OBJ_FLAG_CLICKABLE);
 
-  // "Suggested 5.15 (75%)" line — slotted between the value text and the
-  // bar, hidden when there's no usable suggestion or in post mode. With
-  // the bar at y=kBarY (=395, big ticks span y=381..409) and the value
-  // text bottom near y=351, the label fits in the ~30 px gap above the bar.
+  // "Suggested 5.15 (75%)" line — sits just below the cursor triangle so
+  // it reads as a quiet annotation attached to the cursor, separate from
+  // the live tick scroll above. Hidden when there's no usable suggestion
+  // or in post mode.
   s_suggested_label = lv_label_create(scr);
   lv_obj_set_style_text_color(s_suggested_label, kColorMuted, LV_PART_MAIN);
   lv_obj_set_style_text_font(s_suggested_label, &lv_font_montserrat_14,
                              LV_PART_MAIN);
   lv_obj_set_style_bg_opa(s_suggested_label, LV_OPA_TRANSP, LV_PART_MAIN);
-  lv_obj_align(s_suggested_label, LV_ALIGN_CENTER, 0, 130);
+  lv_obj_align(s_suggested_label, LV_ALIGN_CENTER, 0, kSuggestedY);
   lv_obj_clear_flag(s_suggested_label, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_flag(s_suggested_label, LV_OBJ_FLAG_HIDDEN);
 }
@@ -1593,7 +1655,7 @@ lv_obj_t* make_separator(lv_obj_t* parent, int32_t x, int32_t y,
   lv_obj_t* s = lv_obj_create(parent);
   lv_obj_set_size(s, w, h);
   lv_obj_set_pos(s, x, y);
-  lv_obj_set_style_bg_color(s, kColorDark, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(s, kColorMuted4, LV_PART_MAIN);
   lv_obj_set_style_bg_opa(s, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_set_style_border_width(s, 0, LV_PART_MAIN);
   lv_obj_set_style_pad_all(s, 0, LV_PART_MAIN);
@@ -1729,9 +1791,10 @@ void build_idle_group(lv_obj_t* scr) {
   lv_obj_center(post_lbl);
 
   // Horizontal separator capping the grinder area, mirroring the line above
-  // POST that closes the climate strip. With POST bottom at y=279 and
-  // kGrinderSeparatorY=290, the line sits 11 px below the button — same
-  // visual cadence as the climate-area cap.
+  // POST that closes the climate strip. POST sits between two separators
+  // with the same vertical breathing room on each side — climate line
+  // at y=210, POST at y=227..278, grinder line at y=296 (17 px above and
+  // 17 px below the button).
   make_separator(s_idle_group, kSeparatorInset,
                  kGrinderSeparatorY - kSeparatorThickness / 2,
                  kScreen - 2 * kSeparatorInset, kSeparatorThickness);
@@ -1831,7 +1894,7 @@ void build_post_group(lv_obj_t* scr) {
   s_cancel_btn = lv_button_create(s_post_group);
   lv_obj_set_size(s_cancel_btn, 36, 36);
   lv_obj_set_style_radius(s_cancel_btn, 18, LV_PART_MAIN);
-  lv_obj_set_style_bg_color(s_cancel_btn, kColorDim, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(s_cancel_btn, kColorMuted3, LV_PART_MAIN);
   lv_obj_set_style_shadow_width(s_cancel_btn, 0, LV_PART_MAIN);
   lv_obj_set_style_border_width(s_cancel_btn, 0, LV_PART_MAIN);
   lv_obj_align(s_cancel_btn, LV_ALIGN_CENTER, 0, -160);
