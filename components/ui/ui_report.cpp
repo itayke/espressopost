@@ -1326,6 +1326,10 @@ constexpr uint32_t kIntroTextDurationMs = 250;
 constexpr uint32_t kIntroTextStaggerMs  = 125;
 constexpr int32_t  kIntroTextSlideY     = 15;
 constexpr uint32_t kIntroIconDurationMs = 1000;
+// Grind value label rides the same slide+fade as a climate tile but kicks off
+// almost immediately on boot — the user's current setting is the screen's
+// anchor, so it leads the wake-up wave and the climate strip catches up.
+constexpr uint32_t kIntroGrindDelayMs   = 150;
 
 void climate_intro_anim_cb(void* /*var*/, int32_t v) {
   const float progress = static_cast<float>(v) / 1000.0f;
@@ -1439,6 +1443,33 @@ void start_climate_text_intro_anim() {
         kIntroTextDelayMs + static_cast<uint32_t>(i) * kIntroTextStaggerMs;
     animate_tile_text_in(s_climate_tiles[i], delay);
   }
+}
+
+// translate_y based slide for labels positioned via lv_obj_align — unlike
+// slide_label_in's lv_obj_set_y path, translate is purely visual and doesn't
+// stack with the alignment offset on the next layout pass.
+void translate_y_exec(void* var, int32_t v) {
+  lv_obj_set_style_translate_y(static_cast<lv_obj_t*>(var), v, LV_PART_MAIN);
+}
+
+void slide_label_in_translate(lv_obj_t* obj, uint32_t delay_ms) {
+  if (obj == nullptr) return;
+  if (lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN)) return;
+  lv_obj_set_style_translate_y(obj, kIntroTextSlideY, LV_PART_MAIN);
+  lv_anim_t a;
+  lv_anim_init(&a);
+  lv_anim_set_var(&a, obj);
+  lv_anim_set_exec_cb(&a, translate_y_exec);
+  lv_anim_set_values(&a, kIntroTextSlideY, 0);
+  lv_anim_set_duration(&a, kIntroTextDurationMs);
+  lv_anim_set_delay(&a, delay_ms);
+  lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+  lv_anim_start(&a);
+}
+
+void start_grind_value_intro_anim() {
+  slide_label_in_translate(s_grind_value_label, kIntroGrindDelayMs);
+  fade_label_in(s_grind_value_label, fade_text_to_text, kIntroGrindDelayMs);
 }
 
 void refresh_climate_tiles() {
@@ -1900,6 +1931,7 @@ void start_report() {
   // off-by-half-label until LVGL gets around to its own layout tick.
   lv_obj_update_layout(scr);
   refresh_grinder();
+  start_grind_value_intro_anim();
   // Seed climate tiles immediately — BME280 has been sampling at 1 Hz since
   // its own task started, so a reading is usually ready by the time the UI
   // builds. Without this the strip flashes "--" for up to a second on boot.
