@@ -49,7 +49,7 @@ constexpr float kGrindMax       = 30.0f;
 // line tucks just below the cursor triangle so it reads as an annotation,
 // not part of the live scrub.
 constexpr int32_t kGrindValueY           = 100;
-constexpr int32_t kSuggestedY            = 190;
+constexpr int32_t kSuggestedY            = 194;
 
 // Bar widget — horizontal strip centered on kBarY, total width 2·kBarHalfWidth.
 // Sized to hug the round-display chord at kBarY while keeping small-tick
@@ -71,10 +71,6 @@ constexpr int32_t kMidTickThickness   = 1;
 constexpr int32_t kSmallTickLen       = 8;
 constexpr int32_t kSmallTickThickness = 1;
 // Tick colors are declared after the kColor* palette below.
-
-// Colored diamond stamped on the bar at the model's suggested grind. Reads
-// as a quieter sibling to the integer landmarks rather than competing.
-constexpr float kSuggestionDiamondHalfWidth = 7.0f;
 
 // Time-delta range. Wider than realistic so a long-pull-and-channel doesn't
 // clip; the model downweights outliers via the quality field anyway.
@@ -127,8 +123,9 @@ Mode s_mode = Mode::Idle;
 // ---------------------------------------------------------------------------
 // Grinder (always visible across Idle + Post):
 lv_obj_t* s_grinder_overlay   = nullptr;  // transparent full-screen swipe catcher
-lv_obj_t* s_grind_bar         = nullptr;  // custom-drawn tick strip + suggestion dot
+lv_obj_t* s_grind_bar         = nullptr;  // custom-drawn tick strip
 lv_obj_t* s_static_cursor     = nullptr;  // upward-pointing triangle just below the bar
+lv_obj_t* s_suggestion_arrow  = nullptr;  // confidence-tinted suggestion triangle, sits over the cursor
 lv_obj_t* s_grind_value_label = nullptr;  // big "5.10" above the bar — visible in idle mode
 lv_obj_t* s_suggested_label   = nullptr;  // "Suggested 5.15 (75%)" between value text and bar
 
@@ -255,15 +252,27 @@ struct ArrowState {
   int32_t    half_base;  // base half-width in px
   int32_t    height;     // tip-to-base distance in px
 };
-// Small triangle — reads as a pointer underline rather than competing with
-// the bar's big ticks. Points UP at the bar from the row below it; see
-// build_grinder for placement.
-ArrowState s_cursor_arrow_state = {0.0f, LV_COLOR_MAKE(0xE0, 0xE0, 0xE0), 7, 14};
+// Cursor and suggestion arrows share a widget bound (kCursorWidget, wider
+// than either triangle to give the rotated rasterizer antialias headroom)
+// and a tip-y on screen; the suggestion arrow is 2 px shorter so the cursor
+// reads as the anchor underneath when the two overlap. kCursorWidget is
+// used by the centering math directly (lv_obj_get_width returns 0 before
+// LVGL's first layout pass). kCursorTipGap is the gap between the bar's
+// big-tick bottom edge and the triangle tip.
+constexpr int32_t kCursorWidget            = 20;
+constexpr int32_t kCursorArrowHalfBase     = 8;
+constexpr int32_t kCursorArrowHeight       = 16;
+constexpr int32_t kSuggestionArrowHalfBase = 6;
+constexpr int32_t kSuggestionArrowHeight   = 12;
+constexpr int32_t kCursorTipGap            = 6;
 
-// Widget bounds for the cursor triangle. Wider than the triangle itself to
-// give the rotated rasterizer antialias headroom, and used by the centering
-// math directly (lv_obj_get_width returns 0 before LVGL's first layout pass).
-constexpr int32_t kCursorWidget = 20;
+ArrowState s_cursor_arrow_state = {0.0f, LV_COLOR_MAKE(0xE0, 0xE0, 0xE0),
+                                   kCursorArrowHalfBase, kCursorArrowHeight};
+// Suggestion arrow color is reassigned per confidence tier on every refresh;
+// initial value is just a placeholder until the first refresh_grinder().
+ArrowState s_suggestion_arrow_state = {0.0f, LV_COLOR_MAKE(0xE0, 0xE0, 0xE0),
+                                       kSuggestionArrowHalfBase,
+                                       kSuggestionArrowHeight};
 
 void draw_arrow_event(lv_event_t* e) {
   lv_layer_t* layer = lv_event_get_layer(e);
@@ -313,11 +322,6 @@ void draw_arrow_event(lv_event_t* e) {
 // We iterate 0.1-step indices (integers numbered in tenths of a grind unit)
 // and project each one to its x-position on the bar relative to the cursor's
 // current value. The cursor doesn't have to coincide with a tick.
-//
-// Same handler also paints the model's suggestion dot at its grind value's
-// x-position, colored by confidence tier — so the bar and the suggestion
-// mark stay in lockstep (one invalidation, one repaint) instead of needing
-// two widgets that have to be kept in sync.
 //
 // Direction convention: standard horizontal scale. LOWER (finer) values
 // sit LEFT of the cursor; HIGHER (coarser) values sit RIGHT. Drag is
@@ -387,50 +391,46 @@ void draw_grind_bar(lv_event_t* e) {
     lv_draw_rect(layer, dsc, &a);
   }
 
-  // Suggestion mark — colored diamond ON the bar centerline at the
-  // suggested grind's x. Hidden when the suggestion is invalid or scrolls
-  // outside the visible range (the "Suggested 5.15 (75%)" text below still
-  // carries the number + matching color tier in that case). Drawn as two
-  // back-to-back filled triangles since LVGL 9 has no rotated-rect primitive.
-  if (predicted_visible(s_current_suggestion)) {
-    const float dot_offset = (s_current_suggestion.grind - s_grind_value) * kBarPxPerUnit;
-    if (std::fabs(dot_offset) <= static_cast<float>(kBarHalfWidth)) {
-      const float dot_x = static_cast<float>(cx) + dot_offset;
-      const float dot_y = static_cast<float>(cy);
-      const float hw   = kSuggestionDiamondHalfWidth;
-
-      lv_draw_triangle_dsc_t dia_dsc;
-      lv_draw_triangle_dsc_init(&dia_dsc);
-      dia_dsc.color = confidence_color(s_current_suggestion.confidence_pct);
-      dia_dsc.opa   = LV_OPA_COVER;
-
-      // Upper half: top vertex + horizontal midline (right, left).
-      dia_dsc.p[0] = {static_cast<lv_value_precise_t>(dot_x),
-                      static_cast<lv_value_precise_t>(dot_y - hw)};
-      dia_dsc.p[1] = {static_cast<lv_value_precise_t>(dot_x + hw),
-                      static_cast<lv_value_precise_t>(dot_y)};
-      dia_dsc.p[2] = {static_cast<lv_value_precise_t>(dot_x - hw),
-                      static_cast<lv_value_precise_t>(dot_y)};
-      lv_draw_triangle(layer, &dia_dsc);
-
-      // Lower half: bottom vertex + horizontal midline (right, left).
-      dia_dsc.p[0] = {static_cast<lv_value_precise_t>(dot_x),
-                      static_cast<lv_value_precise_t>(dot_y + hw)};
-      lv_draw_triangle(layer, &dia_dsc);
-    }
-  }
 }
 
 // ---------------------------------------------------------------------------
-// Grinder refresh — invalidate the bar widget. LVGL only repaints the bar's
-// bounds, not the screen. The custom DRAW_MAIN handler re-evaluates which
-// ticks are visible and where the suggestion dot lands, so a single
-// invalidation covers both the ticks and the suggestion mark.
+// Grinder refresh — invalidate the bar widget (LVGL only repaints its bounds,
+// not the screen) and reposition the suggestion arrow over the cursor at the
+// model's grind value.
 // ---------------------------------------------------------------------------
+
+// Reposition + recolor the suggestion arrow. Hidden when the model has no
+// usable suggestion or when its x scrolls outside the visible bar range
+// (the "Suggested x.xx (NN%)" text below still carries the number + matching
+// color tier in that case).
+void refresh_suggestion_arrow() {
+  if (s_suggestion_arrow == nullptr) return;
+  if (!predicted_visible(s_current_suggestion)) {
+    lv_obj_add_flag(s_suggestion_arrow, LV_OBJ_FLAG_HIDDEN);
+    return;
+  }
+  const float offset_px = (s_current_suggestion.grind - s_grind_value) * kBarPxPerUnit;
+  if (std::fabs(offset_px) > static_cast<float>(kBarHalfWidth)) {
+    lv_obj_add_flag(s_suggestion_arrow, LV_OBJ_FLAG_HIDDEN);
+    return;
+  }
+  s_suggestion_arrow_state.color = confidence_color(s_current_suggestion.confidence_pct);
+  const int32_t tip_y    = kBarY + kBigTickLen / 2 + kCursorTipGap;
+  const int32_t tip_inset = (kCursorWidget - kSuggestionArrowHeight) / 2;
+  const int32_t tip_x    = kCenter + static_cast<int32_t>(std::lround(offset_px));
+  lv_obj_set_pos(s_suggestion_arrow,
+                 tip_x - kCursorWidget / 2,
+                 tip_y - tip_inset);
+  lv_obj_remove_flag(s_suggestion_arrow, LV_OBJ_FLAG_HIDDEN);
+  // Force a repaint so a color-only change (same position, new confidence
+  // tier) still renders — lv_obj_set_pos to an unchanged y/x is a no-op.
+  lv_obj_invalidate(s_suggestion_arrow);
+}
+
 // Small "Suggested x.xx (NN%)" line between the value text and the bar.
 // Hidden when the model has no usable suggestion or when the post-mode form
-// is up. The color tier matches the suggestion dot on the bar so the line
-// keeps carrying the confidence signal when the dot is off-screen.
+// is up. Color tier matches the suggestion arrow so the line keeps carrying
+// the confidence signal when the arrow has scrolled off-screen.
 void refresh_suggested_label() {
   if (s_suggested_label == nullptr) return;
   if (s_mode != Mode::Idle || !predicted_visible(s_current_suggestion)) {
@@ -455,6 +455,7 @@ void refresh_grinder() {
   if (s_grind_bar != nullptr) {
     lv_obj_invalidate(s_grind_bar);
   }
+  refresh_suggestion_arrow();
   refresh_suggested_label();
 }
 
@@ -1570,14 +1571,19 @@ void build_grinder(lv_obj_t* scr) {
   // big-tick extent of the bar.
   s_cursor_arrow_state.color = kColorText;
   s_static_cursor = make_arrow(scr, &s_cursor_arrow_state, kCursorWidget);
-  {
-    constexpr int32_t kCursorTipGap = 6;
-    const int32_t tip_y = kBarY + kBigTickLen / 2 + kCursorTipGap;
-    const int32_t cursor_tip_inset = (kCursorWidget - s_cursor_arrow_state.height) / 2;
-    lv_obj_set_pos(s_static_cursor,
-                   kCenter - kCursorWidget / 2,
-                   tip_y - cursor_tip_inset);
-  }
+  const int32_t cursor_tip_y      = kBarY + kBigTickLen / 2 + kCursorTipGap;
+  const int32_t cursor_tip_inset  = (kCursorWidget - kCursorArrowHeight) / 2;
+  lv_obj_set_pos(s_static_cursor,
+                 kCenter - kCursorWidget / 2,
+                 cursor_tip_y - cursor_tip_inset);
+
+  // Suggestion arrow — same widget host + same tip y as the cursor, slightly
+  // shorter so when the model's grind matches the user's the cursor still
+  // peeks out underneath. Created AFTER the cursor so LVGL paints it on top.
+  // Position + color updated each refresh_suggestion_arrow() call; hidden
+  // initially until the first refresh decides there's something to show.
+  s_suggestion_arrow = make_arrow(scr, &s_suggestion_arrow_state, kCursorWidget);
+  lv_obj_add_flag(s_suggestion_arrow, LV_OBJ_FLAG_HIDDEN);
 
   // Current value as big text above the bar, visible in BOTH modes. Suggested
   // line tucks between this and the bar (further down).
