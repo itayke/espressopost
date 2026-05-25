@@ -44,12 +44,9 @@ constexpr int32_t kPressYThreshold   = kGrinderSeparatorY + 2;
 constexpr float kGrindMin       =  0.0f;
 constexpr float kGrindMax       = 30.0f;
 
-// LV_ALIGN_CENTER y-offsets for the two text rows that live around the bar.
-// Value text sits between the grinder-cap separator and the bar; Suggested
-// line tucks just below the cursor triangle so it reads as an annotation,
-// not part of the live scrub.
+// LV_ALIGN_CENTER y-offset for the big value text — sits between the
+// grinder-cap separator and the bar.
 constexpr int32_t kGrindValueY           = 100;
-constexpr int32_t kSuggestedY            = 194;
 
 // "GRIND VALUE" caption — absolute screen coords (set_pos, not align) so it
 // stays parked on the left while the centered big-number to its right grows
@@ -58,10 +55,23 @@ constexpr int32_t kSuggestedY            = 194;
 constexpr int32_t kGrindCaptionX         = 50;
 constexpr int32_t kGrindCaptionY         = 327;
 
+// "SUGGESTION" / "x.xx (xx%)" block mirrors GRIND VALUE on the right side of
+// the big number. Both lines render center-aligned inside a fixed-width box
+// so the bottom line stays horizontally locked to the caption no matter how
+// the digit/percent counts shift. Block right edge sits 50 px from the screen
+// edge — symmetric to the caption's 50 px left inset.
+constexpr int32_t kSuggestionBlockW      = 120;
+constexpr int32_t kSuggestionBlockX      = kScreen - 44 - kSuggestionBlockW;
+// Shift the two-line block up so its visual center (≈ Y + 17 for two Mont14
+// rows) lines up with the single-line GRIND VALUE caption center
+// (≈ kGrindCaptionY + 9). That puts the caption at kGrindCaptionY - 8.
+constexpr int32_t kSuggestionCaptionY    = kGrindCaptionY - 8;
+constexpr int32_t kSuggestionValueY      = kSuggestionCaptionY + 18;
+
 // Bar widget — horizontal strip centered on kBarY, total width 2·kBarHalfWidth.
 // Sized to hug the round-display chord at kBarY while keeping small-tick
 // spacing (kBarHalfWidth / 10 px) readable.
-constexpr int32_t kBarY                  = 375;
+constexpr int32_t kBarY                  = 384;
 constexpr int32_t kBarHalfWidth          = 180;
 constexpr int32_t kBarStripHeight        = 36;
 // ±1 grind unit visible across the bar → kBarHalfWidth px per grind unit.
@@ -90,27 +100,41 @@ constexpr uint8_t kMaxStars = 5;
 // ---------------------------------------------------------------------------
 // AMOLED-friendly muted palette — pure-black background, no max-intensity
 // sub-pixels (saves burn-in). Same logic as the bringup screen.
+//
+// COLOR(0xRRGGBB) is a thin shim over LV_COLOR_MAKE so palette entries read
+// like a CSS hex literal instead of three comma-separated bytes — easier to
+// paste a Figma swatch in unchanged, and easier to eyeball red/green/blue
+// channels at a glance.
 // ---------------------------------------------------------------------------
-const lv_color_t kColorBg     = LV_COLOR_MAKE(0x00, 0x00, 0x00);
-const lv_color_t kColorAccent = LV_COLOR_MAKE(0xC8, 0x80, 0x36);
-const lv_color_t kColorText   = LV_COLOR_MAKE(0xE0, 0xE0, 0xE0);
-const lv_color_t kColorMuted  = LV_COLOR_MAKE(0x70, 0x70, 0x70);
-const lv_color_t kColorMuted2 = LV_COLOR_MAKE(0x50, 0x50, 0x50);
-const lv_color_t kColorMuted3 = LV_COLOR_MAKE(0x30, 0x30, 0x30);
-const lv_color_t kColorMuted4   = LV_COLOR_MAKE(0x20, 0x20, 0x20);
-const lv_color_t kColorGreen  = LV_COLOR_MAKE(0x40, 0xB0, 0x60);
-const lv_color_t kColorOrange = LV_COLOR_MAKE(0xD8, 0x90, 0x30);
-const lv_color_t kColorRed    = LV_COLOR_MAKE(0xC8, 0x40, 0x40);
+#define COLOR(rgb) LV_COLOR_MAKE(((rgb) >> 16) & 0xFF, \
+                                 ((rgb) >> 8)  & 0xFF, \
+                                 (rgb)         & 0xFF)
+
+const lv_color_t kColorBg     = COLOR(0x000000);
+const lv_color_t kColorAccent = COLOR(0xC88036);
+const lv_color_t kColorText   = COLOR(0xE0E0E0);
+const lv_color_t kColorMuted  = COLOR(0x707070);
+const lv_color_t kColorMuted2 = COLOR(0x505050);
+const lv_color_t kColorMuted3 = COLOR(0x303030);
+const lv_color_t kColorMuted4 = COLOR(0x202020);
+
+// Confidence-tier colors for the suggestion arrow + SUGGESTION block. Named
+// for the tier they represent rather than the hue so callers (confidence_color
+// and anything else that surfaces the tier) don't have to know that "low"
+// happens to be red today.
+const lv_color_t kColorConfidenceLow  = COLOR(0xE07055);
+const lv_color_t kColorConfidenceMed  = COLOR(0xA880E0);
+const lv_color_t kColorConfidenceHigh = COLOR(0x60A8E0);
 
 // Climate-tile icon + label accents — muted enough to stay AMOLED-friendly
 // (no max-intensity sub-pixels) while reading as the named hue from a meter
 // away. Labels (`PRESSURE` / `TEMPERATURE` / `HUMIDITY`) share a "bright gray"
 // that sits between kColorText and kColorMuted — the icon is the colored
 // signal, the label is the supporting role.
-const lv_color_t kColorIconPurple = LV_COLOR_MAKE(0xA8, 0x80, 0xE0);
-const lv_color_t kColorIconRed    = LV_COLOR_MAKE(0xE0, 0x70, 0x55);
-const lv_color_t kColorIconBlue   = LV_COLOR_MAKE(0x60, 0xA8, 0xE0);
-const lv_color_t kColorLabelGray  = LV_COLOR_MAKE(0xB0, 0xB0, 0xB0);
+const lv_color_t kColorIconPressure = COLOR(0xA880E0);
+const lv_color_t kColorIconTemp     = COLOR(0xE07055);
+const lv_color_t kColorIconHumidity = COLOR(0x60A8E0);
+const lv_color_t kColorLabel        = COLOR(0xB0B0B0);
 
 // Grinder tick colors. Mid + small share a tier so half-unit ticks read as
 // "longer hairlines" rather than a third distinct stratum.
@@ -134,7 +158,8 @@ lv_obj_t* s_grind_bar         = nullptr;  // custom-drawn tick strip
 lv_obj_t* s_static_cursor     = nullptr;  // upward-pointing triangle just below the bar
 lv_obj_t* s_suggestion_arrow  = nullptr;  // confidence-tinted suggestion triangle, sits over the cursor
 lv_obj_t* s_grind_value_label = nullptr;  // big "5.10" above the bar — visible in idle mode
-lv_obj_t* s_suggested_label   = nullptr;  // "Suggested 5.15 (75%)" between value text and bar
+lv_obj_t* s_suggestion_caption = nullptr; // static "SUGGESTION" header, right of the big value
+lv_obj_t* s_suggested_label   = nullptr;  // "x.xx (xx%)" value line under SUGGESTION caption
 
 // Idle group:
 lv_obj_t* s_idle_group          = nullptr;
@@ -234,9 +259,9 @@ constexpr float kPi = 3.14159265f;
 // gating the marker behind confidence_pct > 30 (this returns red for that
 // band just for completeness; nothing should ever render it).
 lv_color_t confidence_color(uint8_t pct) {
-  if (pct > 80) return kColorGreen;
-  if (pct > 50) return kColorOrange;
-  return kColorRed;
+  if (pct > 80) return kColorConfidenceHigh;
+  if (pct > 50) return kColorConfidenceMed;
+  return kColorConfidenceLow;
 }
 
 bool predicted_visible(const model::Suggestion& s) {
@@ -267,17 +292,18 @@ struct ArrowState {
 // LVGL's first layout pass). kCursorTipGap is the gap between the bar's
 // big-tick bottom edge and the triangle tip.
 constexpr int32_t kCursorWidget            = 20;
-constexpr int32_t kCursorArrowHalfBase     = 8;
-constexpr int32_t kCursorArrowHeight       = 16;
+constexpr int32_t kCursorArrowHalfBase     = 10;
+constexpr int32_t kCursorArrowHeight       = 24;
+constexpr int32_t kCursorTipGap            = 15;
 constexpr int32_t kSuggestionArrowHalfBase = 6;
-constexpr int32_t kSuggestionArrowHeight   = 12;
-constexpr int32_t kCursorTipGap            = 6;
+constexpr int32_t kSuggestionArrowHeight   = 14;
+constexpr int32_t kSuggestionArrowTipGap   = -4;
 
-ArrowState s_cursor_arrow_state = {0.0f, LV_COLOR_MAKE(0xE0, 0xE0, 0xE0),
+ArrowState s_cursor_arrow_state = {0.0f, COLOR(0xE0E0E0),
                                    kCursorArrowHalfBase, kCursorArrowHeight};
 // Suggestion arrow color is reassigned per confidence tier on every refresh;
 // initial value is just a placeholder until the first refresh_grinder().
-ArrowState s_suggestion_arrow_state = {0.0f, LV_COLOR_MAKE(0xE0, 0xE0, 0xE0),
+ArrowState s_suggestion_arrow_state = {0.0f, COLOR(0xE0E0E0),
                                        kSuggestionArrowHalfBase,
                                        kSuggestionArrowHeight};
 
@@ -422,7 +448,7 @@ void refresh_suggestion_arrow() {
     return;
   }
   s_suggestion_arrow_state.color = confidence_color(s_current_suggestion.confidence_pct);
-  const int32_t tip_y    = kBarY + kBigTickLen / 2 + kCursorTipGap;
+  const int32_t tip_y    = kBarY + kBigTickLen / 2 + kSuggestionArrowTipGap;
   const int32_t tip_inset = (kCursorWidget - kSuggestionArrowHeight) / 2;
   const int32_t tip_x    = kCenter + static_cast<int32_t>(std::lround(offset_px));
   lv_obj_set_pos(s_suggestion_arrow,
@@ -434,28 +460,48 @@ void refresh_suggestion_arrow() {
   lv_obj_invalidate(s_suggestion_arrow);
 }
 
-// Small "Suggested x.xx (NN%)" line between the value text and the bar.
-// Hidden when the model has no usable suggestion or when the post-mode form
-// is up. Color tier matches the suggestion arrow so the line keeps carrying
-// the confidence signal when the arrow has scrolled off-screen.
+// Right-side SUGGESTION block. Caption + value are toggled as a pair so the
+// header never floats above empty space. Three states:
+//   - Post-mode form is up → hide both (the post UI owns the screen).
+//   - Idle, no usable model output → keep the block visible with a muted
+//     "N/A" placeholder so the spot doesn't appear/disappear as data trickles
+//     in; reads as "this slot exists, just nothing to say yet".
+//   - Idle, suggestion available → live "x.xx (NN%)" tinted by the
+//     confidence tier; caption shares the tier color so the whole block
+//     carries the signal.
 void refresh_suggested_label() {
   if (s_suggested_label == nullptr) return;
-  if (s_mode != Mode::Idle || !predicted_visible(s_current_suggestion)) {
+  if (s_mode != Mode::Idle) {
     lv_obj_add_flag(s_suggested_label, LV_OBJ_FLAG_HIDDEN);
+    if (s_suggestion_caption != nullptr) {
+      lv_obj_add_flag(s_suggestion_caption, LV_OBJ_FLAG_HIDDEN);
+    }
     return;
   }
-  // U+00B7 (middle-dot) isn't in Montserrat 14's range — it rendered as a
-  // missing-glyph rect. Parentheses are ASCII-clean and read just as well.
-  char buf[40];
+  if (!predicted_visible(s_current_suggestion)) {
+    lv_label_set_text(s_suggested_label, "N/A");
+    lv_obj_set_style_text_color(s_suggested_label, kColorMuted3, LV_PART_MAIN);
+    lv_obj_remove_flag(s_suggested_label, LV_OBJ_FLAG_HIDDEN);
+    if (s_suggestion_caption != nullptr) {
+      lv_obj_set_style_text_color(s_suggestion_caption, kColorMuted3,
+                                  LV_PART_MAIN);
+      lv_obj_remove_flag(s_suggestion_caption, LV_OBJ_FLAG_HIDDEN);
+    }
+    return;
+  }
+  char buf[24];
   std::snprintf(buf, sizeof(buf),
-                "Suggested %.2f (%u%%)",
+                "%.2f (%u%%)",
                 static_cast<double>(s_current_suggestion.grind),
                 static_cast<unsigned>(s_current_suggestion.confidence_pct));
   lv_label_set_text(s_suggested_label, buf);
-  lv_obj_set_style_text_color(s_suggested_label,
-                              confidence_color(s_current_suggestion.confidence_pct),
-                              LV_PART_MAIN);
+  const lv_color_t tier = confidence_color(s_current_suggestion.confidence_pct);
+  lv_obj_set_style_text_color(s_suggested_label, tier, LV_PART_MAIN);
   lv_obj_remove_flag(s_suggested_label, LV_OBJ_FLAG_HIDDEN);
+  if (s_suggestion_caption != nullptr) {
+    lv_obj_set_style_text_color(s_suggestion_caption, tier, LV_PART_MAIN);
+    lv_obj_remove_flag(s_suggestion_caption, LV_OBJ_FLAG_HIDDEN);
+  }
 }
 
 void refresh_grinder() {
@@ -1637,20 +1683,38 @@ void build_grinder(lv_obj_t* scr) {
   // treatment as the climate section captions so the eye reads it as a header
   // for the big number rather than another live readout.
   lv_obj_t* grind_caption = lv_label_create(scr);
-  lv_obj_set_style_text_color(grind_caption, kColorLabelGray, LV_PART_MAIN);
+  lv_obj_set_style_text_color(grind_caption, kColorLabel, LV_PART_MAIN);
   lv_obj_set_style_text_font(grind_caption, &lv_font_montserrat_14, LV_PART_MAIN);
   lv_label_set_text(grind_caption, "GRIND VALUE");
   lv_obj_set_pos(grind_caption, kGrindCaptionX, kGrindCaptionY);
 
-  // Suggested-grind line — sits just below the cursor triangle so it reads
-  // as a quiet annotation attached to the cursor, separate from the live
-  // tick scroll above. Hidden when there's no usable suggestion or in post.
+  // SUGGESTION block — mirrors the GRIND VALUE caption on the right side of
+  // the big number. Caption is the muted-gray static header; the value line
+  // underneath carries the live number and confidence-tier color. Both share
+  // a fixed-width box with centered text so the second line stays anchored
+  // to the caption regardless of digit count. Both hidden until the model
+  // produces a usable suggestion; refresh_suggested_label toggles them as a
+  // pair so the caption never floats over an empty value row.
+  s_suggestion_caption = lv_label_create(scr);
+  lv_obj_set_style_text_color(s_suggestion_caption, kColorLabel, LV_PART_MAIN);
+  lv_obj_set_style_text_font(s_suggestion_caption, &lv_font_montserrat_14,
+                             LV_PART_MAIN);
+  lv_label_set_text(s_suggestion_caption, "SUGGESTION");
+  lv_obj_set_pos(s_suggestion_caption, kSuggestionBlockX, kSuggestionCaptionY);
+  lv_obj_set_width(s_suggestion_caption, kSuggestionBlockW);
+  lv_obj_set_style_text_align(s_suggestion_caption, LV_TEXT_ALIGN_CENTER,
+                              LV_PART_MAIN);
+  lv_obj_add_flag(s_suggestion_caption, LV_OBJ_FLAG_HIDDEN);
+
   s_suggested_label = lv_label_create(scr);
   lv_obj_set_style_text_color(s_suggested_label, kColorMuted, LV_PART_MAIN);
   lv_obj_set_style_text_font(s_suggested_label, &lv_font_montserrat_14,
                              LV_PART_MAIN);
   lv_obj_set_style_bg_opa(s_suggested_label, LV_OPA_TRANSP, LV_PART_MAIN);
-  lv_obj_align(s_suggested_label, LV_ALIGN_CENTER, 0, kSuggestedY);
+  lv_obj_set_pos(s_suggested_label, kSuggestionBlockX, kSuggestionValueY);
+  lv_obj_set_width(s_suggested_label, kSuggestionBlockW);
+  lv_obj_set_style_text_align(s_suggested_label, LV_TEXT_ALIGN_CENTER,
+                              LV_PART_MAIN);
   lv_obj_clear_flag(s_suggested_label, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_flag(s_suggested_label, LV_OBJ_FLAG_HIDDEN);
 }
@@ -1710,7 +1774,7 @@ void build_climate_tile(lv_obj_t* parent, uint8_t idx,
   lv_obj_add_event_cb(t.icon, draw_climate_icon, LV_EVENT_DRAW_MAIN, nullptr);
 
   t.label = lv_label_create(t.container);
-  lv_obj_set_style_text_color(t.label, kColorLabelGray, LV_PART_MAIN);
+  lv_obj_set_style_text_color(t.label, kColorLabel, LV_PART_MAIN);
   lv_obj_set_style_text_font(t.label, &lv_font_montserrat_14, LV_PART_MAIN);
   lv_label_set_text(t.label, caption);
   lv_obj_update_layout(t.label);
@@ -1765,13 +1829,13 @@ void build_idle_group(lv_obj_t* scr) {
                  kScreen - 2 * kSeparatorInset, kSeparatorThickness);
 
   build_climate_tile(s_idle_group, 0, kColLeftEdge0,  kColLeftEdge1,
-                     kIconGauge,  kColorIconPurple, "PRESSURE",
+                     kIconGauge,  kColorIconPressure, "PRESSURE",
                      on_pressure_tap);
   build_climate_tile(s_idle_group, 1, kColLeftEdge1,  kColLeftEdge2,
-                     kIconThermo, kColorIconRed,    "TEMPERATURE",
+                     kIconThermo, kColorIconTemp,    "TEMPERATURE",
                      on_temp_tap);
   build_climate_tile(s_idle_group, 2, kColLeftEdge2,  kColRightEdge2,
-                     kIconDrop,   kColorIconBlue,   "HUMIDITY",
+                     kIconDrop,   kColorIconHumidity,   "HUMIDITY",
                      on_humidity_tap);
 
   // (Grind value sits above the bar; it's created in build_grinder as an
