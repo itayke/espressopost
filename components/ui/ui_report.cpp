@@ -20,74 +20,60 @@ namespace {
 constexpr const char* kTag = "report";
 
 // ---------------------------------------------------------------------------
-// Geometry — round 466×466 AMOLED. The grinder area now occupies a flat
-// strip in the lower half (linear tick bar + upward cursor below it).
+// Geometry — round AMOLED. Grinder area is a flat strip in the lower half
+// (linear tick bar + upward cursor below it).
 // ---------------------------------------------------------------------------
 constexpr int32_t kScreen          = 466;
 constexpr int32_t kCenter          = kScreen / 2;
 
-// Press-to-start-grinder-drag is gated by a y-coordinate threshold so taps
-// on the climate strip and POST button never become drags. The threshold
-// sits just below the separator that caps the grinder area, so the entire
-// region from there down (including the value text, bar, and upward cursor)
-// is a horizontal-swipe surface.
+// Grinder-drag is gated by a y threshold so taps on the climate strip and
+// POST button never become drags. Threshold sits just below the separator
+// that caps the grinder area; everything from there down is a swipe surface.
 constexpr int32_t kGrinderSeparatorY = 296;  // horizontal divider under POST
 constexpr int32_t kPressYThreshold   = kGrinderSeparatorY + 2;
 
 // ---------------------------------------------------------------------------
-// Grind dial — 0..30 in 0.1 steps. Visualized as a linear horizontal tick
-// bar spanning ~90 % of the round-display chord at the bar's y. The cursor
-// is a fixed upward-pointing triangle sitting just below the bar; ticks
-// scroll under it as the value changes. Pitch (px per grind unit) is the
-// drag feel knob — bigger = more deliberate dial, smaller = quicker.
+// Grind dial — kGrindMin..kGrindMax in 0.1 steps. Linear horizontal tick bar
+// with a fixed upward-pointing cursor below it; ticks scroll under the cursor
+// as the value changes. kBarPxPerUnit (below) is the drag-feel knob — bigger =
+// more deliberate dial, smaller = quicker.
 //
-// Older firmware that stored a value above 30 gets clamped on UI load; the
-// raw NVS float is left alone, only what we show/persist next is bounded.
+// Older firmware that stored a value above kGrindMax gets clamped on UI load;
+// the raw NVS float is left alone, only what we show/persist next is bounded.
 // ---------------------------------------------------------------------------
 constexpr float kGrindMin       =  0.0f;
 constexpr float kGrindMax       = 30.0f;
 
-// Y-offset of the big "5.10" current-value text, measured from screen
-// center (LV_ALIGN_CENTER's y arg). Picked so the value sits between the
-// grinder-cap separator above and the bar below.
+// LV_ALIGN_CENTER y-offsets for the two text rows that live around the bar.
+// Value text sits between the grinder-cap separator and the bar; Suggested
+// line tucks just below the cursor triangle so it reads as an annotation,
+// not part of the live scrub.
 constexpr int32_t kGrindValueY           = 100;
-// Y-offset of the "Suggested 5.15 (75%)" line, also measured from screen
-// center. Sits just below the cursor triangle (which sits below the bar),
-// out of the bar's drag-feedback path — the suggestion is a status
-// readout, not part of the live scrub.
 constexpr int32_t kSuggestedY            = 190;
 
-// Bar geometry. Chord-width at kBarY on the round display is
-// 2·sqrt(r² − (kBarY − kCenter)²) ≈ 335 px at y=395; the half-width below
-// (160) covers ~95 % of that chord, hugging the round-display edge while
-// keeping small-tick spacing (every 16 px) readable.
+// Bar widget — horizontal strip centered on kBarY, total width 2·kBarHalfWidth.
+// Sized to hug the round-display chord at kBarY while keeping small-tick
+// spacing (kBarHalfWidth / 10 px) readable.
 constexpr int32_t kBarY                  = 375;
 constexpr int32_t kBarHalfWidth          = 180;
-constexpr int32_t kBarStripHeight        = 36;   // widget bounds, hosts the tick rects
+constexpr int32_t kBarStripHeight        = 36;
 // ±1 grind unit visible across the bar → kBarHalfWidth px per grind unit.
-// Same density target as the previous (narrower) bar — moving the bar up
-// just widens the picture, it doesn't change drag feel: a 1-unit swipe
-// still covers the bar's half-width worth of pixels.
 constexpr float   kBarPxPerUnit          = static_cast<float>(kBarHalfWidth);
 
-// Tick sizes. Big = integer grind unit (1.0 step), mid = 0.5 step, small =
-// 0.1 step. Big ticks are taller AND thicker so the user reads "this is a
-// whole-number landmark" pre-attentively; mid ticks share the small tier's
-// thickness/color but are 8 px longer, reading as "long hairlines" that
-// help the eye lock on the half-unit boundary without competing with the
-// integer landmarks; small ticks are short hairlines for fine scroll feel.
+// Tick sizes. Big = integer (1.0 step), mid = 0.5 step, small = 0.1 step.
+// Big ticks are taller AND thicker so integer landmarks read pre-attentively;
+// mid ticks are "long hairlines" that mark half-unit boundaries without
+// competing with the integers; small ticks are short hairlines for fine feel.
 constexpr int32_t kBigTickLen         = 26;
 constexpr int32_t kBigTickThickness   = 3;
 constexpr int32_t kMidTickLen         = 18;
 constexpr int32_t kMidTickThickness   = 1;
 constexpr int32_t kSmallTickLen       = 8;
 constexpr int32_t kSmallTickThickness = 1;
-// Tick colors live further down (after the palette is declared): see
-// kBigTickColor / kMidTickColor / kSmallTickColor near the kColor* block.
-// Colored diamond on the bar at the model's suggested value. Half-width is
-// 25 % narrower than the previous 6-px-radius circle (so the diamond is
-// 9 px wide instead of 12), reading as a quieter sibling to the integer
-// landmarks rather than competing with them.
+// Tick colors are declared after the kColor* palette below.
+
+// Colored diamond stamped on the bar at the model's suggested grind. Reads
+// as a quieter sibling to the integer landmarks rather than competing.
 constexpr float kSuggestionDiamondHalfWidth = 7.0f;
 
 // Time-delta range. Wider than realistic so a long-pull-and-channel doesn't
@@ -123,9 +109,8 @@ const lv_color_t kColorIconRed    = LV_COLOR_MAKE(0xE0, 0x70, 0x55);
 const lv_color_t kColorIconBlue   = LV_COLOR_MAKE(0x60, 0xA8, 0xE0);
 const lv_color_t kColorLabelGray  = LV_COLOR_MAKE(0xB0, 0xB0, 0xB0);
 
-// Grinder tick colors. Big stands out at the text-bright tier; mid and
-// small share the muted tier so the half-unit ticks read as "longer
-// hairlines" rather than a third distinct stratum.
+// Grinder tick colors. Mid + small share a tier so half-unit ticks read as
+// "longer hairlines" rather than a third distinct stratum.
 const lv_color_t kBigTickColor   = kColorMuted;
 const lv_color_t kMidTickColor   = kColorMuted2;
 const lv_color_t kSmallTickColor = kColorMuted2;
@@ -270,19 +255,14 @@ struct ArrowState {
   int32_t    half_base;  // base half-width in px
   int32_t    height;     // tip-to-base distance in px
 };
-// 7-px half-base × 14-px height — small enough to read as a pointer
-// underline rather than a competing visual element next to the bar's big
-// ticks. The triangle points UP at the bar from the row below it; with
-// the bar at kBarY and the cursor widget at kBarY + half_height + gap
-// (see build_grinder), the tip sits a few px below the bar's big-tick
-// extent.
+// Small triangle — reads as a pointer underline rather than competing with
+// the bar's big ticks. Points UP at the bar from the row below it; see
+// build_grinder for placement.
 ArrowState s_cursor_arrow_state = {0.0f, LV_COLOR_MAKE(0xE0, 0xE0, 0xE0), 7, 14};
 
-// Widget size for the cursor triangle. Wider than the triangle itself so the
-// rotated rasterizer has antialias headroom and so the centering math (which
-// uses this constant rather than lv_obj_get_width) is correct before LVGL's
-// first layout pass — the earlier bug had the cursor offset by half its
-// width because lv_obj_get_width returned 0 on the first call.
+// Widget bounds for the cursor triangle. Wider than the triangle itself to
+// give the rotated rasterizer antialias headroom, and used by the centering
+// math directly (lv_obj_get_width returns 0 before LVGL's first layout pass).
 constexpr int32_t kCursorWidget = 20;
 
 void draw_arrow_event(lv_event_t* e) {
@@ -442,10 +422,10 @@ void draw_grind_bar(lv_event_t* e) {
 }
 
 // ---------------------------------------------------------------------------
-// Grinder refresh — invalidate the bar widget. LVGL only repaints that
-// rectangle (~280×36 px), not the screen. The custom DRAW_MAIN handler
-// re-evaluates which ticks are visible and where the suggestion dot lands,
-// so a single invalidation covers both the ticks and the suggestion mark.
+// Grinder refresh — invalidate the bar widget. LVGL only repaints the bar's
+// bounds, not the screen. The custom DRAW_MAIN handler re-evaluates which
+// ticks are visible and where the suggestion dot lands, so a single
+// invalidation covers both the ticks and the suggestion mark.
 // ---------------------------------------------------------------------------
 // Small "Suggested x.xx (NN%)" line between the value text and the bar.
 // Hidden when the model has no usable suggestion or when the post-mode form
@@ -893,52 +873,34 @@ void on_grinder_event(lv_event_t* e) {
 // ---------------------------------------------------------------------------
 // Climate tiles — geometry, icon drawing, value formatting, tap-to-toggle.
 // ---------------------------------------------------------------------------
-// Climate area occupies the top 40% of the 466-px-tall screen. The 3-column
-// split is geometric thirds (466/3 ≈ 155.3); separators land at x=155 and
-// x=311 in screen coords. Tile content (icon, label, value) is centered at
-// these columns, with one wrinkle: the round-display chord at the icon y is
-// only ~370 px wide, so the outer two columns would clip their icons if
-// centered at the tile midpoint. We shift content-center inward by
-// kOuterTileInset for the left+right tiles — the separator lines stay on the
-// geometric thirds, but the icons, labels, and values sit visually inset
-// from the round-clipped edge.
-// Geometric thirds for the column splits stay put; the bottom-of-area line
-// has moved down to fit the bigger glyphs (50%-up icons + 50%-up value font
-// can't fit under y=186 without crowding).
+// Climate strip caps the top of the screen. The 3-column split is geometric
+// thirds; separators land on those thirds in screen coords. Tile content
+// (icon, label, value) is centered on each column — with one wrinkle: the
+// round-display chord at the icon y is narrower than the screen, so the
+// outer columns shift content inward by kOuterContentShift to avoid the
+// round-clipped edge. Separators stay on the geometric thirds.
 constexpr int32_t kClimateBottomY  = 210;
 constexpr int32_t kColLeftEdge0    = 0;
 constexpr int32_t kColLeftEdge1    = 155;
 constexpr int32_t kColLeftEdge2    = 311;
 constexpr int32_t kColRightEdge2   = kScreen;
-// Icon + label rows sit higher than the value row — feels balanced against
-// the round-clip chord. Icon widgets are 60 tall (vs the 48-px visible glyph
-// area) so the thermometer's cap arc and the drop's body circle both fit
-// inside the widget's draw bounds — LV_EVENT_DRAW_MAIN's layer.clip_area is
-// set to the widget rect, so anything past the edges gets masked.
+// Icon + label rows sit higher than the value row to balance against the
+// round-clip chord. Icon widget bounds oversize the visible glyph so the
+// thermometer's cap arc and the drop's body circle aren't masked by
+// LV_EVENT_DRAW_MAIN's layer.clip_area (set to the widget rect).
 constexpr int32_t kTileIconY       = 46;    // top y of icon widget (all three)
 constexpr int32_t kTileLabelY      = 108;   // top y of section caption
-// Value label uses Montserrat 46 (25% bigger than the previous 36 pt). The
-// label-top y moves up ~9 px from 158 so the BASELINE of the value stays at
-// the same screen y — the bigger font grows upward only, leaving the row
-// below (new-line subtext) where it was.
-constexpr int32_t kTileValueY      = 130;
+constexpr int32_t kTileValueY      = 130;   // top y of value (Montserrat 46)
 constexpr int32_t kIconSize        = 60;
-// Each separator line is pulled in by this much from both of its endpoints,
-// so the verticals stop short of the icon row and the bottom horizontal
-// stops short of the screen edge. Keeps the strip from looking like a
-// rigid table-cell grid; the lines now read as quiet dividers, not borders.
+// Each separator line is pulled in by this much from both endpoints — the
+// verticals stop short of the icon row, the horizontal stops short of the
+// screen edge. Reads as quiet dividers rather than a rigid table-cell grid.
 constexpr int32_t kSeparatorInset  = 10;
-// Outer-tile content shifts *outward* from the tile center so the pressure
-// readout reads at the screen's left side and humidity at the right. Small
-// magnitude — the icon/label pair lands ~5 px off tile center, just enough
-// to differentiate the column groupings.
+// Outer-tile content shifts *outward* from the tile center so pressure reads
+// against the left edge and humidity against the right.
 constexpr int32_t kOuterContentShift = -5;
 
-// Width of separator lines
 constexpr int32_t kSeparatorThickness = 2;
-
-// Bright-gray section caption color is the only "supporting" tone in the
-// climate strip — kColorLabelGray sits between kColorText and kColorMuted.
 
 // Custom-drawn DRAW_MAIN handler — single dispatcher for all three icons.
 // State lives in widget user_data (kind + color); the widget is a plain 32×32
@@ -961,8 +923,7 @@ void draw_climate_icon(lv_event_t* e) {
   const int32_t cx = coords.x1 + lv_area_get_width(&coords)  / 2;
   const int32_t cy = coords.y1 + lv_area_get_height(&coords) / 2;
 
-  // Stroke width tracks the 50%-up icon size so the line weight scales with
-  // the glyph — a 2-px stroke would look spindly at 48 px.
+  // Stroke width scaled to the icon size — a thinner stroke reads as spindly.
   constexpr int32_t kStroke = 3;
 
   lv_draw_line_dsc_t ld;
@@ -990,10 +951,9 @@ void draw_climate_icon(lv_event_t* e) {
   // reading, so steady-state redraws always see progress == 1.
   const float progress = std::clamp(state->intro_progress, 0.0f, 1.0f);
 
-  // Coordinates below are tuned for a ~48-px effective drawing area (icon
-  // widget is 48×48, with a few pixels of internal margin). Original 32-px
-  // sizing was scaled by 1.5x and re-rounded so the geometry stays integer-
-  // pixel-aligned at the new size.
+  // Per-kind icon geometry. Coordinates are integer-pixel-aligned for the
+  // current kIconSize; if you change kIconSize, every numeric offset below
+  // needs a re-tune (each branch is hand-fitted to the widget bounds).
   switch (state->kind) {
     case kIconGauge: {
       // Half-circle pressure gauge: arc across the top, three ticks at the
@@ -1588,13 +1548,11 @@ void build_grinder(lv_obj_t* scr) {
   lv_obj_add_event_cb(s_grinder_overlay, on_grinder_event, LV_EVENT_RELEASED, nullptr);
   lv_obj_add_event_cb(s_grinder_overlay, on_grinder_event, LV_EVENT_PRESS_LOST, nullptr);
 
-  // Tick bar — small custom-drawn widget spanning ~90 % of the round-display
-  // chord at kBarY. On every drag, LVGL invalidates THIS widget's tiny
-  // bounding box (~280×36 px), not the screen. The draw callback computes
-  // which 0.1-step ticks are visible at the current s_grind_value and
-  // paints them as rects (long+thick for integer landmarks, short+thin
-  // hairlines for the 0.1 sub-steps). It also stamps the model's suggestion
-  // dot on the bar when one is available — same widget, same paint pass.
+  // Tick bar — custom-drawn widget centered on (kCenter, kBarY). On every
+  // drag, LVGL invalidates only this widget's bounds. The draw callback
+  // computes which 0.1-step ticks are visible at the current s_grind_value
+  // and paints them; it also stamps the model's suggestion mark — same
+  // widget, same paint pass.
   s_grind_bar = lv_obj_create(scr);
   lv_obj_set_size(s_grind_bar, 2 * kBarHalfWidth, kBarStripHeight);
   lv_obj_set_pos(s_grind_bar, kCenter - kBarHalfWidth,
@@ -1607,16 +1565,13 @@ void build_grinder(lv_obj_t* scr) {
   lv_obj_add_event_cb(s_grind_bar, draw_grind_bar, LV_EVENT_DRAW_MAIN, nullptr);
 
   // Upward cursor — fixed at bar center, tip points UP at the bar from the
-  // row below it. Drawn as a filled triangle (see draw_arrow_event); state
-  // stays at 0°/kColorText, no refresh needed after init.
-  //
-  // With angle=0° the triangle's tip lands at widget_top + (kCursorWidget −
-  // h) / 2 = widget_top + 6. We want the tip a small gap below the bar's
-  // big-tick extent, so widget_top = (kBarY + kBigTickHalfHeight + gap) − 6.
+  // row below. Widget bounds (kCursorWidget) are larger than the triangle,
+  // so we offset by half that slack to land the tip kCursorTipGap below the
+  // big-tick extent of the bar.
   s_cursor_arrow_state.color = kColorText;
   s_static_cursor = make_arrow(scr, &s_cursor_arrow_state, kCursorWidget);
   {
-    constexpr int32_t kCursorTipGap = 6;  // px between bar bottom edge and triangle tip
+    constexpr int32_t kCursorTipGap = 6;
     const int32_t tip_y = kBarY + kBigTickLen / 2 + kCursorTipGap;
     const int32_t cursor_tip_inset = (kCursorWidget - s_cursor_arrow_state.height) / 2;
     lv_obj_set_pos(s_static_cursor,
@@ -1624,10 +1579,8 @@ void build_grinder(lv_obj_t* scr) {
                    tip_y - cursor_tip_inset);
   }
 
-  // Current value as big text just above the bar, visible in BOTH modes.
-  // Sits ~15 px below the grinder cap separator (center + 95 = y=328,
-  // top y=305, bottom y=351), with the Suggested line tucked between it
-  // and the bar.
+  // Current value as big text above the bar, visible in BOTH modes. Suggested
+  // line tucks between this and the bar (further down).
   s_grind_value_label = lv_label_create(scr);
   lv_obj_set_style_text_color(s_grind_value_label, kColorText, LV_PART_MAIN);
   lv_obj_set_style_text_font(s_grind_value_label, &lv_font_montserrat_48,
@@ -1636,10 +1589,9 @@ void build_grinder(lv_obj_t* scr) {
   lv_obj_align(s_grind_value_label, LV_ALIGN_CENTER, 0, kGrindValueY);
   lv_obj_clear_flag(s_grind_value_label, LV_OBJ_FLAG_CLICKABLE);
 
-  // "Suggested 5.15 (75%)" line — sits just below the cursor triangle so
-  // it reads as a quiet annotation attached to the cursor, separate from
-  // the live tick scroll above. Hidden when there's no usable suggestion
-  // or in post mode.
+  // Suggested-grind line — sits just below the cursor triangle so it reads
+  // as a quiet annotation attached to the cursor, separate from the live
+  // tick scroll above. Hidden when there's no usable suggestion or in post.
   s_suggested_label = lv_label_create(scr);
   lv_obj_set_style_text_color(s_suggested_label, kColorMuted, LV_PART_MAIN);
   lv_obj_set_style_text_font(s_suggested_label, &lv_font_montserrat_14,
@@ -1748,11 +1700,10 @@ void build_idle_group(lv_obj_t* scr) {
   // grinder swipe overlay unless they hit a child widget.
   lv_obj_clear_flag(s_idle_group, LV_OBJ_FLAG_CLICKABLE);
 
-  // --- Climate area (top 40% of the screen) ---
+  // --- Climate area ---
   // Two vertical separators on the geometric thirds, one horizontal below.
-  // Lines are 2 px tall/wide. Each end of every separator is pulled in by
-  // kSeparatorInset px so the strokes don't run all the way to the icon row
-  // (verticals) or to the round-display chord (horizontal).
+  // Endpoints inset by kSeparatorInset so the strokes don't run all the way
+  // to the icon row (verticals) or the round-display chord (horizontal).
   make_separator(s_idle_group, kColLeftEdge1 - kSeparatorThickness / 2, kSeparatorInset,
                  kSeparatorThickness, kClimateBottomY - 2 * kSeparatorInset);
   make_separator(s_idle_group, kColLeftEdge2 - kSeparatorThickness / 2, kSeparatorInset,
@@ -1773,9 +1724,8 @@ void build_idle_group(lv_obj_t* scr) {
   // (Grind value sits above the bar; it's created in build_grinder as an
   // always-visible widget so it survives the idle→post toggle.)
 
-  // Post button — opens the post-mode form. Sits above the always-visible
-  // value text at y=+85; with the value text at +62…+108 we put the
-  // button at +20 (+(-6)…+46) for clean separation.
+  // Post button — opens the post-mode form. Sits between the climate strip
+  // and the grinder cap separator, above the always-visible value text.
   s_post_btn = lv_button_create(s_idle_group);
   lv_obj_set_size(s_post_btn, 140, 52);
   lv_obj_set_style_radius(s_post_btn, 26, LV_PART_MAIN);
@@ -1791,10 +1741,7 @@ void build_idle_group(lv_obj_t* scr) {
   lv_obj_center(post_lbl);
 
   // Horizontal separator capping the grinder area, mirroring the line above
-  // POST that closes the climate strip. POST sits between two separators
-  // with the same vertical breathing room on each side — climate line
-  // at y=210, POST at y=227..278, grinder line at y=296 (17 px above and
-  // 17 px below the button).
+  // POST. POST sits between the two with matching breathing room on each side.
   make_separator(s_idle_group, kSeparatorInset,
                  kGrinderSeparatorY - kSeparatorThickness / 2,
                  kScreen - 2 * kSeparatorInset, kSeparatorThickness);
@@ -1942,10 +1889,9 @@ void start_report() {
   refresh_submit_enabled();
   refresh_suggestion();
 
-  // Force a layout pass so the ring labels and arrows have concrete widths/
-  // heights before refresh_ring() reads them for centering. Without this,
-  // first-frame positions are off-by-half-label until LVGL gets around to
-  // its own layout tick.
+  // Force a layout pass so labels have concrete widths before the first
+  // refresh reads them for centering — otherwise first-frame positions are
+  // off-by-half-label until LVGL gets around to its own layout tick.
   lv_obj_update_layout(scr);
   refresh_grinder();
   // Seed climate tiles immediately — BME280 has been sampling at 1 Hz since
