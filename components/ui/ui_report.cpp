@@ -51,6 +51,13 @@ constexpr float kGrindMax       = 30.0f;
 constexpr int32_t kGrindValueY           = 100;
 constexpr int32_t kSuggestedY            = 194;
 
+// "GRIND VALUE" caption — absolute screen coords (set_pos, not align) so it
+// stays parked on the left while the centered big-number to its right grows
+// and shrinks with the digit count. Y is picked to vertically center against
+// the Montserrat-48 glyph row at kGrindValueY.
+constexpr int32_t kGrindCaptionX         = 50;
+constexpr int32_t kGrindCaptionY         = 327;
+
 // Bar widget — horizontal strip centered on kBarY, total width 2·kBarHalfWidth.
 // Sized to hug the round-display chord at kBarY while keeping small-tick
 // spacing (kBarHalfWidth / 10 px) readable.
@@ -1625,6 +1632,15 @@ void build_grinder(lv_obj_t* scr) {
   lv_obj_set_style_bg_opa(s_grind_value_label, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_align(s_grind_value_label, LV_ALIGN_CENTER, 0, kGrindValueY);
   lv_obj_clear_flag(s_grind_value_label, LV_OBJ_FLAG_CLICKABLE);
+
+  // Static caption to the left of the value, same muted-gray + Montserrat 14
+  // treatment as the climate section captions so the eye reads it as a header
+  // for the big number rather than another live readout.
+  lv_obj_t* grind_caption = lv_label_create(scr);
+  lv_obj_set_style_text_color(grind_caption, kColorLabelGray, LV_PART_MAIN);
+  lv_obj_set_style_text_font(grind_caption, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_label_set_text(grind_caption, "GRIND VALUE");
+  lv_obj_set_pos(grind_caption, kGrindCaptionX, kGrindCaptionY);
 
   // Suggested-grind line — sits just below the cursor triangle so it reads
   // as a quiet annotation attached to the cursor, separate from the live
