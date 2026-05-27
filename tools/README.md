@@ -89,8 +89,12 @@ python3 -m pip install --user svgelements
 
 ```sh
 tools/svg_to_lvgl.py path/to/icon.svg --name coffee_cup \
-    --out components/ui/include/icons/coffee_cup_icon.hpp
+    --out components/ui/include/icons/coffee_cup.generated.hpp
 ```
+
+Output paths use the `.generated.<ext>` convention so the file reads as
+tool-emitted at a glance in directory listings and `#include` lines —
+don't hand-edit, regenerate from the SVG instead.
 
 Flags:
 

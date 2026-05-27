@@ -48,3 +48,8 @@ CONFIG_LV_FONT_MONTSERRAT_48=y
 # frame instead of repositioning 31 label widgets. Without this, dragging the
 # rim collapses to 3–4 fps.
 CONFIG_LV_USE_SNAPSHOT=y
+
+# Float-precision lv_point_precise_t / lv_value_precise_t. ESP32-S3 has an
+# FPU, the type stays 4 bytes either way, and svg_to_lvgl.py output + the
+# arrow-rotation math both want sub-pixel precision for clean strokes.
+CONFIG_LV_USE_FLOAT=y

@@ -12,7 +12,11 @@ Dependency: pip install svgelements
 
 Usage:
     python tools/svg_to_lvgl.py icon.svg --name coffee_cup \\
-        --out components/ui/include/icons/coffee_cup_icon.hpp
+        --out components/ui/include/icons/coffee_cup.generated.hpp
+
+The .generated.<ext> suffix marks tool-emitted files so they're
+visually distinct from hand-authored sources — don't hand-edit; rerun
+this tool against the SVG.
 
 Then in C++:
     lv_obj_t* icon = svg_icon::create_coffee_cup(parent, kColorAccent);
@@ -79,10 +83,14 @@ def emit(name, subpaths, vb_w, vb_h, out):
     w('#include "lvgl.h"\n\n')
     w("namespace svg_icon {\n\n")
 
+    # Emit float literals so sub-pixel positions survive into LVGL's renderer.
+    # Requires CONFIG_LV_USE_FLOAT=y so lv_value_precise_t is float; with the
+    # default int32_t backing, the .f literals get truncated and you'd get
+    # the same per-vertex rounding error as integer emission.
     for i, sp in enumerate(subpaths):
         w(f"static const lv_point_precise_t {name}_path{i}[] = {{\n")
         for x, y in sp:
-            w(f"  {{{int(round(x))}, {int(round(y))}}},\n")
+            w(f"  {{{x:.3f}f, {y:.3f}f}},\n")
         w("};\n\n")
 
     w(f"// Create the {name} icon under `parent`. Returned container is\n")
@@ -97,6 +105,10 @@ def emit(name, subpaths, vb_w, vb_h, out):
     w("  lv_obj_set_style_border_width(root, 0, LV_PART_MAIN);\n")
     w("  lv_obj_set_style_pad_all(root, 0, LV_PART_MAIN);\n")
     w("  lv_obj_remove_flag(root, LV_OBJ_FLAG_SCROLLABLE);\n")
+    # Allow line strokes to render past the root's bounds. Without this,
+    # LVGL clips children to the parent content area and strokes that hug
+    # the viewBox edge lose their outer half-pixel to anti-aliasing.
+    w("  lv_obj_add_flag(root, LV_OBJ_FLAG_OVERFLOW_VISIBLE);\n")
     for i in range(len(subpaths)):
         w(f"  lv_obj_t* l{i} = lv_line_create(root);\n")
         w(f"  lv_line_set_points(l{i}, {name}_path{i},\n")
