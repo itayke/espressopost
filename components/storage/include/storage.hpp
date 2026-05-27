@@ -17,6 +17,19 @@ namespace espressopost::storage {
 constexpr uint8_t kFlagTombstone = 1u << 0;
 constexpr uint8_t kFlagAnomaly   = 1u << 1;
 
+// Bit positions for ShotRecord::taste_flags (v4+). Independent toggles the
+// user picks on the Report screen as journal data — currently NOT consumed by
+// the model. Each describes a taste impression or a visible pull defect; they
+// are not mutually exclusive (a shot can read as both bitter and astringent).
+// Bits 6-7 are reserved for future descriptors. On v3 records the byte reads
+// as zero (all toggles off), which is the correct "unknown" semantic.
+constexpr uint8_t kTasteBitter     = 1u << 0;
+constexpr uint8_t kTasteSour       = 1u << 1;
+constexpr uint8_t kTasteAstringent = 1u << 2;
+constexpr uint8_t kTasteWatery     = 1u << 3;
+constexpr uint8_t kTasteChanneled  = 1u << 4;
+constexpr uint8_t kTasteBalanced   = 1u << 5;
+
 // Fixed-width on-disk record for one espresso shot.
 //
 // Layout is packed and explicit so the file is portable and parseable without
@@ -29,18 +42,22 @@ constexpr uint8_t kFlagAnomaly   = 1u << 1;
 // replaces both with two float fields — the user's *actual* grind setting
 // (`user_grind`, the model's primary regressor) and the model's standing
 // recommendation (`suggested_grind`). A one-shot migration in storage::init
-// rewrites any v2 records present at first v3 boot.
+// rewrites any v2 records present at first v3 boot. v4 keeps the v3 40-byte
+// layout unchanged and only carves `taste_flags` out of the reserved space;
+// v3 records are read as-is and their reserved bytes naturally read as zero
+// (all taste toggles off) — no on-disk migration needed.
 //
 // `rtc_epoch_s` is 0 if the PCF85063 hasn't been seeded yet — fall back to
 // `timestamp_us` (esp_timer ticks since boot) for ordering then.
 struct __attribute__((packed)) ShotRecord {
-  uint8_t  version;          // 3 (current)
+  uint8_t  version;          // 4 (current)
   uint8_t  preset_id;        // index into presets::get(); persisted in NVS
   int8_t   time_delta_s;     // user-reported shot time vs target, signed seconds
   uint8_t  quality_stars;    // user-reported taste, 1..5
   uint8_t  flags;            // see kFlag* above; 0 = normal, immutable in v1
   uint8_t  confidence_pct;   // model's confidence at submit time, 0..95 in 5-unit steps; 0 = unknown/suppressed. Carved out of the v3 reserved space — old records naturally read 0 ("unknown"), no migration needed.
-  uint8_t  _reserved[2];     // future use; zero on write
+  uint8_t  taste_flags;      // see kTaste* above; bitfield of user-reported taste/defect toggles. v4 addition — v3 records read as 0 ("none reported").
+  uint8_t  _reserved[1];     // future use; zero on write
   int64_t  timestamp_us;     // esp_timer microseconds since boot at submit
   uint32_t rtc_epoch_s;      // wall-clock seconds since 1970 — 0 until RTC set
   float    temp_c;

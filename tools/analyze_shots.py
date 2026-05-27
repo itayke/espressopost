@@ -22,6 +22,9 @@ import numpy as np
 TOMBSTONE = 0x01
 ANOMALY = 0x02
 
+# `taste=0x..` is v4+; v3 dump lines omit it entirely. Keep the group optional
+# so a single regex parses both — when absent, taste_flags reads 0 ("none
+# reported"), which matches the on-device backward-compat behavior.
 DUMP_RE = re.compile(
     r"dump\[(?P<idx>\d+)\]:\s*"
     r"ver=(?P<ver>\d+)\s+"
@@ -36,6 +39,7 @@ DUMP_RE = re.compile(
     r"sugg=(?P<sugg>-?[0-9.]+|nan)\s+"
     r"conf=(?P<conf>\d+)\s+"
     r"rtc=(?P<rtc>\d+)"
+    r"(?:\s+taste=0x(?P<taste>[0-9a-fA-F]+))?"
 )
 
 
@@ -53,6 +57,7 @@ class Shot:
     sugg: float
     conf: int
     rtc: int
+    taste: int
 
     @property
     def excluded(self) -> bool:
@@ -79,6 +84,7 @@ def parse(stream):
             grind=_f(m["grind"]), sugg=_f(m["sugg"]),
             conf=int(m["conf"]),
             rtc=int(m["rtc"]),
+            taste=int(m["taste"], 16) if m["taste"] else 0,
         ))
     return shots
 

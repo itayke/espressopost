@@ -20,7 +20,7 @@ constexpr const char* kPartitionLbl  = "storage";   // matches partitions.csv
 constexpr const char* kBasePath      = "/littlefs";
 constexpr const char* kShotsPath     = "/littlefs/shots.bin";
 constexpr const char* kShotsTmpPath  = "/littlefs/shots.bin.tmp";
-constexpr uint8_t     kRecordVersion = 3;
+constexpr uint8_t     kRecordVersion = 4;
 
 // One-time backfill value applied to v2 → v3 migration. Hardcoded because
 // v2 had no grind field at all and the user has confirmed every existing
@@ -234,7 +234,8 @@ esp_err_t init() {
       const auto& r = dump_buf[i];
       ESP_LOGI(kTag,
                "dump[%u]: ver=%u preset=%u t_d=%d stars=%u flags=0x%02x "
-               "T=%.2f H=%.2f P=%.2f grind=%.2f sugg=%.2f conf=%u rtc=%u",
+               "T=%.2f H=%.2f P=%.2f grind=%.2f sugg=%.2f conf=%u rtc=%u "
+               "taste=0x%02x",
                static_cast<unsigned>(i), static_cast<unsigned>(r.version),
                static_cast<unsigned>(r.preset_id),
                static_cast<int>(r.time_delta_s),
@@ -246,7 +247,8 @@ esp_err_t init() {
                static_cast<double>(r.user_grind),
                static_cast<double>(r.suggested_grind),
                static_cast<unsigned>(r.confidence_pct),
-               static_cast<unsigned>(r.rtc_epoch_s));
+               static_cast<unsigned>(r.rtc_epoch_s),
+               static_cast<unsigned>(r.taste_flags));
     }
     std::free(dump_buf);
   }
@@ -260,7 +262,6 @@ esp_err_t append_shot(const ShotRecord& record) {
   ShotRecord r = record;
   r.version       = kRecordVersion;
   r._reserved[0]  = 0;
-  r._reserved[1]  = 0;
 
   Guard g;
   if (!g.ok) return ESP_ERR_TIMEOUT;
