@@ -334,6 +334,9 @@ tests/
     ├── run.sh                     configure + build + run one-liner
     ├── test_model.cpp             Catch2 cases
     └── third_party/catch.hpp      vendored Catch2 v2 single header
+
+tools/                             host-side scripts (see tools/README.md)
+└── analyze_shots.py               descriptive trend analysis of dump[] log lines
 ```
 
 The `grinder/` component is intentionally NOT scaffolded yet — it'll

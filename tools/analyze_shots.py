@@ -141,19 +141,34 @@ def ols_block(shots):
     X = np.array([r[:4] for r in rows], dtype=float)
     y = np.array([r[4] for r in rows], dtype=float)
     std_X = X.std(0, ddof=1)
-    std_X[std_X == 0] = 1.0
-    Xs = (X - X.mean(0)) / std_X
+    std_X_safe = np.where(std_X == 0, 1.0, std_X)
+    Xs = (X - X.mean(0)) / std_X_safe
     A = np.hstack([np.ones((len(Xs), 1)), Xs])
     beta, *_ = np.linalg.lstsq(A, y, rcond=None)
     yhat = A @ beta
     ss_res = ((y - yhat) ** 2).sum()
     ss_tot = ((y - y.mean()) ** 2).sum()
     r2 = 1 - ss_res / ss_tot if ss_tot else float("nan")
-    print(f"  intercept:  {beta[0]:+.2f}")
-    for name, b in zip(("T", "H", "P", "grind"), beta[1:]):
-        print(f"  β_{name:<5}: {b:+.2f}")
+
+    # 0.05 mirrors kGrindStep in model_math.hpp — the dial increment the user
+    # actually turns. For grind, "per 1 unit" extrapolates wildly outside the
+    # observed range; "per step" is the meaningful read.
+    features = [
+        ("T",     1.0,   "per +1 °C"),
+        ("H",     1.0,   "per +1 %"),
+        ("P",     1.0,   "per +1 hPa"),
+        ("grind", 0.05,  "per +0.05 step"),
+    ]
+    print(f"  intercept (t_d at climate centroid):  {beta[0]:+.2f} s")
+    print(f"  {'feature':<7} {'std':>6} {'β/1σ':>7}   {'practical reading':<20}")
+    for (name, step, descr), b_std, sx in zip(features, beta[1:], std_X):
+        if sx == 0:
+            print(f"  {name:<7} {sx:>6.2f} {b_std:>+7.2f}   (zero variance — skipped)")
+            continue
+        b_per_step = (b_std / sx) * step
+        print(f"  {name:<7} {sx:>6.2f} {b_std:>+7.2f}   {descr:<14} → {b_per_step:+6.2f} s")
     print(f"  R²: {r2:.2f}   n={len(rows)}")
-    print("  (β units: seconds of time_delta per 1σ feature change; sign matters more than magnitude at this n)")
+    print("  (signs more reliable than magnitudes at small n; correlated regressors mean OLS splits credit roughly.)")
 
 
 def sugg_calib_block(shots):
