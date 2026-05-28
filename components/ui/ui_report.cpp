@@ -26,11 +26,10 @@ constexpr const char* kTag = "report";
 constexpr int32_t kScreen          = 466;
 constexpr int32_t kCenter          = kScreen / 2;
 
-// Grinder-drag is gated by a y threshold so taps on the climate strip and
-// POST button never become drags. Threshold sits just below the separator
-// that caps the grinder area; everything from there down is a swipe surface.
-constexpr int32_t kGrinderSeparatorY = 296;  // horizontal divider under POST
-constexpr int32_t kPressYThreshold   = kGrinderSeparatorY + 2;
+// Horizontal divider at the top of the grinder area, drawn in idle mode only
+// (hidden along with the climate strip in post mode). Per-bar PRESSED hit-test
+// uses BarSpec.y_band_{top,bottom} now — this constant is purely visual.
+constexpr int32_t kGrinderSeparatorY = 296;
 
 // ---------------------------------------------------------------------------
 // Grind dial — kGrindMin..kGrindMax in 0.1 steps. Linear horizontal tick bar
@@ -92,11 +91,14 @@ constexpr int32_t kSmallTickThickness = 1;
 constexpr int32_t kBarStripBgHeight   = 14;
 // Tick colors are declared after the kColor* palette below.
 
-// Time-delta range. Wider than realistic so a long-pull-and-channel doesn't
-// clip; the model downweights outliers via the quality field anyway.
-constexpr int8_t kDeltaMin  = -30;
-constexpr int8_t kDeltaMax  =  30;
-constexpr int8_t kDeltaStep =   1;
+// Time-delta bar — value is the user's reported actual brew time in seconds.
+// Range starts at 0 (a coffee can't run negative time) and tops out below the
+// 3-digit threshold (a 100+ s pull means the basket is choked and the user is
+// dumping it, not journaling it). The stored ShotRecord field is signed delta
+// from the preset's target, computed at submit time.
+constexpr float kDeltaMin = 0.0f;
+constexpr float kDeltaMax = 99.0f;
+constexpr float kDeltaStep = 1.0f;
 
 constexpr uint8_t kMaxStars = 5;
 
@@ -154,16 +156,119 @@ enum class Mode { Idle, Post };
 Mode s_mode = Mode::Idle;
 
 // ---------------------------------------------------------------------------
+// Bar generalization. Grind and Time-Delta share the same scroll-with-momentum
+// chassis (draw, drag, flick, snap). BarSpec is the value-domain config (range,
+// snap step, tick tiers, screen y); BarState is per-instance runtime (current
+// value, drag/momentum bookkeeping, sticky-touched flag, the lv_obj widget
+// hosting the custom draw, optional hooks for change/settle/touched).
+// ---------------------------------------------------------------------------
+struct BarSpec {
+  float    min;
+  float    max;
+  float    step;                  // snap grid; value rounds here at settle
+  float    visible_half_range;    // value units shown from cursor center to bar edge
+  int32_t  y;                     // screen y of bar centerline
+  // PRESSED hit-test band in screen y. Wider than the visible bar so a slightly
+  // mistargeted swipe still lands. The two bars' bands must NOT overlap, or a
+  // single press would race both bars' drag flags.
+  int32_t  y_band_top;
+  int32_t  y_band_bottom;
+  int      big_every;             // 1-of-N tick indices is "big"   (integer in grind; 10 s in delta)
+  int      mid_every;             // 1-of-N tick indices is "mid"   (half-unit grind; 5 s delta)
+  float    tick_unit;             // value step between adjacent ticks (0.1 grind, 1 s delta)
+};
+
+struct BarState;
+using BarHook = void (*)(BarState*);
+
+struct BarState {
+  const BarSpec* spec;
+  lv_obj_t* widget;        // custom-drawn lv_obj; tick paint goes here
+  float     value;         // free-floating during drag/glide; snapped to spec.step on settle
+  bool      touched;       // sticky — was this bar swiped since the last form reset?
+
+  // Drag bookkeeping. `dragging` is set in PRESSED only when the press lands
+  // inside spec.y_band_{top,bottom}, cleared in RELEASED / PRESS_LOST.
+  // PRESSING is a no-op until `dragging` is true.
+  bool      dragging;
+  int32_t   last_x;
+  uint64_t  last_us;
+
+  // Flick momentum — same kMomentum* cadence/decay shared across both bars.
+  float       velocity;            // value units / sec, signed
+  lv_timer_t* momentum_timer;
+  int         momentum_ticks_left;
+
+  // Hooks. on_change fires whenever value moves (drag step or momentum step or
+  // settle-snap). on_settle fires once when drag/glide ends, after snap.
+  // on_touched fires once per form session when `touched` flips false→true —
+  // the Post form uses it to enable Submit. All nullable.
+  BarHook on_change;
+  BarHook on_settle;
+  BarHook on_touched;
+};
+
+// Momentum cadence + decay are global; per-bar state lives in BarState.
+constexpr uint32_t kMomentumPeriodMs = 30;     // tick cadence
+constexpr int      kMomentumMaxTicks = 17;     // ≈500 ms at 30 ms/tick
+constexpr float    kMomentumDecay    = 0.85f;  // per tick → ~6% left after 17 ticks
+constexpr float    kMomentumMinSpeed = 0.5f;   // value units/sec — below this we stop
+
+// Time-delta bar lives in the post group only — sits in the upper half, above
+// the climate-bottom separator at y=210, where the climate strip lived in idle.
+// Big tick lands on every 10 s (20, 30, 40 …), mid tick on every 5 s,
+// regardless of the preset's target time.
+constexpr int32_t kDeltaBarY = 180;
+
+// y-band bounds.
+//   - Grind keeps the legacy "everything below the cap separator" range —
+//     the bottom area (bar + cursor + big number + captions + SUGGESTION) is
+//     identical in idle and post, so the band shouldn't change either.
+//   - Delta sits above the y=210 separator; its band hugs caption + bar.
+//   - The bands cannot overlap (a press near the boundary would race both
+//     bars' dragging flags). Quiet zone here is y=201–297.
+constexpr BarSpec kGrindSpec = {
+  /*min*/                kGrindMin,
+  /*max*/                kGrindMax,
+  /*step*/               model::kGrindStep,
+  /*visible_half_range*/ 1.0f,
+  /*y*/                  kBarY,
+  /*y_band_top*/         298,
+  /*y_band_bottom*/      kScreen,
+  /*big_every*/          10,
+  /*mid_every*/          5,
+  /*tick_unit*/          0.1f,
+};
+
+constexpr BarSpec kDeltaSpec = {
+  /*min*/                kDeltaMin,
+  /*max*/                kDeltaMax,
+  /*step*/               kDeltaStep,
+  /*visible_half_range*/ 10.0f,
+  /*y*/                  kDeltaBarY,
+  /*y_band_top*/         155,
+  /*y_band_bottom*/      200,
+  /*big_every*/          10,
+  /*mid_every*/          5,
+  /*tick_unit*/          1.0f,
+};
+
+// ---------------------------------------------------------------------------
 // Widget handles. Grouped by visual role; null until start_report() builds them.
 // ---------------------------------------------------------------------------
-// Grinder (always visible across Idle + Post):
-lv_obj_t* s_grinder_overlay   = nullptr;  // transparent full-screen swipe catcher
-lv_obj_t* s_grind_bar         = nullptr;  // custom-drawn tick strip
-lv_obj_t* s_static_cursor     = nullptr;  // upward-pointing triangle just below the bar
-lv_obj_t* s_suggestion_arrow  = nullptr;  // confidence-tinted suggestion triangle, sits over the cursor
+// Grinder-area extras (always visible across Idle + Post):
+lv_obj_t* s_grinder_overlay   = nullptr;  // transparent full-screen swipe catcher; dispatches to both bars
+lv_obj_t* s_static_cursor     = nullptr;  // upward-pointing triangle just below the grind bar
+lv_obj_t* s_suggestion_arrow  = nullptr;  // confidence-tinted suggestion triangle over the cursor
 lv_obj_t* s_grind_value_label = nullptr;  // big "5.10" above the bar — visible in idle mode
+lv_obj_t* s_grind_caption      = nullptr; // "GRIND VALUE" header next to the big number
 lv_obj_t* s_suggestion_caption = nullptr; // static "SUGGESTION" header, right of the big value
 lv_obj_t* s_suggested_label   = nullptr;  // "x.xx (xx%)" value line under SUGGESTION caption
+
+// The two bars themselves. spec is wired at start_report(); widgets at
+// build_grinder. Grind is shown in both modes; delta only in post.
+BarState s_grind = {};
+BarState s_delta = {};
 
 // Idle group:
 lv_obj_t* s_idle_group          = nullptr;
@@ -204,11 +309,18 @@ ClimateTile s_climate_tiles[3] = {};
 
 // Post group:
 lv_obj_t* s_post_group          = nullptr;
-lv_obj_t* s_delta_label         = nullptr;
-lv_obj_t* s_star_btns[kMaxStars] = {};
-lv_obj_t* s_submit_btn          = nullptr;
-lv_obj_t* s_submit_label        = nullptr;
-lv_obj_t* s_cancel_btn          = nullptr;
+lv_obj_t* s_quality_caption     = nullptr;  // "QUALITY" caption above the star row
+lv_obj_t* s_time_delta_caption  = nullptr;  // "TIME DELTA" caption above the delta bar
+lv_obj_t* s_preset_post_label   = nullptr;  // read-only preset string parked on the center line in post mode
+lv_obj_t* s_star_btns [kMaxStars] = {};      // transparent tap targets sized to each star
+lv_obj_t* s_star_icons[kMaxStars] = {};      // outline-star line widgets recolored on toggle
+lv_obj_t* s_sour_btn       = nullptr;
+lv_obj_t* s_sour_label     = nullptr;
+lv_obj_t* s_bitter_btn     = nullptr;
+lv_obj_t* s_bitter_label   = nullptr;
+lv_obj_t* s_submit_btn     = nullptr;
+lv_obj_t* s_submit_label   = nullptr;
+lv_obj_t* s_cancel_btn     = nullptr;
 
 // Toast (transient):
 lv_obj_t* s_toast_label         = nullptr;
@@ -219,40 +331,10 @@ lv_timer_t* s_toast_timer       = nullptr;
 // ---------------------------------------------------------------------------
 model::Suggestion s_current_suggestion = {std::nanf(""), 0};
 
-bool    s_delta_set    = false;
-int8_t  s_delta_value  = 0;
-uint8_t s_stars_value  = 0;
-// Bar's visual position — free-floating during a drag and the post-release
-// glide, snapped to model::kGrindStep at end-of-glide or release-without-glide.
-// The big readout rounds for display every frame so the number never reads a
-// sub-step value while the bar slides smoothly underneath.
-float   s_grind_value  = 0.0f;
-
-// Grinder drag state — captured at PRESSED, advanced on PRESSING, persisted on
-// RELEASED. s_grinder_dragging gates PRESSING/RELEASED so a press that
-// started outside the grinder zone (e.g. a tap on a climate tile or POST)
-// doesn't bleed into a horizontal swipe.
-bool    s_grinder_dragging  = false;
-int32_t s_drag_last_x       = 0;  // screen x of previous PRESSING sample
-
-// ---------------------------------------------------------------------------
-// Flick momentum. After release, carry the user's swipe velocity for ~500 ms
-// with exponential decay so the dial feels like a flywheel coasting to rest.
-// Velocity is tracked in grind units / second via an EMA over PRESSING
-// samples (single jittery samples shouldn't define the release velocity).
-// The momentum timer advances s_grind_value the same way a live drag does,
-// then snaps to the kGrindStep grid on settle so the bar doesn't rest between
-// ticks.
-// ---------------------------------------------------------------------------
-constexpr uint32_t kMomentumPeriodMs = 30;     // tick cadence — matches LVGL task
-constexpr int      kMomentumMaxTicks = 17;     // ≈500 ms at 30 ms/tick
-constexpr float    kMomentumDecay    = 0.85f;  // per tick → ~6% left after 17 ticks
-constexpr float    kMomentumMinSpeed = 0.5f;   // grind units/sec — below this we stop
-
-float       s_drag_velocity  = 0.0f;  // grind units per second, signed
-uint64_t    s_drag_last_us   = 0;     // timestamp of previous PRESSING sample
-lv_timer_t* s_momentum_timer = nullptr;
-int         s_momentum_ticks_left = 0;
+uint8_t s_stars_value = 0;
+// Bitfield of kTasteSour | kTasteBitter — toggled by the two Post pills. Reset
+// on enter_idle. Submitted into ShotRecord.taste_flags verbatim.
+uint8_t s_taste_flags = 0;
 
 // ---------------------------------------------------------------------------
 // Math helpers.
@@ -367,37 +449,53 @@ void draw_arrow_event(lv_event_t* e) {
 // scroll RIGHT under the fixed cursor → cursor reads a LOWER value
 // (lower numbers were just off-screen to the LEFT, now rolled in).
 // ---------------------------------------------------------------------------
-void draw_grind_bar(lv_event_t* e) {
+// Generic bar tick painter. Pulls BarState* off the widget's user_data, reads
+// the spec's range / tick rules, and emits the bg rail + tick rects centered
+// on the widget's coord box. Out-of-range ticks (below spec.min or above
+// spec.max) are clipped — the delta bar can't go under 0 s, so ticks below
+// 0 must not render even when the cursor sits near the floor.
+void draw_bar_event(lv_event_t* e) {
   lv_layer_t* layer = lv_event_get_layer(e);
   if (layer == nullptr) return;
   auto* obj = static_cast<lv_obj_t*>(lv_event_get_target(e));
+  // BarState lives on the WIDGET (lv_obj_set_user_data in make_bar_widget),
+  // not on the callback registration — same pattern as draw_arrow_event /
+  // draw_climate_icon. lv_event_get_user_data would return the per-callback
+  // pointer (nullptr in our registration).
+  auto* state = static_cast<BarState*>(lv_obj_get_user_data(obj));
+  if (state == nullptr || state->spec == nullptr) return;
   lv_area_t coords;
   lv_obj_get_coords(obj, &coords);
   const int32_t cx = coords.x1 + lv_area_get_width(&coords)  / 2;
   const int32_t cy = coords.y1 + lv_area_get_height(&coords) / 2;
 
+  const BarSpec& spec = *state->spec;
+  const float    value = state->value;
+  const float    px_per_unit =
+      static_cast<float>(kBarHalfWidth) / spec.visible_half_range;
+  const float    inv_tick = 1.0f / spec.tick_unit;
+
   // Background rail. Drawn first so the ticks paint on top; sized to the
   // small-tick height so the big and mid ticks still stick proud of the rail.
+  // Pill ends — LV_RADIUS_CIRCLE rounds both caps to half-height without
+  // touching the straight middle section.
   {
     lv_draw_rect_dsc_t bg_dsc;
     lv_draw_rect_dsc_init(&bg_dsc);
     bg_dsc.bg_color = kBarStripBgColor;
     bg_dsc.bg_opa   = LV_OPA_COVER;
-    // Pill ends — half-height radius rounds both caps without affecting the
-    // straight middle section.
     bg_dsc.radius   = LV_RADIUS_CIRCLE;
     lv_area_t bg_a = {cx - kBarHalfWidth, cy - kBarStripBgHeight / 2,
                       cx + kBarHalfWidth, cy + kBarStripBgHeight / 2};
     lv_draw_rect(layer, &bg_dsc, &bg_a);
   }
 
-  // Visible range of grind values across the bar. A small over-scan keeps a
-  // tick from popping in/out at the very edge as the value scrolls.
-  constexpr float kVisibleHalfRange = 1.0f;  // bar shows ±1 grind unit
+  // Visible range of values across the bar, plus one tick of over-scan so a
+  // tick doesn't pop in/out at the very edge as the value scrolls.
   const int32_t idx_min = static_cast<int32_t>(
-      std::floor((s_grind_value - kVisibleHalfRange) * 10.0f)) - 1;
+      std::floor((value - spec.visible_half_range) * inv_tick)) - 1;
   const int32_t idx_max = static_cast<int32_t>(
-      std::ceil((s_grind_value + kVisibleHalfRange) * 10.0f)) + 1;
+      std::ceil((value + spec.visible_half_range) * inv_tick)) + 1;
 
   lv_draw_rect_dsc_t big_dsc;
   lv_draw_rect_dsc_init(&big_dsc);
@@ -414,16 +512,24 @@ void draw_grind_bar(lv_event_t* e) {
   small_dsc.bg_color = kSmallTickColor;
   small_dsc.bg_opa   = LV_OPA_COVER;
 
+  // Half a tick of slack on the value-domain clip so a tick that sits exactly
+  // at spec.min / spec.max still draws (floating-point rounding shouldn't
+  // erase the floor tick).
+  const float clip_slack = spec.tick_unit * 0.5f;
+
   for (int32_t idx = idx_min; idx <= idx_max; ++idx) {
-    const float v_i      = idx * 0.1f;
+    const float v_i = idx * spec.tick_unit;
+    if (v_i < spec.min - clip_slack) continue;
+    if (v_i > spec.max + clip_slack) continue;
     // Standard slider direction: HIGHER value sits RIGHT of cursor.
-    const float x_offset = (v_i - s_grind_value) * kBarPxPerUnit;
+    const float x_offset = (v_i - value) * px_per_unit;
     if (std::fabs(x_offset) > static_cast<float>(kBarHalfWidth) + 0.5f) continue;
     const int32_t tick_x = cx + static_cast<int32_t>(std::lround(x_offset));
-    // Tier: integer (every 10 0.1-steps) > half-unit (every 5) > 0.1 step.
-    // Mid and small share thickness; only length and dsc differ.
-    const bool is_big = (idx % 10 == 0);
-    const bool is_mid = !is_big && (idx % 5 == 0);
+    // Tier: big_every (e.g. integers for grind, 10 s for delta) > mid_every
+    // (half-unit grind, 5 s delta) > everything else. Mid + small share
+    // thickness; only length and dsc differ.
+    const bool is_big = (idx % spec.big_every == 0);
+    const bool is_mid = !is_big && (idx % spec.mid_every == 0);
     int32_t half_h, half_w;
     lv_draw_rect_dsc_t* dsc;
     if (is_big) {
@@ -443,7 +549,6 @@ void draw_grind_bar(lv_event_t* e) {
                    tick_x + half_w, cy + half_h};
     lv_draw_rect(layer, dsc, &a);
   }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -462,7 +567,7 @@ void refresh_suggestion_arrow() {
     lv_obj_add_flag(s_suggestion_arrow, LV_OBJ_FLAG_HIDDEN);
     return;
   }
-  const float offset_px = (s_current_suggestion.grind - s_grind_value) * kBarPxPerUnit;
+  const float offset_px = (s_current_suggestion.grind - s_grind.value) * kBarPxPerUnit;
   if (std::fabs(offset_px) > static_cast<float>(kBarHalfWidth)) {
     lv_obj_add_flag(s_suggestion_arrow, LV_OBJ_FLAG_HIDDEN);
     return;
@@ -481,23 +586,16 @@ void refresh_suggestion_arrow() {
 }
 
 // Right-side SUGGESTION block. Caption + value are toggled as a pair so the
-// header never floats above empty space. Three states:
-//   - Post-mode form is up → hide both (the post UI owns the screen).
-//   - Idle, no usable model output → keep the block visible with a muted
-//     "N/A" placeholder so the spot doesn't appear/disappear as data trickles
-//     in; reads as "this slot exists, just nothing to say yet".
-//   - Idle, suggestion available → live "x.xx (NN%)" tinted by the
-//     confidence tier; caption shares the tier color so the whole block
-//     carries the signal.
+// header never floats above empty space. The bottom area is shared across
+// idle and post, so this block stays visible in both modes — only model
+// availability gates it now:
+//   - No usable model output → muted "N/A" placeholder so the spot doesn't
+//     appear/disappear as data trickles in; reads as "this slot exists,
+//     just nothing to say yet".
+//   - Suggestion available → live "x.xx (NN%)" tinted by the confidence
+//     tier; caption shares the tier color so the whole block carries it.
 void refresh_suggested_label() {
   if (s_suggested_label == nullptr) return;
-  if (s_mode != Mode::Idle) {
-    lv_obj_add_flag(s_suggested_label, LV_OBJ_FLAG_HIDDEN);
-    if (s_suggestion_caption != nullptr) {
-      lv_obj_add_flag(s_suggestion_caption, LV_OBJ_FLAG_HIDDEN);
-    }
-    return;
-  }
   if (!predicted_visible(s_current_suggestion)) {
     lv_label_set_text(s_suggested_label, "N/A");
     lv_obj_set_style_text_color(s_suggested_label, kColorMuted3, LV_PART_MAIN);
@@ -525,8 +623,8 @@ void refresh_suggested_label() {
 }
 
 void refresh_grinder() {
-  if (s_grind_bar != nullptr) {
-    lv_obj_invalidate(s_grind_bar);
+  if (s_grind.widget != nullptr) {
+    lv_obj_invalidate(s_grind.widget);
   }
   refresh_suggestion_arrow();
   refresh_suggested_label();
@@ -542,7 +640,7 @@ void refresh_grind_value_label() {
   // sub-step during a drag/glide, so round to the 0.05 grid here — otherwise
   // the number would twitch across ten sub-step values for one finger nudge.
   const float displayed =
-      std::round(s_grind_value / model::kGrindStep) * model::kGrindStep;
+      std::round(s_grind.value / model::kGrindStep) * model::kGrindStep;
   std::snprintf(buf, sizeof(buf), "%.2f", static_cast<double>(displayed));
   lv_label_set_text(s_grind_value_label, buf);
 }
@@ -563,31 +661,58 @@ void refresh_preset_label() {
   }
 }
 
-void refresh_delta_label() {
-  if (s_delta_label == nullptr) return;
-  if (!s_delta_set) {
-    lv_label_set_text(s_delta_label, "--");
-    lv_obj_set_style_text_color(s_delta_label, kColorMuted, LV_PART_MAIN);
-    return;
-  }
-  char buf[8];
-  std::snprintf(buf, sizeof(buf), "%+ds", static_cast<int>(s_delta_value));
-  lv_label_set_text(s_delta_label, buf);
-  lv_obj_set_style_text_color(s_delta_label, kColorText, LV_PART_MAIN);
+// Read-only preset string parked on the post-mode center line. Same format as
+// refresh_preset_label's idle button, but the post variant is plain text — no
+// cycling, since changing presets mid-form would invalidate the delta default.
+void refresh_preset_post_label() {
+  if (s_preset_post_label == nullptr) return;
+  const auto p = presets::get(presets::selected_id());
+  char buf[40];
+  std::snprintf(buf, sizeof(buf), "%s  \xC2\xB7  target %us", p.name,
+                static_cast<unsigned>(p.target_time_s));
+  lv_label_set_text(s_preset_post_label, buf);
 }
 
+// Recolor the outline-star line widgets to reflect s_stars_value. Tap targets
+// stay transparent — only the line color changes (accent for lit, muted for
+// unlit).
 void refresh_stars() {
   for (uint8_t i = 0; i < kMaxStars; ++i) {
-    if (s_star_btns[i] == nullptr) continue;
+    if (s_star_icons[i] == nullptr) continue;
     const bool lit = (i < s_stars_value);
-    lv_obj_set_style_bg_color(s_star_btns[i], lit ? kColorAccent : kColorMuted3,
-                              LV_PART_MAIN);
+    lv_obj_set_style_line_color(s_star_icons[i],
+                                lit ? kColorAccent : kColorMuted3,
+                                LV_PART_MAIN);
+  }
+}
+
+// Recolor the Sour / Bitter pills against s_taste_flags. Off = muted bg +
+// muted text; on = accent bg + bg-color text (so the label reads against the
+// accent fill).
+void refresh_taste_toggles() {
+  struct { lv_obj_t* btn; lv_obj_t* lbl; uint8_t mask; } pills[] = {
+      {s_sour_btn,   s_sour_label,   storage::kTasteSour},
+      {s_bitter_btn, s_bitter_label, storage::kTasteBitter},
+  };
+  for (auto& pill : pills) {
+    if (pill.btn == nullptr) continue;
+    const bool on = (s_taste_flags & pill.mask) != 0;
+    lv_obj_set_style_bg_color(pill.btn,
+                              on ? kColorAccent : kColorMuted3, LV_PART_MAIN);
+    if (pill.lbl != nullptr) {
+      lv_obj_set_style_text_color(pill.lbl,
+                                  on ? kColorBg : kColorMuted, LV_PART_MAIN);
+    }
   }
 }
 
 void refresh_submit_enabled() {
   if (s_submit_btn == nullptr) return;
-  const bool ready = s_delta_set && s_stars_value > 0;
+  // Submit unlocks only after BOTH quality is set AND the delta bar has been
+  // touched. The touched gate prevents a one-tap submit that records the
+  // preset's default brew time verbatim — even a "delta zero" pull should be
+  // an explicit confirmation, not the form's initial state.
+  const bool ready = s_stars_value > 0 && s_delta.touched;
   if (ready) {
     lv_obj_remove_state(s_submit_btn, LV_STATE_DISABLED);
     lv_obj_set_style_bg_color(s_submit_btn, kColorAccent, LV_PART_MAIN);
@@ -655,44 +780,59 @@ void refresh_suggestion() {
 }
 
 // ---------------------------------------------------------------------------
-// Mode transitions. Hide the inactive group entirely so its widgets don't
-// receive stray touches; the grinder bar + cursor stay visible in both
-// modes so the user can keep dialing while filling out the post form.
+// Mode transitions. s_idle_group holds the climate strip + idle center-line
+// widgets (POST btn, preset btn). s_post_group holds the post-form UI +
+// post-mode center-line widgets (✕, preset readonly, Submit). The bottom
+// area below the climate-bottom separator at y=210 — center-line position
+// included — is identical in both modes: grind bar + cursor + suggestion
+// arrow + big number + GRIND VALUE caption + SUGGESTION block. apply_mode
+// just swaps the two mode groups; nothing else changes between modes.
 // ---------------------------------------------------------------------------
 void apply_mode() {
   if (s_mode == Mode::Idle) {
     lv_obj_remove_flag(s_idle_group, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_post_group, LV_OBJ_FLAG_HIDDEN);
-    if (s_grind_value_label) lv_obj_remove_flag(s_grind_value_label, LV_OBJ_FLAG_HIDDEN);
   } else {
     lv_obj_add_flag(s_idle_group, LV_OBJ_FLAG_HIDDEN);
     lv_obj_remove_flag(s_post_group, LV_OBJ_FLAG_HIDDEN);
-    // Value text is hidden in Post — the central disk is busy with the
-    // delta stepper, stars, and Submit. The bar still scrolls under touch
-    // so the user has feedback that dragging works.
-    if (s_grind_value_label) lv_obj_add_flag(s_grind_value_label, LV_OBJ_FLAG_HIDDEN);
   }
-  // Suggested label has its own visibility (mode + suggestion availability);
-  // let it recompute.
+  // SUGGESTION block is shown in both modes now; let refresh_suggested_label
+  // recompute its visibility based on suggestion availability alone.
   refresh_suggested_label();
+}
+
+// Reset post-form state to the preset's defaults. Pulled out of enter_idle so
+// enter_post can share the same reseed (e.g. preset target time → delta bar
+// seed) without duplicating the logic. Grind survives — the user already
+// dialed it for this shot and the bar/cursor are still showing that.
+void reset_post_form() {
+  s_stars_value     = 0;
+  s_taste_flags     = 0;
+  s_delta.touched   = false;
+  s_delta.velocity  = 0.0f;
+  // Seed the delta bar at the preset's expected brew time so the cursor lands
+  // on the user's normal target. They drag from there to their actual time.
+  const auto p = presets::get(presets::selected_id());
+  s_delta.value = std::clamp(static_cast<float>(p.target_time_s),
+                             kDeltaSpec.min, kDeltaSpec.max);
+  if (s_delta.widget != nullptr) lv_obj_invalidate(s_delta.widget);
+  refresh_stars();
+  refresh_taste_toggles();
+  refresh_submit_enabled();
 }
 
 void enter_idle() {
   s_mode = Mode::Idle;
-  // Reset the post form so re-entering doesn't carry over a stale delta/stars
-  // from the previous attempt. Grind survives — the user already dialed it
-  // and the bar/cursor are still showing the last position.
-  s_delta_set    = false;
-  s_delta_value  = 0;
-  s_stars_value  = 0;
-  refresh_delta_label();
-  refresh_stars();
-  refresh_submit_enabled();
+  reset_post_form();
   apply_mode();
 }
 
 void enter_post() {
   s_mode = Mode::Post;
+  // Re-seed on entry too — preset may have been cycled in idle since the last
+  // post session, and the delta bar's default needs to follow the new target.
+  reset_post_form();
+  refresh_preset_post_label();
   apply_mode();
 }
 
@@ -718,7 +858,7 @@ void show_toast(const char* text) {
 void on_preset_tap(lv_event_t*) {
   if (s_mode != Mode::Idle) return;  // belt-and-suspenders: hidden in post mode
   const auto new_id = presets::cycle_selected();
-  s_grind_value = std::clamp(presets::last_grind(new_id), kGrindMin, kGrindMax);
+  s_grind.value = std::clamp(presets::last_grind(new_id), kGrindMin, kGrindMax);
   refresh_preset_label();
   refresh_grind_value_label();
   refresh_suggestion();
@@ -733,22 +873,6 @@ void on_cancel_tap(lv_event_t*) {
   enter_idle();
 }
 
-void on_delta_minus(lv_event_t*) {
-  if (!s_delta_set) { s_delta_set = true; s_delta_value = 0; }
-  s_delta_value = std::max<int8_t>(kDeltaMin,
-      static_cast<int8_t>(s_delta_value - kDeltaStep));
-  refresh_delta_label();
-  refresh_submit_enabled();
-}
-
-void on_delta_plus(lv_event_t*) {
-  if (!s_delta_set) { s_delta_set = true; s_delta_value = 0; }
-  s_delta_value = std::min<int8_t>(kDeltaMax,
-      static_cast<int8_t>(s_delta_value + kDeltaStep));
-  refresh_delta_label();
-  refresh_submit_enabled();
-}
-
 void on_star_tap(lv_event_t* e) {
   const auto idx = reinterpret_cast<uintptr_t>(lv_event_get_user_data(e));
   if (s_stars_value == idx + 1) s_stars_value = static_cast<uint8_t>(idx);
@@ -757,17 +881,40 @@ void on_star_tap(lv_event_t* e) {
   refresh_submit_enabled();
 }
 
+// Sour / Bitter pills share a handler — the mask to flip is passed via
+// user_data. XOR'd into s_taste_flags so a second tap clears the bit.
+void on_taste_tap(lv_event_t* e) {
+  const auto mask = static_cast<uint8_t>(
+      reinterpret_cast<uintptr_t>(lv_event_get_user_data(e)));
+  s_taste_flags ^= mask;
+  refresh_taste_toggles();
+  // No submit-enabled change here — taste flags are journal-only and don't
+  // gate Submit.
+}
+
 void on_submit(lv_event_t*) {
-  if (!(s_delta_set && s_stars_value > 0)) return;  // belt-and-suspenders
+  if (!(s_stars_value > 0 && s_delta.touched)) return;  // belt-and-suspenders
 
   const climate::Reading r = climate::latest();
   storage::ShotRecord rec = {};
   rec.preset_id       = presets::selected_id();
-  rec.time_delta_s    = s_delta_value;
+  // Snap the floating bar value to a whole second, then subtract the preset's
+  // expected target to get the stored delta. int8 clamp guards against the
+  // theoretical 0 vs target=99 case (delta = -99); realistic deltas land
+  // comfortably inside [-30, +30].
+  {
+    const auto p = presets::get(presets::selected_id());
+    const int   snapped_s = static_cast<int>(std::lround(s_delta.value));
+    const int   delta     = std::clamp(snapped_s -
+                                       static_cast<int>(p.target_time_s),
+                                       -128, 127);
+    rec.time_delta_s = static_cast<int8_t>(delta);
+  }
   rec.quality_stars   = s_stars_value;
+  rec.taste_flags     = s_taste_flags;
   rec.timestamp_us    = esp_timer_get_time();
   rec.rtc_epoch_s     = rtc::epoch_s();
-  rec.user_grind      = s_grind_value;
+  rec.user_grind      = s_grind.value;
   // Snapshot the suggestion the user saw at submit time. NaN when the arrow
   // was hidden (confidence ≤ 30) — matches "model said nothing" and lets
   // future analyses distinguish that from "model said exactly N". Refit runs
@@ -805,62 +952,62 @@ void on_submit(lv_event_t*) {
   refresh_grinder();
 }
 
-// Apply one frame of post-release momentum. Decays the velocity, advances
-// s_grind_value by velocity·dt (sub-step, free-floating), and refreshes the
-// bar + label every tick. On settle, snaps to model::kGrindStep and persists
-// to NVS so the per-preset slot stores the grid value, not the sub-step
-// coast-to-rest position.
-void momentum_tick(lv_timer_t* t) {
-  const float dt_s = static_cast<float>(kMomentumPeriodMs) / 1000.0f;
-  const float new_value = std::clamp(s_grind_value + s_drag_velocity * dt_s,
-                                     kGrindMin, kGrindMax);
-  if (new_value != s_grind_value) {
-    s_grind_value = new_value;
-    refresh_grinder();
-    refresh_grind_value_label();
+// ---------------------------------------------------------------------------
+// Generic bar mechanics. Each BarState owns its own value, drag bookkeeping,
+// and momentum timer. Hit-test, drag advance, momentum flick, and settle-snap
+// are uniform — grind vs delta differs only in BarSpec values and on_change /
+// on_settle / on_touched hooks. on_grind_bar_event and on_delta_bar_event are
+// thin forwarders the overlay registers; everything below them is shared.
+// ---------------------------------------------------------------------------
+void bar_cancel_momentum(BarState* s) {
+  if (s->momentum_timer != nullptr) {
+    lv_timer_delete(s->momentum_timer);
+    s->momentum_timer = nullptr;
   }
-  s_drag_velocity *= kMomentumDecay;
-  --s_momentum_ticks_left;
+  s->velocity = 0.0f;
+  s->momentum_ticks_left = 0;
+}
 
-  // Stop when we've coasted long enough, the velocity has decayed below the
-  // noise floor, or we've pinned to the dial range. Snap to the 0.05 grid
-  // before persisting so the bar lands on a tick and the NVS slot stores a
-  // clean step.
-  const bool at_edge = (s_grind_value <= kGrindMin + 1e-4f) ||
-                       (s_grind_value >= kGrindMax - 1e-4f);
-  if (s_momentum_ticks_left <= 0 ||
-      std::fabs(s_drag_velocity) < kMomentumMinSpeed ||
+void bar_snap_and_settle(BarState* s) {
+  const float snapped = std::round(s->value / s->spec->step) * s->spec->step;
+  if (snapped != s->value) {
+    s->value = snapped;
+    if (s->on_change) s->on_change(s);
+  }
+  s->velocity = 0.0f;
+  if (s->on_settle) s->on_settle(s);
+}
+
+void bar_momentum_tick(lv_timer_t* t) {
+  auto* s = static_cast<BarState*>(lv_timer_get_user_data(t));
+  if (s == nullptr || s->spec == nullptr) return;
+  const BarSpec& spec = *s->spec;
+  const float dt_s = static_cast<float>(kMomentumPeriodMs) / 1000.0f;
+  const float new_value =
+      std::clamp(s->value + s->velocity * dt_s, spec.min, spec.max);
+  if (new_value != s->value) {
+    s->value = new_value;
+    if (s->on_change) s->on_change(s);
+  }
+  s->velocity *= kMomentumDecay;
+  --s->momentum_ticks_left;
+
+  // Stop on any of: out of ticks, decayed below noise floor, or pinned to a
+  // range edge. Snap + persist before the timer self-destructs.
+  const bool at_edge = (s->value <= spec.min + 1e-4f) ||
+                       (s->value >= spec.max - 1e-4f);
+  if (s->momentum_ticks_left <= 0 ||
+      std::fabs(s->velocity) < kMomentumMinSpeed ||
       at_edge) {
-    const float snapped =
-        std::round(s_grind_value / model::kGrindStep) * model::kGrindStep;
-    if (snapped != s_grind_value) {
-      s_grind_value = snapped;
-      refresh_grinder();
-      refresh_grind_value_label();
-    }
-    presets::set_last_grind(presets::selected_id(), s_grind_value);
-    s_drag_velocity = 0.0f;
-    s_momentum_timer = nullptr;
+    bar_snap_and_settle(s);
+    s->momentum_timer = nullptr;
     lv_timer_delete(t);
   }
 }
 
-void cancel_momentum() {
-  if (s_momentum_timer != nullptr) {
-    lv_timer_delete(s_momentum_timer);
-    s_momentum_timer = nullptr;
-  }
-  s_drag_velocity = 0.0f;
-  s_momentum_ticks_left = 0;
-}
-
-// Grinder drag. LVGL's high-level gestures fire only on a clean
-// swipe-up/down/left/right, so we attach PRESSED/PRESSING/RELEASED to the
-// full-screen overlay and convert horizontal finger motion into grind value
-// deltas directly. The climate tiles + POST button sit z-above the overlay
-// so they take their own touches; press-events above kPressYThreshold are
-// rejected here as a second safety net.
-void on_grinder_event(lv_event_t* e) {
+void bar_dispatch_event(lv_event_t* e, BarState* s) {
+  if (s == nullptr || s->spec == nullptr) return;
+  const BarSpec& spec = *s->spec;
   const auto code = lv_event_get_code(e);
   lv_indev_t* indev = lv_indev_active();
   if (indev == nullptr) return;
@@ -869,91 +1016,109 @@ void on_grinder_event(lv_event_t* e) {
 
   switch (code) {
     case LV_EVENT_PRESSED: {
-      // Drag starts only when the press lands in the grinder band — below
-      // the separator that caps the area, so taps on the climate strip
-      // can't accidentally start a horizontal scrub. Once dragging, the
-      // finger can wander anywhere on the screen.
-      if (p.y < kPressYThreshold) {
-        s_grinder_dragging = false;
+      // Only react when the press lands in THIS bar's y-band. Outside the
+      // band the bar stays asleep so the other bar (or no bar at all) can
+      // claim the press.
+      if (p.y < spec.y_band_top || p.y > spec.y_band_bottom) {
+        s->dragging = false;
         return;
       }
       // Grabbing again mid-glide stops the flywheel — the new touch should
       // own the motion, not fight a tail from the last release.
-      cancel_momentum();
-      s_grinder_dragging = true;
-      s_drag_last_x      = p.x;
-      s_drag_last_us     = esp_timer_get_time();
+      bar_cancel_momentum(s);
+      s->dragging = true;
+      s->last_x   = p.x;
+      s->last_us  = esp_timer_get_time();
+      // First touch in this form session — fire the hook so the Post form can
+      // enable Submit. Subsequent touches don't re-fire (touched is sticky).
+      if (!s->touched) {
+        s->touched = true;
+        if (s->on_touched) s->on_touched(s);
+      }
       break;
     }
     case LV_EVENT_PRESSING: {
-      if (!s_grinder_dragging) return;
-      const int32_t dx_px = p.x - s_drag_last_x;
-      s_drag_last_x = p.x;
+      if (!s->dragging) return;
+      const int32_t dx_px = p.x - s->last_x;
+      s->last_x = p.x;
       // Direct manipulation: the bar follows the finger. Finger right
-      // (positive dx) scrolls the ticks RIGHT, which means the cursor
-      // (fixed at center) now sits over a LOWER value than before — the
-      // sign on dv is therefore inverted relative to dx. Lower values
-      // were just off-screen to the LEFT; pulling the bar right brings
-      // them into view at center.
+      // (positive dx) scrolls ticks RIGHT under the fixed center cursor,
+      // which reads a LOWER value — hence the sign flip on dv.
       //
-      // The bar slides at sub-step resolution; the readout rounds to
-      // model::kGrindStep inside refresh_grind_value_label so the number
-      // doesn't twitch across sub-step values mid-drag. Snap happens at
-      // release / momentum-end, not per-frame here.
-      const float dv = -static_cast<float>(dx_px) / kBarPxPerUnit;
+      // Sub-step motion is fine; readout labels round for display in their
+      // own refresh. Snap happens at release / momentum-end.
+      const float px_per_unit =
+          static_cast<float>(kBarHalfWidth) / spec.visible_half_range;
+      const float dv = -static_cast<float>(dx_px) / px_per_unit;
       const float new_value =
-          std::clamp(s_grind_value + dv, kGrindMin, kGrindMax);
-      if (new_value != s_grind_value) {
-        s_grind_value = new_value;
-        refresh_grinder();
-        refresh_grind_value_label();
+          std::clamp(s->value + dv, spec.min, spec.max);
+      if (new_value != s->value) {
+        s->value = new_value;
+        if (s->on_change) s->on_change(s);
       }
       // Track velocity for the post-release flick. EMA with α=0.5 smooths
-      // single-frame jitter (touch driver can briefly stall) while still
-      // responding within ~2-3 frames to a real change in finger speed.
+      // single-frame jitter while still responding within ~2-3 frames.
       const uint64_t now_us = esp_timer_get_time();
-      if (s_drag_last_us != 0) {
-        const float dt_s = static_cast<float>(now_us - s_drag_last_us) / 1e6f;
+      if (s->last_us != 0) {
+        const float dt_s = static_cast<float>(now_us - s->last_us) / 1e6f;
         if (dt_s > 1e-4f) {
           const float instant = dv / dt_s;
-          s_drag_velocity = 0.5f * s_drag_velocity + 0.5f * instant;
+          s->velocity = 0.5f * s->velocity + 0.5f * instant;
         }
       }
-      s_drag_last_us = now_us;
+      s->last_us = now_us;
       break;
     }
     case LV_EVENT_RELEASED:
     case LV_EVENT_PRESS_LOST: {
-      if (!s_grinder_dragging) break;
-      s_grinder_dragging = false;
-      s_drag_last_us     = 0;
-      // If the finger lifted with non-trivial speed, hand off to the
-      // momentum timer — it'll persist the final value to NVS when it
-      // settles. Otherwise persist immediately; there's nothing to glide.
-      if (std::fabs(s_drag_velocity) >= kMomentumMinSpeed) {
-        s_momentum_ticks_left = kMomentumMaxTicks;
-        if (s_momentum_timer == nullptr) {
-          s_momentum_timer =
-              lv_timer_create(momentum_tick, kMomentumPeriodMs, nullptr);
+      if (!s->dragging) break;
+      s->dragging = false;
+      s->last_us  = 0;
+      // If the finger lifted with non-trivial speed, hand off to the momentum
+      // timer; it'll snap + settle when it dies. Otherwise settle now.
+      if (std::fabs(s->velocity) >= kMomentumMinSpeed) {
+        s->momentum_ticks_left = kMomentumMaxTicks;
+        if (s->momentum_timer == nullptr) {
+          s->momentum_timer =
+              lv_timer_create(bar_momentum_tick, kMomentumPeriodMs, s);
         }
       } else {
-        // No glide; snap the bar to the 0.05 grid right away so it doesn't
-        // sit between ticks once the finger leaves the screen.
-        s_drag_velocity = 0.0f;
-        const float snapped =
-            std::round(s_grind_value / model::kGrindStep) * model::kGrindStep;
-        if (snapped != s_grind_value) {
-          s_grind_value = snapped;
-          refresh_grinder();
-          refresh_grind_value_label();
-        }
-        presets::set_last_grind(presets::selected_id(), s_grind_value);
+        bar_snap_and_settle(s);
       }
       break;
     }
     default:
       break;
   }
+}
+
+// Per-bar forwarders. The grind overlay is always live; the delta overlay
+// gates on mode so a press in post-mode coords during idle doesn't fire it.
+void on_grind_bar_event(lv_event_t* e) {
+  bar_dispatch_event(e, &s_grind);
+}
+
+void on_delta_bar_event(lv_event_t* e) {
+  if (s_mode != Mode::Post) return;
+  bar_dispatch_event(e, &s_delta);
+}
+
+// Per-bar hooks invoked by bar_dispatch_event / bar_momentum_tick when value
+// changes, the drag/glide settles, or the bar is touched for the first time
+// in a form session.
+void grind_on_change(BarState*) {
+  refresh_grinder();
+  refresh_grind_value_label();
+}
+void grind_on_settle(BarState*) {
+  presets::set_last_grind(presets::selected_id(), s_grind.value);
+}
+
+void delta_on_change(BarState* s) {
+  if (s->widget != nullptr) lv_obj_invalidate(s->widget);
+}
+void delta_on_touched(BarState*) {
+  refresh_submit_enabled();
 }
 
 // ---------------------------------------------------------------------------
@@ -1644,14 +1809,77 @@ lv_obj_t* make_arrow(lv_obj_t* parent, ArrowState* state, int32_t widget_size) {
   return a;
 }
 
+// 5-point outline star, drawn as a closed lv_line over 11 vertices (5 outer +
+// 5 inner alternating, last vertex closes back to the first). Inner/outer
+// ratio is the golden-ratio classic 0.382. All five Quality stars share the
+// same size, so the polyline lives in one static array that every star line
+// widget points at; lv_line_set_points stores the pointer rather than copying
+// so the array must outlive the widgets, which static handles for free.
+constexpr int32_t kStarSize = 38;
+lv_point_precise_t s_star_polyline[11];
+bool s_star_polyline_built = false;
+
+void build_star_polyline() {
+  if (s_star_polyline_built) return;
+  const float R = static_cast<float>(kStarSize) * 0.5f;
+  const float r = R * 0.382f;
+  for (int i = 0; i <= 10; ++i) {
+    // i=0 is the top outer vertex; subsequent vertices step 36° clockwise,
+    // alternating outer (even i) and inner (odd i). i=10 closes back to i=0.
+    const float a = kPi / 2.0f - kPi * static_cast<float>(i % 10) / 5.0f;
+    const float rad = (i % 2 == 0) ? R : r;
+    s_star_polyline[i].x = R + rad * std::cos(a);
+    s_star_polyline[i].y = R - rad * std::sin(a);
+  }
+  s_star_polyline_built = true;
+}
+
+lv_obj_t* make_star(lv_obj_t* parent, lv_color_t color) {
+  build_star_polyline();
+  lv_obj_t* line = lv_line_create(parent);
+  lv_line_set_points(line, s_star_polyline, 11);
+  lv_obj_set_style_line_color(line, color, LV_PART_MAIN);
+  lv_obj_set_style_line_width(line, 3, LV_PART_MAIN);
+  lv_obj_set_style_line_rounded(line, true, LV_PART_MAIN);
+  return line;
+}
+
 // ---------------------------------------------------------------------------
 // Group builders.
 // ---------------------------------------------------------------------------
+// Make one bar's tick-strip widget. Parent decides visibility — the grind bar
+// goes on the screen (visible both modes); the delta bar goes inside
+// s_post_group so the mode swap hides it. The BarState's spec/widget/hooks
+// must be wired by the caller before lv_obj_invalidate triggers a paint.
+lv_obj_t* make_bar_widget(lv_obj_t* parent, BarState* state) {
+  lv_obj_t* w = lv_obj_create(parent);
+  lv_obj_set_size(w, 2 * kBarHalfWidth, kBarStripHeight);
+  lv_obj_set_pos(w, kCenter - kBarHalfWidth,
+                 state->spec->y - kBarStripHeight / 2);
+  lv_obj_set_style_bg_opa(w, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(w, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(w, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(w, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(w, LV_OBJ_FLAG_CLICKABLE);
+  // user_data carries the BarState* so draw_bar_event can pull the value /
+  // spec without globals.
+  lv_obj_set_user_data(w, state);
+  lv_obj_add_event_cb(w, draw_bar_event, LV_EVENT_DRAW_MAIN, nullptr);
+  return w;
+}
+
 void build_grinder(lv_obj_t* scr) {
-  // Transparent full-screen overlay catches horizontal swipes anywhere
-  // in the grinder zone (below kPressYThreshold). Sits BEHIND the climate
-  // tiles + POST button so its handler only fires when the press lands
-  // outside those widgets.
+  // Wire the grind bar state. Spec is constexpr; widget+value+hooks attach
+  // here. (Delta bar is wired in build_post_group, on its own group.)
+  s_grind.spec      = &kGrindSpec;
+  s_grind.on_change = grind_on_change;
+  s_grind.on_settle = grind_on_settle;
+  s_grind.on_touched = nullptr;  // grind doesn't gate any UI on "touched"
+
+  // Transparent full-screen overlay catches horizontal swipes for BOTH bars.
+  // Per-bar forwarders hit-test against their own spec.y_band and ignore
+  // events that don't belong to them. Sits BEHIND the climate tiles + Post
+  // button + Post-mode buttons so those widgets take their own taps first.
   s_grinder_overlay = lv_obj_create(scr);
   lv_obj_set_size(s_grinder_overlay, kScreen, kScreen);
   lv_obj_set_pos(s_grinder_overlay, 0, 0);
@@ -1660,26 +1888,15 @@ void build_grinder(lv_obj_t* scr) {
   lv_obj_set_style_pad_all(s_grinder_overlay, 0, LV_PART_MAIN);
   lv_obj_clear_flag(s_grinder_overlay, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(s_grinder_overlay, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_event_cb(s_grinder_overlay, on_grinder_event, LV_EVENT_PRESSED, nullptr);
-  lv_obj_add_event_cb(s_grinder_overlay, on_grinder_event, LV_EVENT_PRESSING, nullptr);
-  lv_obj_add_event_cb(s_grinder_overlay, on_grinder_event, LV_EVENT_RELEASED, nullptr);
-  lv_obj_add_event_cb(s_grinder_overlay, on_grinder_event, LV_EVENT_PRESS_LOST, nullptr);
+  for (auto code : {LV_EVENT_PRESSED, LV_EVENT_PRESSING, LV_EVENT_RELEASED,
+                    LV_EVENT_PRESS_LOST}) {
+    lv_obj_add_event_cb(s_grinder_overlay, on_grind_bar_event, code, nullptr);
+    lv_obj_add_event_cb(s_grinder_overlay, on_delta_bar_event, code, nullptr);
+  }
 
   // Tick bar — custom-drawn widget centered on (kCenter, kBarY). On every
-  // drag, LVGL invalidates only this widget's bounds. The draw callback
-  // computes which 0.1-step ticks are visible at the current s_grind_value
-  // and paints them; it also stamps the model's suggestion mark — same
-  // widget, same paint pass.
-  s_grind_bar = lv_obj_create(scr);
-  lv_obj_set_size(s_grind_bar, 2 * kBarHalfWidth, kBarStripHeight);
-  lv_obj_set_pos(s_grind_bar, kCenter - kBarHalfWidth,
-                 kBarY - kBarStripHeight / 2);
-  lv_obj_set_style_bg_opa(s_grind_bar, LV_OPA_TRANSP, LV_PART_MAIN);
-  lv_obj_set_style_border_width(s_grind_bar, 0, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(s_grind_bar, 0, LV_PART_MAIN);
-  lv_obj_clear_flag(s_grind_bar, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_clear_flag(s_grind_bar, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_event_cb(s_grind_bar, draw_grind_bar, LV_EVENT_DRAW_MAIN, nullptr);
+  // drag, LVGL invalidates only this widget's bounds.
+  s_grind.widget = make_bar_widget(scr, &s_grind);
 
   // Upward cursor — fixed at bar center, tip points UP at the bar from the
   // row below. Widget bounds (kCursorWidget) are larger than the triangle,
@@ -1714,11 +1931,11 @@ void build_grinder(lv_obj_t* scr) {
   // Static caption to the left of the value, same muted-gray + Montserrat 14
   // treatment as the climate section captions so the eye reads it as a header
   // for the big number rather than another live readout.
-  lv_obj_t* grind_caption = lv_label_create(scr);
-  lv_obj_set_style_text_color(grind_caption, kColorLabel, LV_PART_MAIN);
-  lv_obj_set_style_text_font(grind_caption, &lv_font_montserrat_14, LV_PART_MAIN);
-  lv_label_set_text(grind_caption, "GRIND VALUE");
-  lv_obj_set_pos(grind_caption, kGrindCaptionX, kGrindCaptionY);
+  s_grind_caption = lv_label_create(scr);
+  lv_obj_set_style_text_color(s_grind_caption, kColorLabel, LV_PART_MAIN);
+  lv_obj_set_style_text_font(s_grind_caption, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_label_set_text(s_grind_caption, "GRIND VALUE");
+  lv_obj_set_pos(s_grind_caption, kGrindCaptionX, kGrindCaptionY);
 
   // SUGGESTION block — mirrors the GRIND VALUE caption on the right side of
   // the big number. Caption is the muted-gray static header; the value line
@@ -1850,14 +2067,16 @@ void build_idle_group(lv_obj_t* scr) {
   lv_obj_clear_flag(s_idle_group, LV_OBJ_FLAG_CLICKABLE);
 
   // --- Climate area ---
-  // Two vertical separators on the geometric thirds, one horizontal below.
-  // Endpoints inset by kSeparatorInset so the strokes don't run all the way
-  // to the icon row (verticals) or the round-display chord (horizontal).
+  // Two vertical separators on the geometric thirds (idle-only — they segment
+  // climate columns and hide when the top area swaps to post UI). The
+  // horizontal separator below the climate strip (at kClimateBottomY) is
+  // parented to `scr` instead so it stays visible across both modes — it sits
+  // above the center line and the user wants it preserved in post too.
   make_separator(s_idle_group, kColLeftEdge1 - kSeparatorThickness / 2, kSeparatorInset,
                  kSeparatorThickness, kClimateBottomY - 2 * kSeparatorInset);
   make_separator(s_idle_group, kColLeftEdge2 - kSeparatorThickness / 2, kSeparatorInset,
                  kSeparatorThickness, kClimateBottomY - 2 * kSeparatorInset);
-  make_separator(s_idle_group, kSeparatorInset, kClimateBottomY - kSeparatorThickness / 2,
+  make_separator(scr, kSeparatorInset, kClimateBottomY - kSeparatorThickness / 2,
                  kScreen - 2 * kSeparatorInset, kSeparatorThickness);
 
   build_climate_tile(s_idle_group, 0, kColLeftEdge0,  kColLeftEdge1,
@@ -1873,8 +2092,9 @@ void build_idle_group(lv_obj_t* scr) {
   // (Grind value sits above the bar; it's created in build_grinder as an
   // always-visible widget so it survives the idle→post toggle.)
 
-  // Post button — opens the post-mode form. Sits between the climate strip
-  // and the grinder cap separator, above the always-visible value text.
+  // Post button — opens the post-mode form. Lives in s_idle_group so it hides
+  // when entering post (post mode replaces the center line with ✕ / preset /
+  // Submit).
   s_post_btn = lv_button_create(s_idle_group);
   lv_obj_set_size(s_post_btn, 140, 52);
   lv_obj_set_style_radius(s_post_btn, 26, LV_PART_MAIN);
@@ -1889,17 +2109,19 @@ void build_idle_group(lv_obj_t* scr) {
   lv_label_set_text(post_lbl, "Post");
   lv_obj_center(post_lbl);
 
-  // Horizontal separator capping the grinder area, mirroring the line above
-  // POST. POST sits between the two with matching breathing room on each side.
-  make_separator(s_idle_group, kSeparatorInset,
+  // Horizontal separator capping the grinder area. Parented to `scr` so it
+  // stays visible across both modes — the bottom (grind) area below it is
+  // identical in idle and post.
+  make_separator(scr, kSeparatorInset,
                  kGrinderSeparatorY - kSeparatorThickness / 2,
                  kScreen - 2 * kSeparatorInset, kSeparatorThickness);
 
   // Preset selector — small tap-to-cycle label parked at the vertical middle
-  // of the screen, just left of POST. The button auto-sizes to its label, so
-  // refresh_preset_label re-runs the LV_ALIGN_OUT_LEFT_MID alignment after
-  // every text change — otherwise the button keeps its construction-time
-  // (empty-label) position and overflows rightward onto POST as it grows.
+  // of the screen, just left of POST. Lives in s_idle_group; the post mode
+  // shows a read-only preset string in its place. The button auto-sizes to
+  // its label, so refresh_preset_label re-runs the LV_ALIGN_OUT_LEFT_MID
+  // alignment after every text change — otherwise it overflows rightward as
+  // the label grows.
   s_preset_btn = lv_button_create(s_idle_group);
   lv_obj_set_style_bg_opa(s_preset_btn, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_shadow_width(s_preset_btn, 0, LV_PART_MAIN);
@@ -1923,83 +2145,147 @@ void build_post_group(lv_obj_t* scr) {
   lv_obj_clear_flag(s_post_group, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_clear_flag(s_post_group, LV_OBJ_FLAG_CLICKABLE);
 
-  // --- Time-delta stepper (top of center disk) ---
-  lv_obj_t* delta_caption = lv_label_create(s_post_group);
-  lv_obj_set_style_text_color(delta_caption, kColorMuted, LV_PART_MAIN);
-  lv_obj_set_style_text_font(delta_caption, &lv_font_montserrat_14, LV_PART_MAIN);
-  lv_label_set_text(delta_caption, "time vs target");
-  lv_obj_align(delta_caption, LV_ALIGN_CENTER, 0, -110);
+  // Top-area layout (replaces climate strip in idle). The climate-bottom
+  // separator at y=210 stays visible (it's parented to scr) and caps the post
+  // form. The center line at y=253 swaps from POST/preset (idle) to ✕/preset
+  // readonly/Submit (post). Everything below the cap separator at y=295 — big
+  // grind number, GRIND VALUE caption, SUGGESTION block, grind bar, cursor,
+  // suggestion arrow — is shared across both modes (parented to scr).
+  //
+  //   y= 22  QUALITY caption
+  //   y= 45  5-star row (top edge; kStarSize tall)
+  //   y=115  Sour / Bitter pill row (top edge; kPillH tall)
+  //   y=160  TIME DELTA caption
+  //   y=180  delta bar (centered; band [155, 200])
+  //   y=210  ── separator (shared) ──
+  //   y=253  ✕  preset readonly  Submit   (this build sets these up)
 
-  s_delta_label = lv_label_create(s_post_group);
-  lv_obj_set_style_text_font(s_delta_label, &lv_font_montserrat_48, LV_PART_MAIN);
-  lv_obj_align(s_delta_label, LV_ALIGN_CENTER, 0, -68);
+  // --- QUALITY caption + 5 stars ---
+  s_quality_caption = lv_label_create(s_post_group);
+  lv_obj_set_style_text_color(s_quality_caption, kColorMuted, LV_PART_MAIN);
+  lv_obj_set_style_text_font(s_quality_caption, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_label_set_text(s_quality_caption, "QUALITY");
+  lv_obj_align(s_quality_caption, LV_ALIGN_TOP_MID, 0, 22);
 
-  const int32_t step_size = 56;
-  lv_obj_t* minus = make_round_btn(s_post_group, step_size);
-  lv_obj_align(minus, LV_ALIGN_CENTER, -100, -68);
-  lv_obj_t* minus_lbl = lv_label_create(minus);
-  lv_obj_set_style_text_color(minus_lbl, kColorText, LV_PART_MAIN);
-  lv_obj_set_style_text_font(minus_lbl, &lv_font_montserrat_24, LV_PART_MAIN);
-  lv_label_set_text(minus_lbl, "-");
-  lv_obj_center(minus_lbl);
-  lv_obj_add_event_cb(minus, on_delta_minus, LV_EVENT_CLICKED, nullptr);
-
-  lv_obj_t* plus = make_round_btn(s_post_group, step_size);
-  lv_obj_align(plus, LV_ALIGN_CENTER, 100, -68);
-  lv_obj_t* plus_lbl = lv_label_create(plus);
-  lv_obj_set_style_text_color(plus_lbl, kColorText, LV_PART_MAIN);
-  lv_obj_set_style_text_font(plus_lbl, &lv_font_montserrat_24, LV_PART_MAIN);
-  lv_label_set_text(plus_lbl, "+");
-  lv_obj_center(plus_lbl);
-  lv_obj_add_event_cb(plus, on_delta_plus, LV_EVENT_CLICKED, nullptr);
-
-  // --- Star row (middle) ---
-  lv_obj_t* stars_caption = lv_label_create(s_post_group);
-  lv_obj_set_style_text_color(stars_caption, kColorMuted, LV_PART_MAIN);
-  lv_obj_set_style_text_font(stars_caption, &lv_font_montserrat_14, LV_PART_MAIN);
-  lv_label_set_text(stars_caption, "quality");
-  lv_obj_align(stars_caption, LV_ALIGN_CENTER, 0, 0);
-
-  const int32_t star_size = 38;
-  const int32_t star_gap  = 10;
-  const int32_t row_width = kMaxStars * star_size + (kMaxStars - 1) * star_gap;
-  const int32_t row_x0    = kCenter - row_width / 2;
+  // The tap target is a transparent lv_obj sized to the star (no button
+  // styling — we don't want a fill or shadow under the outline). The line
+  // widget child is the visual.
+  constexpr int32_t kStarGap  = 10;
+  constexpr int32_t kStarRowY = 45;
+  const int32_t row_width =
+      kMaxStars * kStarSize + (kMaxStars - 1) * kStarGap;
+  const int32_t row_x0 = kCenter - row_width / 2;
   for (uint8_t i = 0; i < kMaxStars; ++i) {
-    lv_obj_t* b = make_round_btn(s_post_group, star_size);
-    lv_obj_set_pos(b, row_x0 + i * (star_size + star_gap), kCenter + 20);
-    lv_obj_add_event_cb(b, on_star_tap, LV_EVENT_CLICKED,
+    lv_obj_t* tap = lv_obj_create(s_post_group);
+    lv_obj_set_size(tap, kStarSize, kStarSize);
+    lv_obj_set_pos(tap, row_x0 + i * (kStarSize + kStarGap), kStarRowY);
+    lv_obj_set_style_bg_opa(tap, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(tap, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(tap, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(tap, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(tap, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(tap, on_star_tap, LV_EVENT_CLICKED,
                         reinterpret_cast<void*>(static_cast<uintptr_t>(i)));
-    s_star_btns[i] = b;
+    s_star_btns[i]  = tap;
+    s_star_icons[i] = make_star(tap, kColorMuted3);
   }
 
-  // --- Submit (bottom) ---
-  s_submit_btn = lv_button_create(s_post_group);
-  lv_obj_set_size(s_submit_btn, 160, 50);
-  lv_obj_set_style_radius(s_submit_btn, 25, LV_PART_MAIN);
-  lv_obj_set_style_shadow_width(s_submit_btn, 0, LV_PART_MAIN);
-  lv_obj_set_style_border_width(s_submit_btn, 0, LV_PART_MAIN);
-  lv_obj_align(s_submit_btn, LV_ALIGN_CENTER, 0, 90);
-  s_submit_label = lv_label_create(s_submit_btn);
-  lv_obj_set_style_text_font(s_submit_label, &lv_font_montserrat_24, LV_PART_MAIN);
-  lv_label_set_text(s_submit_label, "Submit");
-  lv_obj_center(s_submit_label);
-  lv_obj_add_event_cb(s_submit_btn, on_submit, LV_EVENT_CLICKED, nullptr);
+  // --- Sour / Bitter toggle pills ---
+  // Off = muted bg + muted text; on = accent bg + bg-color text.
+  constexpr int32_t kPillH    = 32;
+  constexpr int32_t kPillW    = 88;
+  constexpr int32_t kPillGap  = 16;
+  constexpr int32_t kPillRowY = 115;  // top y of the pill row
+  const int32_t pill_row_w = 2 * kPillW + kPillGap;
+  const int32_t pill_x0    = kCenter - pill_row_w / 2;
 
-  // --- Cancel — small "x" in the upper-center, gets the user back to idle
-  //     without saving (in case Post was tapped by accident).
+  struct PillCfg { const char* text; uint8_t mask; lv_obj_t** btn; lv_obj_t** lbl; };
+  PillCfg pills[2] = {
+      {"Sour",   storage::kTasteSour,   &s_sour_btn,   &s_sour_label},
+      {"Bitter", storage::kTasteBitter, &s_bitter_btn, &s_bitter_label},
+  };
+  for (int i = 0; i < 2; ++i) {
+    lv_obj_t* b = lv_button_create(s_post_group);
+    lv_obj_set_size(b, kPillW, kPillH);
+    lv_obj_set_style_radius(b, kPillH / 2, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(b, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(b, 0, LV_PART_MAIN);
+    lv_obj_set_pos(b, pill_x0 + i * (kPillW + kPillGap), kPillRowY);
+    lv_obj_add_event_cb(b, on_taste_tap, LV_EVENT_CLICKED,
+                        reinterpret_cast<void*>(
+                            static_cast<uintptr_t>(pills[i].mask)));
+    lv_obj_t* lbl = lv_label_create(b);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_label_set_text(lbl, pills[i].text);
+    lv_obj_center(lbl);
+    *pills[i].btn = b;
+    *pills[i].lbl = lbl;
+  }
+
+  // --- TIME DELTA caption + delta bar ---
+  s_time_delta_caption = lv_label_create(s_post_group);
+  lv_obj_set_style_text_color(s_time_delta_caption, kColorMuted, LV_PART_MAIN);
+  lv_obj_set_style_text_font(s_time_delta_caption, &lv_font_montserrat_14,
+                             LV_PART_MAIN);
+  lv_label_set_text(s_time_delta_caption, "TIME DELTA");
+  lv_obj_align(s_time_delta_caption, LV_ALIGN_TOP_MID, 0, 160);
+
+  // Wire delta bar state, then create its widget INSIDE the post group so the
+  // mode swap hides it. The shared overlay still owns the touch handler;
+  // on_delta_bar_event filters by Mode::Post + spec.y_band.
+  s_delta.spec       = &kDeltaSpec;
+  s_delta.on_change  = delta_on_change;
+  s_delta.on_settle  = nullptr;             // delta persists at submit time, not per-glide
+  s_delta.on_touched = delta_on_touched;
+  s_delta.widget     = make_bar_widget(s_post_group, &s_delta);
+
+  // --- Center line: ✕ (left), preset readonly (mid), Submit (right) ---
+  // y_offset = 20 matches the idle POST button's LV_ALIGN_CENTER offset so
+  // the center line sits on the same horizontal as idle's POST. Mode swap
+  // replaces idle's POST + preset_btn with this triplet at the same y.
+  constexpr int32_t kCenterRowOffsetY = 20;
+  constexpr int32_t kCenterEdgeInset  = 30;
+  constexpr int32_t kCancelSize       = 40;
+  constexpr int32_t kSubmitW          = 100;
+  constexpr int32_t kSubmitH          = 44;
+
   s_cancel_btn = lv_button_create(s_post_group);
-  lv_obj_set_size(s_cancel_btn, 36, 36);
-  lv_obj_set_style_radius(s_cancel_btn, 18, LV_PART_MAIN);
+  lv_obj_set_size(s_cancel_btn, kCancelSize, kCancelSize);
+  lv_obj_set_style_radius(s_cancel_btn, kCancelSize / 2, LV_PART_MAIN);
   lv_obj_set_style_bg_color(s_cancel_btn, kColorMuted3, LV_PART_MAIN);
   lv_obj_set_style_shadow_width(s_cancel_btn, 0, LV_PART_MAIN);
   lv_obj_set_style_border_width(s_cancel_btn, 0, LV_PART_MAIN);
-  lv_obj_align(s_cancel_btn, LV_ALIGN_CENTER, 0, -160);
+  lv_obj_align(s_cancel_btn, LV_ALIGN_LEFT_MID, kCenterEdgeInset,
+               kCenterRowOffsetY);
+  lv_obj_add_event_cb(s_cancel_btn, on_cancel_tap, LV_EVENT_CLICKED, nullptr);
   lv_obj_t* cancel_lbl = lv_label_create(s_cancel_btn);
   lv_obj_set_style_text_color(cancel_lbl, kColorMuted, LV_PART_MAIN);
   lv_obj_set_style_text_font(cancel_lbl, &lv_font_montserrat_24, LV_PART_MAIN);
   lv_label_set_text(cancel_lbl, LV_SYMBOL_CLOSE);
   lv_obj_center(cancel_lbl);
-  lv_obj_add_event_cb(s_cancel_btn, on_cancel_tap, LV_EVENT_CLICKED, nullptr);
+
+  // Read-only preset string, same format as the idle preset button. Centered
+  // between ✕ and Submit. Not tappable — cycling presets mid-form would
+  // invalidate the delta bar's seeded default.
+  s_preset_post_label = lv_label_create(s_post_group);
+  lv_obj_set_style_text_color(s_preset_post_label, kColorMuted, LV_PART_MAIN);
+  lv_obj_set_style_text_font(s_preset_post_label, &lv_font_montserrat_14,
+                             LV_PART_MAIN);
+  lv_obj_align(s_preset_post_label, LV_ALIGN_CENTER, 0, kCenterRowOffsetY);
+
+  s_submit_btn = lv_button_create(s_post_group);
+  lv_obj_set_size(s_submit_btn, kSubmitW, kSubmitH);
+  lv_obj_set_style_radius(s_submit_btn, kSubmitH / 2, LV_PART_MAIN);
+  lv_obj_set_style_shadow_width(s_submit_btn, 0, LV_PART_MAIN);
+  lv_obj_set_style_border_width(s_submit_btn, 0, LV_PART_MAIN);
+  lv_obj_align(s_submit_btn, LV_ALIGN_RIGHT_MID, -kCenterEdgeInset,
+               kCenterRowOffsetY);
+  s_submit_label = lv_label_create(s_submit_btn);
+  lv_obj_set_style_text_font(s_submit_label, &lv_font_montserrat_24,
+                             LV_PART_MAIN);
+  lv_label_set_text(s_submit_label, "Submit");
+  lv_obj_center(s_submit_label);
+  lv_obj_add_event_cb(s_submit_btn, on_submit, LV_EVENT_CLICKED, nullptr);
 }
 
 }  // namespace
@@ -2028,13 +2314,19 @@ void start_report() {
 
   // Seed grind value from per-preset NVS; clamp in case older firmware stored
   // something outside the new ring's range.
-  s_grind_value = std::clamp(presets::last_grind(presets::selected_id()),
+  s_grind.value = std::clamp(presets::last_grind(presets::selected_id()),
                              kGrindMin, kGrindMax);
+  // Seed delta bar at the current preset's target so first enter_post lands
+  // with the cursor on the user's expected time.
+  const auto seed_preset = presets::get(presets::selected_id());
+  s_delta.value = std::clamp(static_cast<float>(seed_preset.target_time_s),
+                             kDeltaSpec.min, kDeltaSpec.max);
 
   refresh_preset_label();
+  refresh_preset_post_label();
   refresh_grind_value_label();
-  refresh_delta_label();
   refresh_stars();
+  refresh_taste_toggles();
   refresh_submit_enabled();
   refresh_suggestion();
 
