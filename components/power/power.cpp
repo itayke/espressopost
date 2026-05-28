@@ -24,6 +24,11 @@ bool    s_inited = false;
 State   s_state  = State::kActive;
 int64_t s_last_activity_us       = 0;
 int64_t s_wake_debounce_until_us = 0;
+// True from a wake-tap (dim/off → active) until the touch driver reports
+// the finger has lifted. The lift is observed in note_release(); the
+// 500 ms safety floor (s_wake_debounce_until_us) covers the edge case
+// where the controller never reports a clean release.
+bool    s_awaiting_release       = false;
 
 const char* state_name(State s) {
   switch (s) {
@@ -86,6 +91,7 @@ esp_err_t init() {
 
   s_last_activity_us       = esp_timer_get_time();
   s_wake_debounce_until_us = 0;
+  s_awaiting_release       = false;
   s_state                  = State::kActive;
   apply_state(s_state);
 
@@ -107,18 +113,29 @@ bool consume_input() {
   const int64_t now_us = esp_timer_get_time();
   s_last_activity_us   = now_us;
 
-  if (s_state == State::kOff) {
+  // Both off→active and dimmed→active are "wake events": the user's tap
+  // landed without intent to press whatever widget sits underneath. Treat
+  // them identically — arm the release-edge gate and the time-safety floor.
+  if (s_state == State::kOff || s_state == State::kDimmed) {
     transition(State::kActive);
     s_wake_debounce_until_us = now_us + kWakeDebounceUs;
+    s_awaiting_release       = true;
     return true;
   }
+  // Wake-tap finger hasn't been seen lifting yet — same physical touch.
+  if (s_awaiting_release) {
+    return true;
+  }
+  // Finger has lifted, but we're still inside the post-wake safety floor.
   if (now_us < s_wake_debounce_until_us) {
     return true;
   }
-  if (s_state == State::kDimmed) {
-    transition(State::kActive);
-  }
   return false;
+}
+
+void note_release() {
+  if (!s_inited) return;
+  s_awaiting_release = false;
 }
 
 }  // namespace espressopost::power

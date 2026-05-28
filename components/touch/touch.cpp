@@ -33,7 +33,7 @@ void read_cb(lv_indev_t* /*indev*/, lv_indev_data_t* data) {
 
   if (err == ESP_OK && point_count > 0) {
     // Let the power state machine see the input. If we just woke from
-    // screen-off (or we're still inside the post-wake debounce), drop the
+    // dim/off (or we're still inside the post-wake suppression), drop the
     // event so the wake-up tap doesn't ghost-press an invisible widget.
     if (power::consume_input()) {
       data->state = LV_INDEV_STATE_RELEASED;
@@ -43,6 +43,9 @@ void read_cb(lv_indev_t* /*indev*/, lv_indev_data_t* data) {
     data->point.y = point.y;
     data->state = LV_INDEV_STATE_PRESSED;
   } else {
+    // No touch this frame — let the gate observe the release edge so the
+    // wake-tap's "finger lifted" is recorded; the next press can flow.
+    power::note_release();
     data->state = LV_INDEV_STATE_RELEASED;
   }
 }
