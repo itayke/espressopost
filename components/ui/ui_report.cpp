@@ -73,8 +73,12 @@ constexpr int32_t kSuggestionValueY      = kSuggestionCaptionY + 18;
 constexpr int32_t kBarY                  = 384;
 constexpr int32_t kBarHalfWidth          = 166;
 constexpr int32_t kBarStripHeight        = 36;
-// ±1 grind unit visible across the bar → kBarHalfWidth px per grind unit.
-constexpr float   kBarPxPerUnit          = static_cast<float>(kBarHalfWidth);
+// Px-per-grind-unit for the suggestion-arrow position math. Derived from
+// kGrindSpec.visible_half_range, so changing the bar density automatically
+// keeps the suggestion arrow tracking the right tick. The bar's tick draw
+// uses spec.visible_half_range directly; this constant exists because
+// refresh_suggestion_arrow runs against grind specifically.
+// (Defined inline below kGrindSpec — kGrindSpec isn't visible yet here.)
 
 // Tick sizes. Big = integer (1.0 step), mid = 0.5 step, small = 0.1 step.
 // Big ticks are taller AND thicker so integer landmarks read pre-attentively;
@@ -144,7 +148,7 @@ const lv_color_t kColorLabel        = COLOR(0xB0B0B0);
 // Grinder tick colors. Mid + small share a tier so half-unit ticks read as
 // "longer hairlines" rather than a third distinct stratum.
 const lv_color_t kBigTickColor   = kColorMuted;
-const lv_color_t kMidTickColor   = kColorMuted2;
+const lv_color_t kMidTickColor   = kColorMuted;
 const lv_color_t kSmallTickColor = kColorMuted2;
 const lv_color_t kBarStripBgColor = COLOR(0x28232F);
 
@@ -218,7 +222,7 @@ constexpr float    kMomentumMinSpeed = 0.5f;   // value units/sec — below this
 // area: cursor at the TOP of the screen pointing DOWN at the bar, bar
 // directly below, value readout (BREW TIME caption + big number + DELTA
 // block) below that. Big tick lands on every 10 s, mid tick on every 5 s.
-constexpr int32_t kDeltaBarY = 70;
+constexpr int32_t kDeltaBarY = 82;
 
 // y-band bounds.
 //   - Grind keeps the legacy "everything below the cap separator" range —
@@ -228,11 +232,14 @@ constexpr int32_t kDeltaBarY = 70;
 //     screen down to just above the BREW TIME readout, so a press anywhere
 //     above the readout (including on the downward cursor) starts a scrub.
 //   - The bands cannot overlap. Quiet zone here is y=101–297.
+// visible_half_range × 2 is the total value span across the bar's width.
+// Smaller half-range → more px per tick → finer drag-feel without touching
+// kBarHalfWidth. Tune here when the dial feels too twitchy or too coarse.
 constexpr BarSpec kGrindSpec = {
   /*min*/                kGrindMin,
   /*max*/                kGrindMax,
   /*step*/               model::kGrindStep,
-  /*visible_half_range*/ 1.0f,
+  /*visible_half_range*/ 0.75f,
   /*y*/                  kBarY,
   /*y_band_top*/         298,
   /*y_band_bottom*/      kScreen,
@@ -241,11 +248,16 @@ constexpr BarSpec kGrindSpec = {
   /*tick_unit*/          0.1f,
 };
 
+// Pixels per grind unit, derived from kGrindSpec so changing the bar density
+// automatically keeps refresh_suggestion_arrow's position math correct.
+constexpr float kBarPxPerUnit =
+    static_cast<float>(kBarHalfWidth) / kGrindSpec.visible_half_range;
+
 constexpr BarSpec kDeltaSpec = {
   /*min*/                kDeltaMin,
   /*max*/                kDeltaMax,
   /*step*/               kDeltaStep,
-  /*visible_half_range*/ 10.0f,
+  /*visible_half_range*/ 7.5f,
   /*y*/                  kDeltaBarY,
   /*y_band_top*/         0,
   /*y_band_bottom*/      100,
@@ -315,10 +327,14 @@ lv_obj_t* s_brew_time_caption   = nullptr;  // "BREW TIME" caption left of the v
 lv_obj_t* s_brew_time_value     = nullptr;  // big "30s" readout, centered (Mont 36)
 lv_obj_t* s_brew_delta_caption  = nullptr;  // "DELTA" header right of value, mirror of SUGGESTION caption
 lv_obj_t* s_brew_delta_value    = nullptr;  // "+/-Ns" tinted by abs(delta), mirror of suggestion value line
-lv_obj_t* s_quality_caption     = nullptr;  // "QUALITY" caption above the star row
 lv_obj_t* s_preset_post_label   = nullptr;  // read-only preset string parked on the center line in post mode
 lv_obj_t* s_star_btns [kMaxStars] = {};      // transparent tap targets sized to each star
-lv_obj_t* s_star_icons[kMaxStars] = {};      // outline-star line widgets recolored on toggle
+lv_obj_t* s_star_icons[kMaxStars] = {};      // custom-drawn star widgets (outline when unlit, filled fan when lit)
+// Per-star lit/unlit flag read by draw_star_event each paint. Declared as a
+// forward-friendly POD struct so refresh_stars (which lives earlier in the
+// file) can flip flags without needing the full draw helper visible yet.
+struct StarState { bool lit; };
+StarState s_star_states[kMaxStars] = {};
 lv_obj_t* s_sour_btn       = nullptr;
 lv_obj_t* s_sour_label     = nullptr;
 lv_obj_t* s_bitter_btn     = nullptr;
@@ -713,21 +729,25 @@ void refresh_brew_time_labels() {
     if (delta_s == 0) std::snprintf(buf, sizeof(buf), "0s");
     else              std::snprintf(buf, sizeof(buf), "%+ds", delta_s);
     lv_label_set_text(s_brew_delta_value, buf);
-    lv_obj_set_style_text_color(s_brew_delta_value, delta_color(delta_s),
-                                LV_PART_MAIN);
+    // Caption and value share the tier color so the whole block reads as
+    // one unit — same trick the SUGGESTION block uses with confidence_color.
+    const lv_color_t tier = delta_color(delta_s);
+    lv_obj_set_style_text_color(s_brew_delta_value, tier, LV_PART_MAIN);
+    if (s_brew_delta_caption != nullptr) {
+      lv_obj_set_style_text_color(s_brew_delta_caption, tier, LV_PART_MAIN);
+    }
   }
 }
 
-// Recolor the outline-star line widgets to reflect s_stars_value. Tap targets
-// stay transparent — only the line color changes (accent for lit, muted for
-// unlit).
+// Flip each star's lit flag against s_stars_value and invalidate so the
+// custom draw handler repaints. Lit → filled accent fan; unlit → muted
+// outline. Tap targets stay transparent; only the star icon repaints.
 void refresh_stars() {
   for (uint8_t i = 0; i < kMaxStars; ++i) {
-    if (s_star_icons[i] == nullptr) continue;
-    const bool lit = (i < s_stars_value);
-    lv_obj_set_style_line_color(s_star_icons[i],
-                                lit ? kColorAccent : kColorMuted3,
-                                LV_PART_MAIN);
+    s_star_states[i].lit = (i < s_stars_value);
+    if (s_star_icons[i] != nullptr) {
+      lv_obj_invalidate(s_star_icons[i]);
+    }
   }
 }
 
@@ -1833,17 +1853,6 @@ void update_climate_strip(lv_timer_t*) {
 // ---------------------------------------------------------------------------
 // Widget factories.
 // ---------------------------------------------------------------------------
-lv_obj_t* make_round_btn(lv_obj_t* parent, int32_t size) {
-  lv_obj_t* b = lv_button_create(parent);
-  lv_obj_set_size(b, size, size);
-  lv_obj_set_style_radius(b, size / 2, LV_PART_MAIN);
-  lv_obj_set_style_bg_color(b, kColorMuted3, LV_PART_MAIN);
-  lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_PART_MAIN);
-  lv_obj_set_style_shadow_width(b, 0, LV_PART_MAIN);
-  lv_obj_set_style_border_width(b, 0, LV_PART_MAIN);
-  return b;
-}
-
 lv_obj_t* make_arrow(lv_obj_t* parent, ArrowState* state, int32_t widget_size) {
   lv_obj_t* a = lv_obj_create(parent);
   lv_obj_set_size(a, widget_size, widget_size);
@@ -1858,12 +1867,36 @@ lv_obj_t* make_arrow(lv_obj_t* parent, ArrowState* state, int32_t widget_size) {
   return a;
 }
 
-// 5-point outline star, drawn as a closed lv_line over 11 vertices (5 outer +
-// 5 inner alternating, last vertex closes back to the first). Inner/outer
-// ratio is the golden-ratio classic 0.382. All five Quality stars share the
-// same size, so the polyline lives in one static array that every star line
-// widget points at; lv_line_set_points stores the pointer rather than copying
-// so the array must outlive the widgets, which static handles for free.
+// Draw a filled polygon as a triangle fan rooted at (cx, cy) — works for any
+// shape whose centroid lies inside the polygon (convex, plus star-shaped
+// concave shapes like a 5-point star). Emits n_segments triangles, one per
+// (pts[i], pts[i+1]) edge. Caller is responsible for ordering points so
+// consecutive vertices form actual polygon edges; for a closed polygon, pass
+// the array with the first vertex repeated at the end and n_segments =
+// len - 1. Reusable building block for any future filled-icon drawing.
+void draw_filled_polygon_fan(lv_layer_t* layer,
+                             lv_value_precise_t cx, lv_value_precise_t cy,
+                             const lv_point_precise_t* pts, size_t n_segments,
+                             lv_color_t color, lv_opa_t opa = LV_OPA_COVER) {
+  lv_draw_triangle_dsc_t tri;
+  lv_draw_triangle_dsc_init(&tri);
+  tri.color = color;
+  tri.opa   = opa;
+  for (size_t i = 0; i < n_segments; ++i) {
+    tri.p[0].x = cx;
+    tri.p[0].y = cy;
+    tri.p[1]   = pts[i];
+    tri.p[2]   = pts[i + 1];
+    lv_draw_triangle(layer, &tri);
+  }
+}
+
+// 5-point star polyline, 11 vertices (5 outer + 5 inner alternating, with the
+// first vertex repeated at index 10 to close the polygon). Inner/outer ratio
+// is the golden-ratio classic 0.382. All five Quality stars share the same
+// size, so the polyline lives in a single static array that every star widget
+// references; the draw handler translates it to layer coords per paint, so
+// the array can be widget-relative and shared across positions.
 constexpr int32_t kStarSize = 38;
 lv_point_precise_t s_star_polyline[11];
 bool s_star_polyline_built = false;
@@ -1883,14 +1916,63 @@ void build_star_polyline() {
   s_star_polyline_built = true;
 }
 
-lv_obj_t* make_star(lv_obj_t* parent, lv_color_t color) {
+void draw_star_event(lv_event_t* e) {
+  lv_layer_t* layer = lv_event_get_layer(e);
+  if (layer == nullptr) return;
+  auto* obj   = static_cast<lv_obj_t*>(lv_event_get_target(e));
+  auto* state = static_cast<StarState*>(lv_obj_get_user_data(obj));
+  if (state == nullptr) return;
+
+  lv_area_t coords;
+  lv_obj_get_coords(obj, &coords);
+  const auto ox = static_cast<lv_value_precise_t>(coords.x1);
+  const auto oy = static_cast<lv_value_precise_t>(coords.y1);
+
+  // Translate widget-relative polyline → layer-absolute coords for this paint.
+  lv_point_precise_t pts[11];
+  for (int i = 0; i < 11; ++i) {
+    pts[i].x = s_star_polyline[i].x + ox;
+    pts[i].y = s_star_polyline[i].y + oy;
+  }
+
+  if (state->lit) {
+    // Fill: 10-wedge triangle fan from the star's center through each pair
+    // of consecutive outer/inner vertices.
+    const lv_value_precise_t cx =
+        ox + static_cast<lv_value_precise_t>(kStarSize) * 0.5f;
+    const lv_value_precise_t cy =
+        oy + static_cast<lv_value_precise_t>(kStarSize) * 0.5f;
+    draw_filled_polygon_fan(layer, cx, cy, pts, 10, kColorAccent);
+  } else {
+    // Outline: 10 stroke segments with rounded caps so the joints read as
+    // continuous (matches the prior lv_line widget output).
+    lv_draw_line_dsc_t line;
+    lv_draw_line_dsc_init(&line);
+    line.color       = kColorMuted3;
+    line.width       = 3;
+    line.opa         = LV_OPA_COVER;
+    line.round_start = 1;
+    line.round_end   = 1;
+    for (int i = 0; i < 10; ++i) {
+      line.p1 = pts[i];
+      line.p2 = pts[i + 1];
+      lv_draw_line(layer, &line);
+    }
+  }
+}
+
+lv_obj_t* make_star(lv_obj_t* parent, StarState* state) {
   build_star_polyline();
-  lv_obj_t* line = lv_line_create(parent);
-  lv_line_set_points(line, s_star_polyline, 11);
-  lv_obj_set_style_line_color(line, color, LV_PART_MAIN);
-  lv_obj_set_style_line_width(line, 3, LV_PART_MAIN);
-  lv_obj_set_style_line_rounded(line, true, LV_PART_MAIN);
-  return line;
+  lv_obj_t* w = lv_obj_create(parent);
+  lv_obj_set_size(w, kStarSize, kStarSize);
+  lv_obj_set_style_bg_opa(w, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(w, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(w, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(w, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(w, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_user_data(w, state);
+  lv_obj_add_event_cb(w, draw_star_event, LV_EVENT_DRAW_MAIN, nullptr);
+  return w;
 }
 
 // ---------------------------------------------------------------------------
@@ -2203,8 +2285,8 @@ void build_post_group(lv_obj_t* scr) {
   // cap separator at y=295, big grind number, GRIND VALUE caption,
   // SUGGESTION block, grind bar — is unchanged across both modes.
   //
-  //   y= 42  delta cursor tip (downward arrow, mirror of grind cursor)
-  //   y= 70  delta bar (kDeltaBarY; band [0, 100])
+  //   y= 54  delta cursor tip (downward arrow, mirror of grind cursor)
+  //   y= 82  delta bar (kDeltaBarY; band [0, 100])
   //   y=115  BREW TIME caption (left, x=50) · value "30s" Mont 36 (center,
   //          glyph row y=96–134) · DELTA + "+/-Ns" two-line block (right)
   //   y=138  5-star row (kStarSize=38; reads as "quality" without a label —
@@ -2249,7 +2331,20 @@ void build_post_group(lv_obj_t* scr) {
   lv_obj_set_style_text_color(s_brew_time_caption, kColorLabel, LV_PART_MAIN);
   lv_obj_set_style_text_font(s_brew_time_caption, &lv_font_montserrat_14, LV_PART_MAIN);
   lv_label_set_text(s_brew_time_caption, "BREW TIME");
-  lv_obj_set_pos(s_brew_time_caption, kGrindCaptionX, kBrewCaptionTopY);
+  // Visually anchor BREW TIME under the same horizontal column center as
+  // GRIND VALUE. Both are auto-sized labels with different widths, so a
+  // shared left edge (kGrindCaptionX) would leave their centers misaligned —
+  // measure GRIND VALUE's width and offset BREW TIME so its center matches.
+  // build_grinder runs before build_post_group, so s_grind_caption has been
+  // text-set + auto-sized; update_layout makes the width query reliable
+  // before LVGL's own layout pass at the end of start_report.
+  lv_obj_update_layout(s_grind_caption);
+  lv_obj_update_layout(s_brew_time_caption);
+  const int32_t grind_caption_cx =
+      kGrindCaptionX + lv_obj_get_width(s_grind_caption) / 2;
+  const int32_t brew_caption_x =
+      grind_caption_cx - lv_obj_get_width(s_brew_time_caption) / 2;
+  lv_obj_set_pos(s_brew_time_caption, brew_caption_x, kBrewCaptionTopY);
 
   s_brew_time_value = lv_label_create(s_post_group);
   lv_obj_set_style_text_color(s_brew_time_value, kColorText, LV_PART_MAIN);
@@ -2298,7 +2393,7 @@ void build_post_group(lv_obj_t* scr) {
     lv_obj_add_event_cb(tap, on_star_tap, LV_EVENT_CLICKED,
                         reinterpret_cast<void*>(static_cast<uintptr_t>(i)));
     s_star_btns[i]  = tap;
-    s_star_icons[i] = make_star(tap, kColorMuted3);
+    s_star_icons[i] = make_star(tap, &s_star_states[i]);
   }
 
   // --- Sour / Bitter toggle pills ---

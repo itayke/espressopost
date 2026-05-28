@@ -61,9 +61,12 @@ struct Guard {
   ~Guard() { if (ok) xSemaphoreGive(s_lock); }
 };
 
-// One-time rewrite of /littlefs/shots.bin from v2 records (32 B) to v3
-// records (40 B). Runs once on the first boot after the schema bump and
-// becomes a no-op forever after, gated by the first record's version byte.
+// One-time rewrite of /littlefs/shots.bin from pre-v3 records (32 B) up to
+// the current 40 B layout. Runs once on the first boot after a schema bump
+// and becomes a no-op forever after, gated by the first record's version
+// byte. v3 and v4 share the same 40 B layout — the v4 schema only carved
+// taste_flags out of v3's reserved bytes (which read as zero, "none
+// reported"), so a v3 file needs no rewrite.
 //
 // Safety: writes to shots.bin.tmp first and only renames on success, so a
 // power loss mid-migration leaves the original file intact and the next
@@ -87,17 +90,18 @@ esp_err_t migrate_to_v3() {
     ESP_LOGE(kTag, "migrate: failed to read first byte");
     return ESP_FAIL;
   }
-  if (first_version >= kRecordVersion) {
+  // v3 and v4 share the 40-byte layout (see file-header comment), so
+  // anything at v3 or newer is already current — no rewrite needed.
+  if (first_version >= 3) {
     std::fclose(in);
-    return ESP_OK;  // already v3 (or newer) — nothing to do
+    return ESP_OK;
   }
   // v1 and v2 share an identical 32-byte wire layout — v2 only renamed the
   // last three bytes from `_pad[3]` to `flags + _reserved[2]`. Reading a v1
   // record as ShotRecordV2 yields flags=0 + _reserved=0, which is the
   // correct semantic (v1 had no flags). The version byte is the only real
-  // difference and we overwrite it during migration anyway. So accept any
-  // version < kRecordVersion as "v2-shaped".
-  if (first_version < 1 || first_version > 2) {
+  // difference and we overwrite it during migration anyway.
+  if (first_version < 1) {
     std::fclose(in);
     ESP_LOGE(kTag, "migrate: unsupported on-disk version %u",
              static_cast<unsigned>(first_version));
