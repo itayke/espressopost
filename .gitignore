@@ -8,3 +8,4 @@ dependencies.lock
 .idea/
 .DS_Store
 *.swp
+/tools/__pycache__
