@@ -87,6 +87,9 @@ constexpr int32_t kMidTickLen         = 18;
 constexpr int32_t kMidTickThickness   = 1;
 constexpr int32_t kSmallTickLen       = 8;
 constexpr int32_t kSmallTickThickness = 1;
+// Background rail height — matches the small (0.1) tick so the rail reads as
+// the substrate those ticks sit on; big and mid ticks extend past it.
+constexpr int32_t kBarStripBgHeight   = 14;
 // Tick colors are declared after the kColor* palette below.
 
 // Time-delta range. Wider than realistic so a long-pull-and-channel doesn't
@@ -141,6 +144,7 @@ const lv_color_t kColorLabel        = COLOR(0xB0B0B0);
 const lv_color_t kBigTickColor   = kColorMuted;
 const lv_color_t kMidTickColor   = kColorMuted2;
 const lv_color_t kSmallTickColor = kColorMuted2;
+const lv_color_t kBarStripBgColor = COLOR(0x28232F);
 
 // ---------------------------------------------------------------------------
 // UI modes. The grinder bar + cursor + value text stay live across both;
@@ -371,6 +375,18 @@ void draw_grind_bar(lv_event_t* e) {
   lv_obj_get_coords(obj, &coords);
   const int32_t cx = coords.x1 + lv_area_get_width(&coords)  / 2;
   const int32_t cy = coords.y1 + lv_area_get_height(&coords) / 2;
+
+  // Background rail. Drawn first so the ticks paint on top; sized to the
+  // small-tick height so the big and mid ticks still stick proud of the rail.
+  {
+    lv_draw_rect_dsc_t bg_dsc;
+    lv_draw_rect_dsc_init(&bg_dsc);
+    bg_dsc.bg_color = kBarStripBgColor;
+    bg_dsc.bg_opa   = LV_OPA_COVER;
+    lv_area_t bg_a = {cx - kBarHalfWidth, cy - kBarStripBgHeight / 2,
+                      cx + kBarHalfWidth, cy + kBarStripBgHeight / 2};
+    lv_draw_rect(layer, &bg_dsc, &bg_a);
+  }
 
   // Visible range of grind values across the bar. A small over-scan keeps a
   // tick from popping in/out at the very edge as the value scrolls.
