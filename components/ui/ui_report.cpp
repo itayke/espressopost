@@ -72,7 +72,7 @@ constexpr int32_t kSuggestionValueY      = kSuggestionCaptionY + 18;
 // Sized to hug the round-display chord at kBarY while keeping small-tick
 // spacing (kBarHalfWidth / 10 px) readable.
 constexpr int32_t kBarY                  = 384;
-constexpr int32_t kBarHalfWidth          = 180;
+constexpr int32_t kBarHalfWidth          = 166;
 constexpr int32_t kBarStripHeight        = 36;
 // ±1 grind unit visible across the bar → kBarHalfWidth px per grind unit.
 constexpr float   kBarPxPerUnit          = static_cast<float>(kBarHalfWidth);
@@ -383,6 +383,9 @@ void draw_grind_bar(lv_event_t* e) {
     lv_draw_rect_dsc_init(&bg_dsc);
     bg_dsc.bg_color = kBarStripBgColor;
     bg_dsc.bg_opa   = LV_OPA_COVER;
+    // Pill ends — half-height radius rounds both caps without affecting the
+    // straight middle section.
+    bg_dsc.radius   = LV_RADIUS_CIRCLE;
     lv_area_t bg_a = {cx - kBarHalfWidth, cy - kBarStripBgHeight / 2,
                       cx + kBarHalfWidth, cy + kBarStripBgHeight / 2};
     lv_draw_rect(layer, &bg_dsc, &bg_a);
