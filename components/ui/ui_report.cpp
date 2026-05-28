@@ -218,6 +218,10 @@ model::Suggestion s_current_suggestion = {std::nanf(""), 0};
 bool    s_delta_set    = false;
 int8_t  s_delta_value  = 0;
 uint8_t s_stars_value  = 0;
+// Bar's visual position — free-floating during a drag and the post-release
+// glide, snapped to model::kGrindStep at end-of-glide or release-without-glide.
+// The big readout rounds for display every frame so the number never reads a
+// sub-step value while the bar slides smoothly underneath.
 float   s_grind_value  = 0.0f;
 
 // Grinder drag state — captured at PRESSED, advanced on PRESSING, persisted on
@@ -226,19 +230,15 @@ float   s_grind_value  = 0.0f;
 // doesn't bleed into a horizontal swipe.
 bool    s_grinder_dragging  = false;
 int32_t s_drag_last_x       = 0;  // screen x of previous PRESSING sample
-// Un-snapped grind value tracked during a drag. The displayed s_grind_value
-// rounds to 0.1; this one tracks the finger exactly so slow motion under
-// the snap quantum still accumulates across frames instead of being
-// discarded. Seeded from s_grind_value on PRESSED.
-float s_grind_value_raw     = 0.0f;
 
 // ---------------------------------------------------------------------------
 // Flick momentum. After release, carry the user's swipe velocity for ~500 ms
 // with exponential decay so the dial feels like a flywheel coasting to rest.
 // Velocity is tracked in grind units / second via an EMA over PRESSING
 // samples (single jittery samples shouldn't define the release velocity).
-// The momentum timer feeds the same s_grind_value_raw accumulator that a
-// live drag uses, so snapping / clamping / label refresh all run identically.
+// The momentum timer advances s_grind_value the same way a live drag does,
+// then snaps to the kGrindStep grid on settle so the bar doesn't rest between
+// ticks.
 // ---------------------------------------------------------------------------
 constexpr uint32_t kMomentumPeriodMs = 30;     // tick cadence — matches LVGL task
 constexpr int      kMomentumMaxTicks = 17;     // ≈500 ms at 30 ms/tick
@@ -350,11 +350,12 @@ void draw_arrow_event(lv_event_t* e) {
 }
 
 // ---------------------------------------------------------------------------
-// Grinder bar — LV_EVENT_DRAW_MAIN handler. The dial value snaps to 0.05, so
-// the cursor (fixed at bar center) often sits *between* two 0.1-step ticks.
-// We iterate 0.1-step indices (integers numbered in tenths of a grind unit)
-// and project each one to its x-position on the bar relative to the cursor's
-// current value. The cursor doesn't have to coincide with a tick.
+// Grinder bar — LV_EVENT_DRAW_MAIN handler. The dial value floats freely while
+// dragging (snapping only at release / momentum-end), so the cursor (fixed at
+// bar center) typically sits *between* the 0.1-step ticks. We iterate
+// 0.1-step indices (integers numbered in tenths of a grind unit) and project
+// each one to its x-position on the bar relative to the cursor's current
+// value. The cursor doesn't have to coincide with a tick.
 //
 // Direction convention: standard horizontal scale. LOWER (finer) values
 // sit LEFT of the cursor; HIGHER (coarser) values sit RIGHT. Drag is
@@ -518,8 +519,12 @@ void refresh_grinder() {
 void refresh_grind_value_label() {
   if (s_grind_value_label == nullptr) return;
   char buf[12];
-  // Two-decimal readout (e.g. "5.10", "5.15") — value snaps to 0.05.
-  std::snprintf(buf, sizeof(buf), "%.2f", static_cast<double>(s_grind_value));
+  // Two-decimal readout (e.g. "5.10", "5.15"). The bar position floats
+  // sub-step during a drag/glide, so round to the 0.05 grid here — otherwise
+  // the number would twitch across ten sub-step values for one finger nudge.
+  const float displayed =
+      std::round(s_grind_value / model::kGrindStep) * model::kGrindStep;
+  std::snprintf(buf, sizeof(buf), "%.2f", static_cast<double>(displayed));
   lv_label_set_text(s_grind_value_label, buf);
 }
 
@@ -782,15 +787,14 @@ void on_submit(lv_event_t*) {
 }
 
 // Apply one frame of post-release momentum. Decays the velocity, advances
-// s_grind_value_raw by velocity·dt, and re-uses the same snap + redraw path
-// that the live drag uses so the visual behavior is identical. Persists the
-// grind value to NVS at the end of the glide (matching the RELEASED contract).
+// s_grind_value by velocity·dt (sub-step, free-floating), and refreshes the
+// bar + label every tick. On settle, snaps to model::kGrindStep and persists
+// to NVS so the per-preset slot stores the grid value, not the sub-step
+// coast-to-rest position.
 void momentum_tick(lv_timer_t* t) {
   const float dt_s = static_cast<float>(kMomentumPeriodMs) / 1000.0f;
-  s_grind_value_raw = std::clamp(s_grind_value_raw + s_drag_velocity * dt_s,
-                                 kGrindMin, kGrindMax);
-  const float new_value =
-      std::round(s_grind_value_raw / model::kGrindStep) * model::kGrindStep;
+  const float new_value = std::clamp(s_grind_value + s_drag_velocity * dt_s,
+                                     kGrindMin, kGrindMax);
   if (new_value != s_grind_value) {
     s_grind_value = new_value;
     refresh_grinder();
@@ -800,14 +804,21 @@ void momentum_tick(lv_timer_t* t) {
   --s_momentum_ticks_left;
 
   // Stop when we've coasted long enough, the velocity has decayed below the
-  // noise floor, or we've pinned to the dial range. Persist on the way out
-  // so the per-preset NVS slot reflects the post-glide value, not the value
-  // at finger-up.
-  const bool at_edge = (s_grind_value_raw <= kGrindMin + 1e-4f) ||
-                       (s_grind_value_raw >= kGrindMax - 1e-4f);
+  // noise floor, or we've pinned to the dial range. Snap to the 0.05 grid
+  // before persisting so the bar lands on a tick and the NVS slot stores a
+  // clean step.
+  const bool at_edge = (s_grind_value <= kGrindMin + 1e-4f) ||
+                       (s_grind_value >= kGrindMax - 1e-4f);
   if (s_momentum_ticks_left <= 0 ||
       std::fabs(s_drag_velocity) < kMomentumMinSpeed ||
       at_edge) {
+    const float snapped =
+        std::round(s_grind_value / model::kGrindStep) * model::kGrindStep;
+    if (snapped != s_grind_value) {
+      s_grind_value = snapped;
+      refresh_grinder();
+      refresh_grind_value_label();
+    }
     presets::set_last_grind(presets::selected_id(), s_grind_value);
     s_drag_velocity = 0.0f;
     s_momentum_timer = nullptr;
@@ -853,10 +864,6 @@ void on_grinder_event(lv_event_t* e) {
       s_grinder_dragging = true;
       s_drag_last_x      = p.x;
       s_drag_last_us     = esp_timer_get_time();
-      // Seed the raw value at the snapped one so sub-snap motion can
-      // accumulate from there. Without this we'd lose any partial-step
-      // motion the user has built up in a previous drag.
-      s_grind_value_raw  = s_grind_value;
       break;
     }
     case LV_EVENT_PRESSING: {
@@ -870,16 +877,13 @@ void on_grinder_event(lv_event_t* e) {
       // were just off-screen to the LEFT; pulling the bar right brings
       // them into view at center.
       //
-      // Apply the delta to the un-snapped raw value, then snap for display.
-      // Slow finger motion that produces <0.05 grind units per frame would
-      // be discarded by snap-then-store, but the raw accumulator picks it
-      // up across frames and tips over the snap boundary once enough motion
-      // has built up.
+      // The bar slides at sub-step resolution; the readout rounds to
+      // model::kGrindStep inside refresh_grind_value_label so the number
+      // doesn't twitch across sub-step values mid-drag. Snap happens at
+      // release / momentum-end, not per-frame here.
       const float dv = -static_cast<float>(dx_px) / kBarPxPerUnit;
-      s_grind_value_raw =
-          std::clamp(s_grind_value_raw + dv, kGrindMin, kGrindMax);
       const float new_value =
-          std::round(s_grind_value_raw / model::kGrindStep) * model::kGrindStep;
+          std::clamp(s_grind_value + dv, kGrindMin, kGrindMax);
       if (new_value != s_grind_value) {
         s_grind_value = new_value;
         refresh_grinder();
@@ -914,7 +918,16 @@ void on_grinder_event(lv_event_t* e) {
               lv_timer_create(momentum_tick, kMomentumPeriodMs, nullptr);
         }
       } else {
+        // No glide; snap the bar to the 0.05 grid right away so it doesn't
+        // sit between ticks once the finger leaves the screen.
         s_drag_velocity = 0.0f;
+        const float snapped =
+            std::round(s_grind_value / model::kGrindStep) * model::kGrindStep;
+        if (snapped != s_grind_value) {
+          s_grind_value = snapped;
+          refresh_grinder();
+          refresh_grind_value_label();
+        }
         presets::set_last_grind(presets::selected_id(), s_grind_value);
       }
       break;
