@@ -6,9 +6,14 @@
 
 namespace espressopost::presets {
 
-// Hard cap so on-screen selectors stay finite and so the NVS blob keys
-// (`p0`..`p7`) never collide with anything else in the namespace.
-constexpr uint8_t kMaxPresets = 8;
+// Fixed number of preset slots the user can address. Not all slots are
+// necessarily active at any moment: a slot is "active" when an NVS blob
+// exists for it, "inactive" when none does. The editor (when it lands)
+// creates a slot by calling set() on an inactive id and deletes one by
+// calling clear() — there is no add/remove; the slot itself is permanent
+// and only the data inside it appears/disappears. Selection (tap-to-cycle)
+// skips inactive slots without collapsing the numbering.
+constexpr uint8_t kMaxPresets = 10;
 constexpr uint8_t kNameLen    = 16;   // including NUL terminator
 
 // One brew preset. Persisted as a packed blob under NVS key `pN` so the
@@ -31,6 +36,10 @@ constexpr uint8_t kNameLen    = 16;   // including NUL terminator
 // is implicit (`yield_g / dose_g`); no separate ratio field. Not surfaced
 // on the ShotRecord — shots carry only the dialed grind + the time delta,
 // not the per-shot yield.
+//
+// `name` is retained for wire-format stability but is no longer surfaced
+// in the UI — slots are addressed by their 1-based index ("PRESET N").
+// A future v4 schema bump may drop the field outright.
 struct __attribute__((packed)) Preset {
   uint8_t version;          // 3 (current)
   uint8_t target_time_s;
@@ -46,21 +55,40 @@ static_assert(sizeof(Preset) == 24, "Preset NVS blob size must be stable");
 // on a second call.
 esp_err_t init();
 
-// How many presets are currently configured (always >= 1 once `init()` has
-// returned ESP_OK).
+// Number of currently active slots (0..kMaxPresets). May be 0 if the user
+// has cleared every slot — callers should be prepared for an empty state.
 uint8_t count();
 
-// Which preset is currently active (0..count()-1). Used by the Report screen
-// and written into every ShotRecord.
+// True if slot `id` holds a preset. Cheap; no NVS access. False for any
+// out-of-range id and for any cleared slot.
+bool is_active(uint8_t id);
+
+// Which preset is currently active (0..kMaxPresets-1, always points at an
+// active slot when any exist). Used by the Report screen and written into
+// every ShotRecord.
 uint8_t selected_id();
 
-// Read-only view of a preset by id. Returns an empty Preset (all zeros) if
-// `id >= count()`.
+// Read-only view of a preset by id. Returns an empty Preset (all zeros,
+// `version == 0`) if `id` is out of range or the slot is inactive.
 Preset get(uint8_t id);
 
-// Cycle to the next preset, persist the selection to NVS, and return the new
-// selected id. Wraps around at count(). Cheap; no measurable wear for daily use.
+// Cycle to the next active preset, persist the selection to NVS, and return
+// the new selected id. Skips inactive slots without collapsing the
+// numbering (e.g. with slots 1/3/5 active, the sequence is 1→3→5→1). If
+// only one slot is active the selection doesn't change.
 uint8_t cycle_selected();
+
+// Write a preset into slot `id`. Creates the slot if it was inactive and
+// updates it in place otherwise. `version` is stamped automatically. The
+// blob is committed to NVS before returning. Returns ESP_ERR_INVALID_ARG
+// for an out-of-range id.
+esp_err_t set(uint8_t id, const Preset& p);
+
+// Delete the preset in slot `id`. If `id` was the selected slot, selection
+// auto-advances to the next active slot (or stays put if no other active
+// slot exists). Clearing an already-inactive slot is a no-op success.
+// Returns ESP_ERR_INVALID_ARG for an out-of-range id.
+esp_err_t clear(uint8_t id);
 
 // Last grind value the user dialed for this preset, persisted across reboots.
 // Falls back to the preset's `grind_anchor` if no value has been stored yet.

@@ -342,15 +342,30 @@ BarState s_delta = {};
 // Idle group:
 lv_obj_t* s_idle_group          = nullptr;
 lv_obj_t* s_preset_btn          = nullptr;   // tappable preset cycler on the idle center line
-lv_obj_t* s_preset_label        = nullptr;   // two-line "NAME / Xg, Ys" inside s_preset_btn
+
+// Two-line preset readout: top label = "PRESET N" (MS24), bottom row =
+// [dose label | arrow | yield label | time label] in MS14. The same
+// struct is built twice — once inside s_preset_btn for the idle/tappable
+// surface and once inside s_post_group for the read-only post-mode
+// surface — so refresh_preset_label() can push values to both with a
+// single loop.
+struct PresetReadout {
+  lv_obj_t* root;   // outer flex column container
+  lv_obj_t* top;    // "PRESET N" label
+  lv_obj_t* dose;   // "Xg" label
+  lv_obj_t* yield;  // "Xg" label
+  lv_obj_t* time;   // " Ys" label (leading space — visually separates the brew ratio from the time)
+};
 lv_obj_t* s_post_btn            = nullptr;
 
-// Post-mode read-only preset label (same two-line text as s_preset_label,
-// no button chrome since cycling presets mid-form would invalidate the
-// delta bar's seeded default). QUALITY caption sits next to the star row
-// above the center line.
-lv_obj_t* s_preset_post_label   = nullptr;
-lv_obj_t* s_quality_caption     = nullptr;
+// Idle-mode readout (lives inside s_preset_btn) and post-mode read-only
+// readout (lives inside s_post_group). The post variant has no button
+// chrome since cycling presets mid-form would invalidate the delta bar's
+// seeded default. QUALITY caption sits next to the star row above the
+// center line.
+PresetReadout s_idle_preset     = {};
+PresetReadout s_post_preset     = {};
+lv_obj_t*     s_quality_caption = nullptr;
 
 // Climate strip — three tap-to-toggle tiles in the top 40% of the screen.
 // Each tile is a button (taps cycle the unit); inside lives a custom-drawn
@@ -732,23 +747,122 @@ void refresh_grind_value_label() {
   lv_label_set_text(s_grind_value_label, buf);
 }
 
+// Arrow widget for the bottom row of the preset readout. Two strokes:
+// a horizontal shaft and a V-shape head opening to the right. Sized to
+// vertically pair with MS14 text — y-offset can be nudged later if the
+// baseline disagrees. Color is passed in so the arrow re-tints with text.
+lv_obj_t* build_preset_arrow(lv_obj_t* parent, lv_color_t color) {
+  constexpr int32_t kArrowW = 12;
+  constexpr int32_t kArrowH = 10;
+  constexpr int32_t kStroke = 1;
+  constexpr float   kMidY   = kArrowH / 2.0f;  // float context — LV_USE_FLOAT is on
+  // Static so both readouts can share the same vertex buffers without
+  // duplicating arrays — lv_line just stores the pointer.
+  static lv_point_precise_t shaft_pts[] = {
+      {0,           kMidY},
+      {kArrowW - 4, kMidY},
+  };
+  static lv_point_precise_t head_pts[] = {
+      {kArrowW - 4, 2},
+      {kArrowW - 1, kMidY},
+      {kArrowW - 4, kArrowH - 2},
+  };
+
+  lv_obj_t* container = lv_obj_create(parent);
+  lv_obj_set_size(container, kArrowW, kArrowH);
+  lv_obj_set_style_bg_opa(container, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(container, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(container, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(container, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(container, LV_OBJ_FLAG_SCROLLABLE);
+
+  auto stroke = [&](const lv_point_precise_t* pts, uint32_t n) {
+    lv_obj_t* line = lv_line_create(container);
+    lv_line_set_points(line, pts, n);
+    lv_obj_set_style_line_color(line, color, LV_PART_MAIN);
+    lv_obj_set_style_line_width(line, kStroke, LV_PART_MAIN);
+    lv_obj_set_style_line_rounded(line, true, LV_PART_MAIN);
+  };
+  stroke(shaft_pts, 2);
+  stroke(head_pts,  3);
+  return container;
+}
+
 // Build the two-line preset readout consumed by both the idle (tappable)
-// preset button and the post-mode (read-only) preset label. Line 1 is the
-// preset name; line 2 is the brew recipe (grams, seconds) — the user reads
-// the active preset and target weight/time at a glance without leaving
-// the screen. Both modes use the same text so cycling presets in idle
-// pre-stages exactly what post mode will display on entry.
+// preset button and the post-mode (read-only) surface. Top line is the
+// 1-based slot index ("PRESET N", MS24); bottom line is a flex row
+// [dose | arrow | yield | time] in MS14 — the user reads the active
+// preset and target values at a glance without leaving the screen. Both
+// modes share the same readout layout so cycling presets in idle
+// pre-stages exactly what post mode will display on entry. Names live in
+// the Preset struct for wire-format continuity but are no longer surfaced
+// — slots are identified by index.
+PresetReadout build_preset_readout(lv_obj_t* parent) {
+  PresetReadout r = {};
+
+  r.root = lv_obj_create(parent);
+  lv_obj_set_size(r.root, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(r.root, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(r.root, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(r.root, 0, LV_PART_MAIN);
+  lv_obj_set_layout(r.root, LV_LAYOUT_FLEX);
+  lv_obj_set_flex_flow(r.root, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(r.root, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_clear_flag(r.root, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(r.root, LV_OBJ_FLAG_SCROLLABLE);
+
+  r.top = lv_label_create(r.root);
+  lv_obj_set_style_text_color(r.top, kColorText, LV_PART_MAIN);
+  lv_obj_set_style_text_font(r.top, &lv_font_montserrat_24, LV_PART_MAIN);
+  lv_obj_set_style_text_align(r.top, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+
+  lv_obj_t* row = lv_obj_create(r.root);
+  lv_obj_set_size(row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(row, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(row, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_column(row, 4, LV_PART_MAIN);
+  lv_obj_set_layout(row, LV_LAYOUT_FLEX);
+  lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_clear_flag(row, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+  auto small_label = [&]() {
+    lv_obj_t* l = lv_label_create(row);
+    lv_obj_set_style_text_color(l, kColorText, LV_PART_MAIN);
+    lv_obj_set_style_text_font(l, &lv_font_montserrat_14, LV_PART_MAIN);
+    return l;
+  };
+  r.dose = small_label();
+  build_preset_arrow(row, kColorText);
+  r.yield = small_label();
+  r.time  = small_label();
+  return r;
+}
+
+// Push the current preset's values into both readouts.
 void refresh_preset_label() {
-  const auto p = presets::get(presets::selected_id());
-  char buf[40];
-  std::snprintf(buf, sizeof(buf), "%s\n%ug, %us", p.name,
-                static_cast<unsigned>(p.dose_g),
+  const uint8_t slot = presets::selected_id();
+  const auto    p    = presets::get(slot);
+  char top_buf[16], dose_buf[8], yield_buf[8], time_buf[8];
+  std::snprintf(top_buf,   sizeof(top_buf),   "PRESET %u",
+                static_cast<unsigned>(slot + 1));
+  std::snprintf(dose_buf,  sizeof(dose_buf),  "%ug",
+                static_cast<unsigned>(p.dose_g));
+  std::snprintf(yield_buf, sizeof(yield_buf), "%ug",
+                static_cast<unsigned>(p.yield_g));
+  std::snprintf(time_buf,  sizeof(time_buf),  " %us",
                 static_cast<unsigned>(p.target_time_s));
-  if (s_preset_label != nullptr) {
-    lv_label_set_text(s_preset_label, buf);
-  }
-  if (s_preset_post_label != nullptr) {
-    lv_label_set_text(s_preset_post_label, buf);
+
+  for (PresetReadout* r : {&s_idle_preset, &s_post_preset}) {
+    if (r->root == nullptr) continue;
+    lv_label_set_text(r->top,   top_buf);
+    lv_label_set_text(r->dose,  dose_buf);
+    lv_label_set_text(r->yield, yield_buf);
+    lv_label_set_text(r->time,  time_buf);
   }
 }
 
@@ -2345,21 +2459,19 @@ void build_idle_group(lv_obj_t* scr) {
 
   // Preset selector — tap-to-cycle two-line label centered on the center
   // line (POST btn lives to the right; preset is the dominant readout).
-  // Lives in s_idle_group so it hides in post mode, where
-  // s_preset_post_label takes its place at the same anchor (read-only —
-  // cycling presets mid-form would invalidate the delta seed).
+  // Lives in s_idle_group so it hides in post mode, where the post readout
+  // takes its place at the same anchor (read-only — cycling presets
+  // mid-form would invalidate the delta seed).
   s_preset_btn = lv_button_create(s_idle_group);
   lv_obj_set_style_bg_opa(s_preset_btn, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_shadow_width(s_preset_btn, 0, LV_PART_MAIN);
   lv_obj_set_style_border_width(s_preset_btn, 0, LV_PART_MAIN);
   lv_obj_set_style_pad_all(s_preset_btn, 6, LV_PART_MAIN);
+  lv_obj_set_size(s_preset_btn, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
   lv_obj_align(s_preset_btn, LV_ALIGN_CENTER, 0, kCenterLineOffsetY);
   lv_obj_add_event_cb(s_preset_btn, on_preset_tap, LV_EVENT_CLICKED, nullptr);
-  s_preset_label = lv_label_create(s_preset_btn);
-  lv_obj_set_style_text_color(s_preset_label, kColorText, LV_PART_MAIN);
-  lv_obj_set_style_text_font(s_preset_label, &lv_font_montserrat_24, LV_PART_MAIN);
-  lv_obj_set_style_text_align(s_preset_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-  lv_obj_center(s_preset_label);
+  s_idle_preset = build_preset_readout(s_preset_btn);
+  lv_obj_center(s_idle_preset.root);
 }
 
 void build_post_group(lv_obj_t* scr) {
@@ -2578,13 +2690,8 @@ void build_post_group(lv_obj_t* scr) {
   // its border + label color is driven by refresh_submit_enabled and
   // toggles between kColorSubmitEnabled (humidity blue) and
   // kColorSubmitDisabled (muted gray).
-  s_preset_post_label = lv_label_create(s_post_group);
-  lv_obj_set_style_text_color(s_preset_post_label, kColorText, LV_PART_MAIN);
-  lv_obj_set_style_text_font(s_preset_post_label, &lv_font_montserrat_24,
-                             LV_PART_MAIN);
-  lv_obj_set_style_text_align(s_preset_post_label, LV_TEXT_ALIGN_CENTER,
-                              LV_PART_MAIN);
-  lv_obj_align(s_preset_post_label, LV_ALIGN_CENTER, 0, kCenterLineOffsetY);
+  s_post_preset = build_preset_readout(s_post_group);
+  lv_obj_align(s_post_preset.root, LV_ALIGN_CENTER, 0, kCenterLineOffsetY);
 
   s_cancel_btn = lv_button_create(s_post_group);
   lv_obj_set_size(s_cancel_btn, kPostBtnH, kPostBtnH);

@@ -14,9 +14,8 @@ constexpr const char* kNamespace = "presets";
 constexpr const char* kKeyCount  = "count";
 constexpr const char* kKeySel    = "selected";
 
-bool    s_inited      = false;
-uint8_t s_count       = 0;
-uint8_t s_selected    = 0;
+bool    s_inited   = false;
+uint8_t s_selected = 0;
 Preset  s_table[kMaxPresets] = {};
 
 constexpr uint8_t kPresetVersion = 3;
@@ -70,7 +69,10 @@ void grind_key(uint8_t i, char out[4]) {
 }
 
 esp_err_t seed_defaults(nvs_handle_t h) {
-  s_count = kDefaultCount;
+  // Slots beyond kDefaultCount stay inactive (no NVS blob). kKeyCount is
+  // now only a "table has been initialized" sentinel — its presence (not
+  // its value) is what gates the seed path; load_table no longer reads
+  // its value to decide loop bounds.
   for (uint8_t i = 0; i < kDefaultCount; ++i) {
     s_table[i] = kDefaults[i];
     char key[4];
@@ -78,7 +80,7 @@ esp_err_t seed_defaults(nvs_handle_t h) {
     const esp_err_t err = nvs_set_blob(h, key, &s_table[i], sizeof(Preset));
     if (err != ESP_OK) return err;
   }
-  esp_err_t err = nvs_set_u8(h, kKeyCount, s_count);
+  esp_err_t err = nvs_set_u8(h, kKeyCount, kDefaultCount);
   if (err != ESP_OK) return err;
   s_selected = 0;
   err = nvs_set_u8(h, kKeySel, s_selected);
@@ -152,17 +154,30 @@ esp_err_t load_one_preset(nvs_handle_t h, uint8_t i, bool* out_migrated) {
 }
 
 esp_err_t load_table(nvs_handle_t h) {
-  uint8_t n = 0;
-  esp_err_t err = nvs_get_u8(h, kKeyCount, &n);
-  if (err != ESP_OK || n == 0) return ESP_ERR_NVS_NOT_FOUND;
-  if (n > kMaxPresets) n = kMaxPresets;
-  s_count = n;
+  // kKeyCount is the "initialized" sentinel — its absence means a fresh
+  // device that needs seeding. The value itself is no longer authoritative
+  // (slot count is fixed at kMaxPresets); each slot's existence is
+  // determined by whether its own blob is present.
+  uint8_t marker = 0;
+  esp_err_t err = nvs_get_u8(h, kKeyCount, &marker);
+  if (err == ESP_ERR_NVS_NOT_FOUND) return ESP_ERR_NVS_NOT_FOUND;
+  if (err != ESP_OK) return err;
+
   bool any_migrated = false;
-  for (uint8_t i = 0; i < n; ++i) {
+  for (uint8_t i = 0; i < kMaxPresets; ++i) {
     err = load_one_preset(h, i, &any_migrated);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+      // No blob for this slot — it's inactive. Leaving s_table[i] zeroed
+      // (version == 0) is what is_active() reads.
+      s_table[i] = {};
+      continue;
+    }
     if (err != ESP_OK) {
-      ESP_LOGW(kTag, "preset %u load failed (%s) — reseeding", i, esp_err_to_name(err));
-      return ESP_ERR_NVS_NOT_FOUND;
+      // Unexpected NVS error on this one slot — don't kill the whole
+      // table; just mark this slot inactive and keep going.
+      ESP_LOGW(kTag, "preset %u load failed (%s) — marking inactive",
+               i, esp_err_to_name(err));
+      s_table[i] = {};
     }
   }
   if (any_migrated) {
@@ -175,7 +190,15 @@ esp_err_t load_table(nvs_handle_t h) {
   err = nvs_get_u8(h, kKeySel, &sel);
   if (err == ESP_ERR_NVS_NOT_FOUND) sel = 0;
   else if (err != ESP_OK)           return err;
-  if (sel >= s_count) sel = 0;
+  if (sel >= kMaxPresets) sel = 0;
+  // If the persisted selection landed on an inactive slot (possible after
+  // a future clear() between reboots), fall forward to the next active one.
+  if (s_table[sel].version == 0) {
+    for (uint8_t i = 1; i <= kMaxPresets; ++i) {
+      const uint8_t cand = static_cast<uint8_t>((sel + i) % kMaxPresets);
+      if (s_table[cand].version != 0) { sel = cand; break; }
+    }
+  }
   s_selected = sel;
   return ESP_OK;
 }
@@ -216,23 +239,44 @@ esp_err_t init() {
   }
 
   s_inited = true;
-  ESP_LOGI(kTag, "%u presets loaded, selected=%u (\"%s\")",
-           s_count, s_selected, s_table[s_selected].name);
+  uint8_t active = 0;
+  for (uint8_t i = 0; i < kMaxPresets; ++i) if (s_table[i].version) ++active;
+  ESP_LOGI(kTag, "%u of %u preset slots active, selected=%u",
+           static_cast<unsigned>(active),
+           static_cast<unsigned>(kMaxPresets),
+           static_cast<unsigned>(s_selected));
   return ESP_OK;
 }
 
-uint8_t count() { return s_count; }
+uint8_t count() {
+  if (!s_inited) return 0;
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < kMaxPresets; ++i) if (s_table[i].version) ++n;
+  return n;
+}
+
+bool is_active(uint8_t id) {
+  if (!s_inited || id >= kMaxPresets) return false;
+  return s_table[id].version != 0;
+}
 
 uint8_t selected_id() { return s_selected; }
 
 Preset get(uint8_t id) {
-  if (id >= s_count) return Preset{};
+  if (id >= kMaxPresets) return Preset{};
   return s_table[id];
 }
 
 uint8_t cycle_selected() {
-  if (s_count == 0) return 0;
-  s_selected = static_cast<uint8_t>((s_selected + 1) % s_count);
+  if (!s_inited) return 0;
+  for (uint8_t i = 1; i <= kMaxPresets; ++i) {
+    const uint8_t cand = static_cast<uint8_t>((s_selected + i) % kMaxPresets);
+    if (s_table[cand].version != 0) {
+      s_selected = cand;
+      break;
+    }
+  }
+  // No-op if no other active slot exists; s_selected stays put.
 
   nvs_handle_t h;
   if (nvs_open(kNamespace, NVS_READWRITE, &h) == ESP_OK) {
@@ -243,8 +287,57 @@ uint8_t cycle_selected() {
   return s_selected;
 }
 
+esp_err_t set(uint8_t id, const Preset& p) {
+  if (!s_inited || id >= kMaxPresets) return ESP_ERR_INVALID_ARG;
+
+  Preset stamped = p;
+  stamped.version = kPresetVersion;
+
+  nvs_handle_t h;
+  esp_err_t err = nvs_open(kNamespace, NVS_READWRITE, &h);
+  if (err != ESP_OK) return err;
+  char key[4];
+  preset_key(id, key);
+  err = nvs_set_blob(h, key, &stamped, sizeof(stamped));
+  if (err == ESP_OK) err = nvs_commit(h);
+  nvs_close(h);
+  if (err == ESP_OK) s_table[id] = stamped;
+  return err;
+}
+
+esp_err_t clear(uint8_t id) {
+  if (!s_inited || id >= kMaxPresets) return ESP_ERR_INVALID_ARG;
+
+  nvs_handle_t h;
+  esp_err_t err = nvs_open(kNamespace, NVS_READWRITE, &h);
+  if (err != ESP_OK) return err;
+  char key[4];
+  preset_key(id, key);
+  err = nvs_erase_key(h, key);
+  // Erasing a key that doesn't exist is fine — the slot is already inactive.
+  if (err == ESP_ERR_NVS_NOT_FOUND) err = ESP_OK;
+  if (err == ESP_OK) {
+    s_table[id] = {};
+    // If we just cleared the selected slot, advance to the next active
+    // one so the UI never points at an empty slot.
+    if (s_selected == id) {
+      for (uint8_t i = 1; i <= kMaxPresets; ++i) {
+        const uint8_t cand = static_cast<uint8_t>((id + i) % kMaxPresets);
+        if (s_table[cand].version != 0) {
+          s_selected = cand;
+          break;
+        }
+      }
+      nvs_set_u8(h, kKeySel, s_selected);
+    }
+    nvs_commit(h);
+  }
+  nvs_close(h);
+  return err;
+}
+
 float last_grind(uint8_t id) {
-  if (id >= s_count) return 0.0f;
+  if (id >= kMaxPresets) return 0.0f;
   const float fallback = s_table[id].grind_anchor;
   nvs_handle_t h;
   if (nvs_open(kNamespace, NVS_READONLY, &h) != ESP_OK) return fallback;
@@ -260,7 +353,7 @@ float last_grind(uint8_t id) {
 }
 
 void set_last_grind(uint8_t id, float v) {
-  if (id >= s_count) return;
+  if (id >= kMaxPresets) return;
   nvs_handle_t h;
   if (nvs_open(kNamespace, NVS_READWRITE, &h) != ESP_OK) return;
   char key[4];

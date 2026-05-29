@@ -96,9 +96,13 @@ void refit() {
     ++per_preset_count[r.preset_id];
   }
 
-  const uint8_t n_presets = presets::count();
-  size_t total_used = 0;
-  for (uint8_t p = 0; p < n_presets; ++p) {
+  // Iterate the full fixed slot range — inactive slots will have
+  // per_preset_count[p] == 0 and naturally fall into the empty branch.
+  // count() now returns the active count, which can leave gaps; we want
+  // every slot index addressable by ShotRecord.preset_id covered.
+  size_t  total_used = 0;
+  uint8_t n_fits     = 0;
+  for (uint8_t p = 0; p < presets::kMaxPresets; ++p) {
     const size_t pn = per_preset_count[p];
     if (pn == 0) { s_fits[p] = {}; continue; }
 
@@ -115,7 +119,10 @@ void refit() {
       samples[k++] = to_sample(r);
     }
     s_fits[p] = fit(samples, k);
-    if (s_fits[p].valid) total_used += s_fits[p].n_used;
+    if (s_fits[p].valid) {
+      total_used += s_fits[p].n_used;
+      ++n_fits;
+    }
     std::free(samples);
   }
 
@@ -123,7 +130,7 @@ void refit() {
 
   ESP_LOGI(kTag, "refit: %u records on disk, %u presets fit, %u shots used in fits",
            static_cast<unsigned>(n_total),
-           static_cast<unsigned>(n_presets),
+           static_cast<unsigned>(n_fits),
            static_cast<unsigned>(total_used));
 }
 
