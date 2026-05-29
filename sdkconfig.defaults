@@ -33,14 +33,15 @@ CONFIG_COMPILER_CXX_RTTI=n
 CONFIG_FREERTOS_HZ=1000
 
 # --- LVGL fonts ---
-# Only Montserrat 14 is enabled by default. 48 pt is the centered time-delta
-# number on the Report screen; 36 pt is the climate-tile value readout; 24 pt
-# is the secondary grind-stepper label. Enable each explicitly so the linker
-# can find it.
+# Only Montserrat 14 is enabled by default; everything else used on the
+# Report screen has to be requested here so the linker can find it.
+#   24 pt — Post / Submit buttons and the ✕ cancel glyph
+#   36 pt — the big "30s" BREW TIME value in post mode
+#   46 pt — the centered grind value (idle + post) and the climate-tile
+#           value readouts (TEMP / HUMIDITY / PRESSURE)
 CONFIG_LV_FONT_MONTSERRAT_24=y
 CONFIG_LV_FONT_MONTSERRAT_36=y
 CONFIG_LV_FONT_MONTSERRAT_46=y
-CONFIG_LV_FONT_MONTSERRAT_48=y
 
 # --- LVGL extra modules ---
 # Snapshot bakes the rotated-number ring into a single 466×466 RGB565 sprite

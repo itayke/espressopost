@@ -2108,7 +2108,7 @@ void build_grinder(lv_obj_t* scr) {
   // line tucks between this and the bar (further down).
   s_grind_value_label = lv_label_create(scr);
   lv_obj_set_style_text_color(s_grind_value_label, kColorText, LV_PART_MAIN);
-  lv_obj_set_style_text_font(s_grind_value_label, &lv_font_montserrat_48,
+  lv_obj_set_style_text_font(s_grind_value_label, &lv_font_montserrat_46,
                              LV_PART_MAIN);
   lv_obj_set_style_bg_opa(s_grind_value_label, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_align(s_grind_value_label, LV_ALIGN_CENTER, 0, kGrindValueY);
@@ -2281,17 +2281,19 @@ void build_idle_group(lv_obj_t* scr) {
   // when entering post (post mode replaces the center line with ✕ / preset /
   // Submit).
   constexpr int32_t kPostBtnW = 140;
-  constexpr int32_t kPostBtnH = 62;
+  constexpr int32_t kPostBtnH = 58;
   s_post_btn = lv_button_create(s_idle_group);
   lv_obj_set_size(s_post_btn, kPostBtnW, kPostBtnH);
   lv_obj_set_style_radius(s_post_btn, kPostBtnH / 2, LV_PART_MAIN);
-  lv_obj_set_style_bg_color(s_post_btn, kColorAccent, LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(s_post_btn, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_shadow_width(s_post_btn, 0, LV_PART_MAIN);
-  lv_obj_set_style_border_width(s_post_btn, 0, LV_PART_MAIN);
+  lv_obj_set_style_border_color(s_post_btn, kColorAccent, LV_PART_MAIN);
+  lv_obj_set_style_border_width(s_post_btn, 4, LV_PART_MAIN);
+  lv_obj_set_style_border_opa(s_post_btn, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_align(s_post_btn, LV_ALIGN_CENTER, 0, kCenterLineOffsetY);
   lv_obj_add_event_cb(s_post_btn, on_post_tap, LV_EVENT_CLICKED, nullptr);
   lv_obj_t* post_lbl = lv_label_create(s_post_btn);
-  lv_obj_set_style_text_color(post_lbl, kColorBg, LV_PART_MAIN);
+  lv_obj_set_style_text_color(post_lbl, kColorAccent, LV_PART_MAIN);
   lv_obj_set_style_text_font(post_lbl, &lv_font_montserrat_24, LV_PART_MAIN);
   lv_label_set_text(post_lbl, "Post");
   lv_obj_center(post_lbl);
