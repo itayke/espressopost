@@ -4,11 +4,14 @@
 
 namespace espressopost::power {
 
-// Start the idle watchdog. Polls (via an LVGL timer) every 500 ms and
-// transitions display state:
+// Start the idle watchdog. Polls (via an LVGL timer) and transitions
+// display state:
 //
-//   active  -> dimmed   after 30 s of no input
-//   dimmed  -> off      after 2 min total of no input
+//   active  -> dimmed   after the active-idle threshold
+//   dimmed  -> off      after the further dim-idle threshold
+//
+// Thresholds live in power.cpp (kIdleToDimUs, kIdleToOffUs); init() logs
+// the resolved values at boot.
 //
 // Any call to `consume_input()` resets the elapsed timer. Wake from `off`
 // OR from `dimmed` suppresses the wake-up tap so it doesn't ghost-press
