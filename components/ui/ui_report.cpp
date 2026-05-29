@@ -35,8 +35,8 @@ constexpr int32_t kCenter          = kScreen / 2;
 // see build_idle_group). kGrinderSeparatorY is purely visual — per-bar
 // PRESSED hit-test uses BarSpec.y_band_{top,bottom}. Tune these two Y's
 // and the center line + climate area position track them automatically.
-constexpr int32_t kGrinderSeparatorY = 296;
-constexpr int32_t kClimateSeparatorY = 210;
+constexpr int32_t kGrinderSeparatorY = 305;
+constexpr int32_t kClimateSeparatorY = 215;
 
 // Vertical midline between the two separators — where the center button
 // row (POST + preset btn in idle, ✕/preset/Submit in post) sits. NOT the
@@ -47,6 +47,21 @@ constexpr int32_t kClimateSeparatorY = 210;
 constexpr int32_t kCenterLineY       =
     (kClimateSeparatorY + kGrinderSeparatorY) / 2;
 constexpr int32_t kCenterLineOffsetY = kCenterLineY - kCenter;
+
+// Shared button geometry on the center line. POST (idle) and Submit (post)
+// share kPostBtnH so the row keeps the same vertical footprint when the
+// top area swaps modes; the ✕ cancel button is a kPostBtnH × kPostBtnH
+// disc so all three sit on the same baseline. kPostBtnStroke is the
+// outline-only border width used by all three buttons.
+constexpr int32_t kPostBtnW          = 120;
+constexpr int32_t kPostBtnH          =  58;
+constexpr int32_t kPostBtnStroke     =   4;
+constexpr int32_t kCenterEdgeInset   =  30;
+// Right-edge inset used only by the primary action buttons (idle POST,
+// post Submit). Tighter than kCenterEdgeInset so the action button sits
+// closer to the screen edge than the ✕ cancel on the left — pulls the
+// armed action toward the thumb without disturbing the cancel column.
+constexpr int32_t kPrimaryBtnRightInset = kCenterEdgeInset - 15;
 
 // ---------------------------------------------------------------------------
 // Grind dial — kGrindMin..kGrindMax in 0.1 steps. Linear horizontal tick bar
@@ -61,15 +76,17 @@ constexpr float kGrindMin       =  0.0f;
 constexpr float kGrindMax       = 30.0f;
 
 // LV_ALIGN_CENTER y-offset for the big value text — sits between the
-// grinder-cap separator and the bar.
-constexpr int32_t kGrindValueY           = 100;
+// grinder-cap separator and the bar. Tightening this knob pulls the
+// value (and via the derived kBrew* offsets, the post BREW TIME value)
+// closer to its bar.
+constexpr int32_t kGrindValueY           = 108;
 
 // "GRIND VALUE" caption — absolute screen coords (set_pos, not align) so it
 // stays parked on the left while the centered big-number to its right grows
 // and shrinks with the digit count. Y is picked to vertically center against
-// the Montserrat-48 glyph row at kGrindValueY.
+// the Montserrat-46 glyph row at kGrindValueY.
 constexpr int32_t kGrindCaptionX         = 50;
-constexpr int32_t kGrindCaptionY         = 327;
+constexpr int32_t kGrindCaptionY         = 335;
 
 // "SUGGESTION" / "x.xx (xx%)" block mirrors GRIND VALUE on the right side of
 // the big number. Both lines render center-aligned inside a fixed-width box
@@ -162,6 +179,16 @@ const lv_color_t kColorIconTemp     = COLOR(0xE07055);
 const lv_color_t kColorIconHumidity = COLOR(0x60A8E0);
 const lv_color_t kColorLabel        = COLOR(0xB0B0B0);
 
+// Post-mode action button palette. Cancel (✕) borrows the climate-tile
+// temperature red so it reads as a "stop / undo" semantic; Submit borrows
+// the humidity blue when armed (matches the DELTA / suggestion blue tier
+// for a tight pull) and falls back to muted gray when the form gates the
+// submission. Defined as their own names so the action buttons aren't
+// coupled to the climate-icon palette in case either needs to drift.
+const lv_color_t kColorCancel         = COLOR(0xE07055);
+const lv_color_t kColorSubmitEnabled  = COLOR(0x60A8E0);
+const lv_color_t kColorSubmitDisabled = kColorMuted4;
+
 // Grinder tick colors. Mid + small share a tier so half-unit ticks read as
 // "longer hairlines" rather than a third distinct stratum.
 const lv_color_t kBigTickColor   = kColorMuted;
@@ -241,14 +268,26 @@ constexpr float    kMomentumMinSpeed = 0.5f;   // value units/sec — below this
 // block) below that. Big tick lands on every 10 s, mid tick on every 5 s.
 constexpr int32_t kDeltaBarY = 82;
 
+// BREW TIME value sits below the delta bar by the same gap GRIND VALUE
+// sits above its bar, so its absolute Y mirrors across the bar. Promoted
+// to file scope so the delta y-band can reach down through it without
+// hardcoding a magic number — tune kGrindValueY and kBrewValueCenterY
+// follows automatically. kBrewValueHalfHeight is the rough Mont 46 glyph
+// half-row used to extend the band past the value's bottom.
+constexpr int32_t kGrindValueCenterY = kCenter + kGrindValueY;
+constexpr int32_t kBrewValueCenterY  =
+    kDeltaBarY + (kBarY - kGrindValueCenterY);
+constexpr int32_t kBrewValueHalfHeight = 25;
+
 // y-band bounds.
 //   - Grind keeps the legacy "everything below the cap separator" range —
 //     the bottom area (bar + cursor + big number + captions + SUGGESTION) is
-//     identical in idle and post, so the band shouldn't change either.
-//   - Delta mirrors grind: it owns everything from the top edge of the
-//     screen down to just above the BREW TIME readout, so a press anywhere
-//     above the readout (including on the downward cursor) starts a scrub.
-//   - The bands cannot overlap. Quiet zone here is y=101–297.
+//     identical in idle and post, so the band shouldn't change either; a
+//     press anywhere over the GRIND VALUE readout still starts a scrub.
+//   - Delta mirrors grind: it owns from the top edge of the screen down
+//     through the BREW TIME readout, so a press on the downward cursor,
+//     the bar, OR the seconds value all start a scrub.
+//   - The bands cannot overlap. Quiet zone is y=(delta band_bottom+1)..297.
 // visible_half_range × 2 is the total value span across the bar's width.
 // Smaller half-range → more px per tick → finer drag-feel without touching
 // kBarHalfWidth. Tune here when the dial feels too twitchy or too coarse.
@@ -277,7 +316,7 @@ constexpr BarSpec kDeltaSpec = {
   /*visible_half_range*/ 7.5f,
   /*y*/                  kDeltaBarY,
   /*y_band_top*/         0,
-  /*y_band_bottom*/      100,
+  /*y_band_bottom*/      kBrewValueCenterY + kBrewValueHalfHeight,
   /*big_every*/          10,
   /*mid_every*/          5,
   /*tick_unit*/          1.0f,
@@ -302,9 +341,16 @@ BarState s_delta = {};
 
 // Idle group:
 lv_obj_t* s_idle_group          = nullptr;
-lv_obj_t* s_preset_btn          = nullptr;
-lv_obj_t* s_preset_label        = nullptr;
+lv_obj_t* s_preset_btn          = nullptr;   // tappable preset cycler on the idle center line
+lv_obj_t* s_preset_label        = nullptr;   // two-line "NAME / Xg, Ys" inside s_preset_btn
 lv_obj_t* s_post_btn            = nullptr;
+
+// Post-mode read-only preset label (same two-line text as s_preset_label,
+// no button chrome since cycling presets mid-form would invalidate the
+// delta bar's seeded default). QUALITY caption sits next to the star row
+// above the center line.
+lv_obj_t* s_preset_post_label   = nullptr;
+lv_obj_t* s_quality_caption     = nullptr;
 
 // Climate strip — three tap-to-toggle tiles in the top 40% of the screen.
 // Each tile is a button (taps cycle the unit); inside lives a custom-drawn
@@ -341,11 +387,9 @@ ClimateTile s_climate_tiles[3] = {};
 lv_obj_t* s_post_group          = nullptr;
 lv_obj_t* s_delta_cursor        = nullptr;  // downward-pointing arrow at the top, mirror of the grind cursor
 lv_obj_t* s_brew_time_caption   = nullptr;  // "BREW TIME" caption left of the value, mirror of GRIND VALUE
-lv_obj_t* s_brew_time_value     = nullptr;  // big "30s" readout, centered (Mont 36)
+lv_obj_t* s_brew_time_value     = nullptr;  // big "30s" readout, centered (Mont 46)
 lv_obj_t* s_brew_delta_caption  = nullptr;  // "DELTA" header right of value, mirror of SUGGESTION caption
 lv_obj_t* s_brew_delta_value    = nullptr;  // "+/-Ns" tinted by abs(delta), mirror of suggestion value line
-lv_obj_t* s_preset_post_label   = nullptr;  // read-only preset string parked on the center line in post mode
-lv_obj_t* s_quality_caption     = nullptr;  // "QUALITY" caption to the left of the star row
 lv_obj_t* s_star_btns [kMaxStars] = {};      // transparent tap targets sized to each star
 lv_obj_t* s_star_icons[kMaxStars] = {};      // custom-drawn star widgets (outline when unlit, filled fan when lit)
 // Per-star lit/unlit flag read by draw_star_event each paint. Declared as a
@@ -688,32 +732,24 @@ void refresh_grind_value_label() {
   lv_label_set_text(s_grind_value_label, buf);
 }
 
+// Build the two-line preset readout consumed by both the idle (tappable)
+// preset button and the post-mode (read-only) preset label. Line 1 is the
+// preset name; line 2 is the brew recipe (grams, seconds) — the user reads
+// the active preset and target weight/time at a glance without leaving
+// the screen. Both modes use the same text so cycling presets in idle
+// pre-stages exactly what post mode will display on entry.
 void refresh_preset_label() {
-  if (s_preset_label == nullptr) return;
-  const auto id = presets::selected_id();
-  const auto p  = presets::get(id);
-  char buf[40];
-  std::snprintf(buf, sizeof(buf), "%s  \xC2\xB7  target %us", p.name,
-                static_cast<unsigned>(p.target_time_s));
-  lv_label_set_text(s_preset_label, buf);
-  // Button auto-sizes to fit the new text; re-anchor so its right edge stays
-  // pinned 8 px left of POST instead of drifting onto the button.
-  if (s_preset_btn != nullptr && s_post_btn != nullptr) {
-    lv_obj_update_layout(s_preset_btn);
-    lv_obj_align_to(s_preset_btn, s_post_btn, LV_ALIGN_OUT_LEFT_MID, -8, 0);
-  }
-}
-
-// Read-only preset string parked on the post-mode center line. Same format as
-// refresh_preset_label's idle button, but the post variant is plain text — no
-// cycling, since changing presets mid-form would invalidate the delta default.
-void refresh_preset_post_label() {
-  if (s_preset_post_label == nullptr) return;
   const auto p = presets::get(presets::selected_id());
   char buf[40];
-  std::snprintf(buf, sizeof(buf), "%s  \xC2\xB7  target %us", p.name,
+  std::snprintf(buf, sizeof(buf), "%s\n%ug, %us", p.name,
+                static_cast<unsigned>(p.dose_g),
                 static_cast<unsigned>(p.target_time_s));
-  lv_label_set_text(s_preset_post_label, buf);
+  if (s_preset_label != nullptr) {
+    lv_label_set_text(s_preset_label, buf);
+  }
+  if (s_preset_post_label != nullptr) {
+    lv_label_set_text(s_preset_post_label, buf);
+  }
 }
 
 // Tier color for the DELTA readout — same palette as confidence_color but
@@ -769,9 +805,11 @@ void refresh_stars() {
   }
 }
 
-// Recolor the Sour / Bitter pills against s_taste_flags. Off = muted bg +
-// muted text; on = accent bg + bg-color text (so the label reads against the
-// accent fill).
+// Flip the Sour / Bitter pills against s_taste_flags. The border is set
+// to kColorAccent at creation time and never changes, so toggling here
+// flips bg_opa (transparent ↔ accent fill) + text color (accent ↔ bg);
+// the off state reads as the accent outline matches the on state's fill,
+// the on state reads as a solid accent pill with bg-colored text.
 void refresh_taste_toggles() {
   struct { lv_obj_t* btn; lv_obj_t* lbl; uint8_t mask; } pills[] = {
       {s_sour_btn,   s_sour_label,   storage::kTasteSour},
@@ -780,11 +818,12 @@ void refresh_taste_toggles() {
   for (auto& pill : pills) {
     if (pill.btn == nullptr) continue;
     const bool on = (s_taste_flags & pill.mask) != 0;
-    lv_obj_set_style_bg_color(pill.btn,
-                              on ? kColorAccent : kColorMuted3, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(pill.btn,
+                            on ? LV_OPA_COVER : LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(pill.btn, kColorAccent, LV_PART_MAIN);
     if (pill.lbl != nullptr) {
       lv_obj_set_style_text_color(pill.lbl,
-                                  on ? kColorBg : kColorMuted, LV_PART_MAIN);
+                                  on ? kColorBg : kColorAccent, LV_PART_MAIN);
     }
   }
 }
@@ -795,16 +834,18 @@ void refresh_submit_enabled() {
   // touched. The touched gate prevents a one-tap submit that records the
   // preset's default brew time verbatim — even a "delta zero" pull should be
   // an explicit confirmation, not the form's initial state.
-  const bool ready = s_stars_value > 0 && s_delta.touched;
-  if (ready) {
-    lv_obj_remove_state(s_submit_btn, LV_STATE_DISABLED);
-    lv_obj_set_style_bg_color(s_submit_btn, kColorAccent, LV_PART_MAIN);
-    lv_obj_set_style_text_color(s_submit_label, kColorBg, LV_PART_MAIN);
-  } else {
-    lv_obj_add_state(s_submit_btn, LV_STATE_DISABLED);
-    lv_obj_set_style_bg_color(s_submit_btn, kColorMuted3, LV_PART_MAIN);
-    lv_obj_set_style_text_color(s_submit_label, kColorMuted, LV_PART_MAIN);
-  }
+  const bool ready  = s_stars_value > 0 && s_delta.touched;
+  const lv_color_t color =
+      ready ? kColorSubmitEnabled : kColorSubmitDisabled;
+  // Outline-only button — toggle the border + label color in lockstep
+  // so the disabled state reads as a muted ghost of the armed one. We
+  // intentionally do NOT use LV_STATE_DISABLED: LVGL's theme injects a
+  // half-opacity override on that state that shadows our color choice.
+  // on_submit's own gate (s_stars_value > 0 && s_delta.touched) drops
+  // any click that lands while disabled, so we don't need the state
+  // to suppress events either.
+  lv_obj_set_style_border_color(s_submit_btn, color, LV_PART_MAIN);
+  lv_obj_set_style_text_color(s_submit_label, color, LV_PART_MAIN);
 }
 
 // Re-evaluate the model and update the predicted-arrow display. Runs on
@@ -916,7 +957,6 @@ void enter_post() {
   // Re-seed on entry too — preset may have been cycled in idle since the last
   // post session, and the delta bar's default needs to follow the new target.
   reset_post_form();
-  refresh_preset_post_label();
   apply_mode();
 }
 
@@ -2253,15 +2293,14 @@ void build_idle_group(lv_obj_t* scr) {
   lv_obj_clear_flag(s_idle_group, LV_OBJ_FLAG_CLICKABLE);
 
   // --- Climate area ---
-  // Two vertical separators on the geometric thirds (idle-only — they segment
-  // climate columns and hide when the top area swaps to post UI). The
-  // horizontal separator at kClimateSeparatorY is parented to `scr` instead
-  // so it stays visible across both modes — it caps the post form too.
+  // All three separators (two vertical column dividers + the horizontal cap
+  // at kClimateSeparatorY) are idle-only — parented to s_idle_group so they
+  // hide with the climate strip when the top area swaps to post UI.
   make_separator(s_idle_group, kColLeftEdge1 - kSeparatorThickness / 2, kSeparatorInset,
                  kSeparatorThickness, kClimateSeparatorY - 2 * kSeparatorInset);
   make_separator(s_idle_group, kColLeftEdge2 - kSeparatorThickness / 2, kSeparatorInset,
                  kSeparatorThickness, kClimateSeparatorY - 2 * kSeparatorInset);
-  make_separator(scr, kSeparatorInset, kClimateSeparatorY - kSeparatorThickness / 2,
+  make_separator(s_idle_group, kSeparatorInset, kClimateSeparatorY - kSeparatorThickness / 2,
                  kScreen - 2 * kSeparatorInset, kSeparatorThickness);
 
   build_climate_tile(s_idle_group, 0, kColLeftEdge0,  kColLeftEdge1,
@@ -2280,17 +2319,16 @@ void build_idle_group(lv_obj_t* scr) {
   // Post button — opens the post-mode form. Lives in s_idle_group so it hides
   // when entering post (post mode replaces the center line with ✕ / preset /
   // Submit).
-  constexpr int32_t kPostBtnW = 140;
-  constexpr int32_t kPostBtnH = 58;
   s_post_btn = lv_button_create(s_idle_group);
   lv_obj_set_size(s_post_btn, kPostBtnW, kPostBtnH);
   lv_obj_set_style_radius(s_post_btn, kPostBtnH / 2, LV_PART_MAIN);
   lv_obj_set_style_bg_opa(s_post_btn, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_shadow_width(s_post_btn, 0, LV_PART_MAIN);
   lv_obj_set_style_border_color(s_post_btn, kColorAccent, LV_PART_MAIN);
-  lv_obj_set_style_border_width(s_post_btn, 4, LV_PART_MAIN);
+  lv_obj_set_style_border_width(s_post_btn, kPostBtnStroke, LV_PART_MAIN);
   lv_obj_set_style_border_opa(s_post_btn, LV_OPA_COVER, LV_PART_MAIN);
-  lv_obj_align(s_post_btn, LV_ALIGN_CENTER, 0, kCenterLineOffsetY);
+  lv_obj_align(s_post_btn, LV_ALIGN_RIGHT_MID, -kPrimaryBtnRightInset,
+               kCenterLineOffsetY);
   lv_obj_add_event_cb(s_post_btn, on_post_tap, LV_EVENT_CLICKED, nullptr);
   lv_obj_t* post_lbl = lv_label_create(s_post_btn);
   lv_obj_set_style_text_color(post_lbl, kColorAccent, LV_PART_MAIN);
@@ -2305,23 +2343,23 @@ void build_idle_group(lv_obj_t* scr) {
                  kGrinderSeparatorY - kSeparatorThickness / 2,
                  kScreen - 2 * kSeparatorInset, kSeparatorThickness);
 
-  // Preset selector — small tap-to-cycle label parked at the vertical middle
-  // of the screen, just left of POST. Lives in s_idle_group; the post mode
-  // shows a read-only preset string in its place. The button auto-sizes to
-  // its label, so refresh_preset_label re-runs the LV_ALIGN_OUT_LEFT_MID
-  // alignment after every text change — otherwise it overflows rightward as
-  // the label grows.
+  // Preset selector — tap-to-cycle two-line label centered on the center
+  // line (POST btn lives to the right; preset is the dominant readout).
+  // Lives in s_idle_group so it hides in post mode, where
+  // s_preset_post_label takes its place at the same anchor (read-only —
+  // cycling presets mid-form would invalidate the delta seed).
   s_preset_btn = lv_button_create(s_idle_group);
   lv_obj_set_style_bg_opa(s_preset_btn, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_shadow_width(s_preset_btn, 0, LV_PART_MAIN);
   lv_obj_set_style_border_width(s_preset_btn, 0, LV_PART_MAIN);
   lv_obj_set_style_pad_all(s_preset_btn, 6, LV_PART_MAIN);
+  lv_obj_align(s_preset_btn, LV_ALIGN_CENTER, 0, kCenterLineOffsetY);
   lv_obj_add_event_cb(s_preset_btn, on_preset_tap, LV_EVENT_CLICKED, nullptr);
   s_preset_label = lv_label_create(s_preset_btn);
-  lv_obj_set_style_text_color(s_preset_label, kColorMuted, LV_PART_MAIN);
-  lv_obj_set_style_text_font(s_preset_label, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_text_color(s_preset_label, kColorText, LV_PART_MAIN);
+  lv_obj_set_style_text_font(s_preset_label, &lv_font_montserrat_24, LV_PART_MAIN);
+  lv_obj_set_style_text_align(s_preset_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_obj_center(s_preset_label);
-  lv_obj_align_to(s_preset_btn, s_post_btn, LV_ALIGN_OUT_LEFT_MID, -8, 0);
 }
 
 void build_post_group(lv_obj_t* scr) {
@@ -2334,27 +2372,32 @@ void build_post_group(lv_obj_t* scr) {
   lv_obj_clear_flag(s_post_group, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_clear_flag(s_post_group, LV_OBJ_FLAG_CLICKABLE);
 
-  // Top-area layout (replaces climate strip in idle). Mirror image of the
-  // grind area below: cursor at the TOP pointing down, bar below the cursor,
-  // BREW TIME row (caption / value / DELTA block) below the bar. The
-  // climate-bottom separator at y=210 stays visible (parented to scr) and
-  // caps the post form. The center line at y=253 swaps from POST/preset
-  // (idle) to ✕/preset readonly/Submit (post). Below y=210 — center line,
-  // cap separator at y=295, big grind number, GRIND VALUE caption,
-  // SUGGESTION block, grind bar — is unchanged across both modes.
+  // Top-area layout (replaces climate strip in idle). Cursor at the TOP
+  // pointing down, delta bar below, then the BREW TIME row (big Mont 46
+  // value + BREW TIME caption left + DELTA block right) mirroring the
+  // grind area's value-with-flanking-labels pattern. The Sour/Bitter
+  // pills + QUALITY-labeled star row stack between the BREW TIME row and
+  // the center line. The climate cap separator at kClimateSeparatorY is
+  // idle-only, so the band from delta bar to kCenterLineY is fully owned
+  // by this form.
   //
-  //   y= 54  delta cursor tip (downward arrow, mirror of grind cursor)
-  //   y= 82  delta bar (kDeltaBarY; band [0, 100])
-  //   y=115  BREW TIME caption (left, x=50) · value "30s" Mont 36 (center,
-  //          glyph row y=96–134) · DELTA + "+/-Ns" two-line block (right)
-  //   y=153  QUALITY caption (left, x=50, vert-centered on stars) ·
-  //          5-star row (kStarSize=38) · Sour/Bitter pill stack (right)
-  //   y=210  ── separator (shared) ──
-  //   y=253  ✕  preset readonly  Submit
+  //   delta cursor tip (downward arrow, mirror of grind cursor)
+  //   delta bar (kDeltaBarY; band [0, 100])
+  //   big BREW TIME value (Mont 46), centered; BREW TIME caption flanks
+  //     its left, DELTA + "+/-Ns" two-line block flanks its right
+  //   QUALITY caption (left, x=kQualityCaptionX) · 5-star row (centered) ·
+  //     Sour / Bitter pills stacked on the right (outline when off, accent
+  //     fill when on — see refresh_taste_toggles)
+  //   center line: ✕ (LEFT, Temperature red, kCenterEdgeInset from edge) ·
+  //     preset readout (CENTER, Mont 24 / kColorText, two lines) ·
+  //     Submit (RIGHT, humidity-blue when armed, muted when not,
+  //     kCenterEdgeInset from edge)
   //
-  // The stars row and the pill stack share the same vertical band — the
-  // pills are stacked so their column avg-Y matches the star row center
-  // Y, reading as a single horizontal "rate this shot" tier.
+  // The grind area below — grind value, GRIND VALUE caption, SUGGESTION
+  // block, cap separator at kGrinderSeparatorY, grind bar — is unchanged
+  // across modes. Concrete y values are derived below from kDeltaBarY,
+  // kGrindValueY, and kGrindCaptionY, so tuning the grind layout
+  // auto-shifts the BREW TIME row to stay symmetric.
 
   // --- Downward cursor at the top, pointing at the bar below ---
   // draw_arrow_event's default orientation puts the tip at (0, +h/2) — i.e.
@@ -2378,26 +2421,26 @@ void build_post_group(lv_obj_t* scr) {
   s_delta.widget     = make_bar_widget(s_post_group, &s_delta);
 
   // --- BREW TIME row (caption left, value center, DELTA block right) ---
-  // Mirrors the grind readout's GRIND VALUE caption + big number + SUGGESTION
-  // block, just with smaller font (Mont 36 vs Mont 48) since the delta is the
-  // secondary readout. Caption x=50 and DELTA block x=302 reuse the grind
-  // side's column positions so the eye reads both as the same layout.
-  constexpr int32_t kBrewTimeValueCenterY = 115;
-  constexpr int32_t kBrewCaptionTopY      = kBrewTimeValueCenterY - 7;
-  constexpr int32_t kBrewDeltaCaptionY    = kBrewTimeValueCenterY - 16;
-  constexpr int32_t kBrewDeltaValueTopY   = kBrewTimeValueCenterY + 2;
+  // Mirrors the grind readout's spacing: same gap from bar to value
+  // center, same caption Y offsets from the value center, same SUGGESTION
+  // block geometry. Tuning kGrindValueY / kGrindCaptionY in the grind
+  // area auto-shifts the BREW TIME row to stay symmetric.
+  constexpr int32_t kBrewCaptionTopY      =
+      kBrewValueCenterY + (kGrindCaptionY - kGrindValueCenterY);
+  constexpr int32_t kBrewDeltaCaptionY    =
+      kBrewCaptionTopY + (kSuggestionCaptionY - kGrindCaptionY);
+  constexpr int32_t kBrewDeltaValueTopY   =
+      kBrewDeltaCaptionY + (kSuggestionValueY - kSuggestionCaptionY);
 
   s_brew_time_caption = lv_label_create(s_post_group);
   lv_obj_set_style_text_color(s_brew_time_caption, kColorLabel, LV_PART_MAIN);
   lv_obj_set_style_text_font(s_brew_time_caption, &lv_font_montserrat_14, LV_PART_MAIN);
   lv_label_set_text(s_brew_time_caption, "BREW TIME");
-  // Visually anchor BREW TIME under the same horizontal column center as
-  // GRIND VALUE. Both are auto-sized labels with different widths, so a
-  // shared left edge (kGrindCaptionX) would leave their centers misaligned —
-  // measure GRIND VALUE's width and offset BREW TIME so its center matches.
-  // build_grinder runs before build_post_group, so s_grind_caption has been
-  // text-set + auto-sized; update_layout makes the width query reliable
-  // before LVGL's own layout pass at the end of start_report.
+  // Anchor BREW TIME under GRIND VALUE's column center — both labels are
+  // auto-sized to different widths, so a shared left edge would leave
+  // their centers misaligned. Measure GRIND VALUE's width (build_grinder
+  // runs first; update_layout makes the query reliable before LVGL's
+  // top-level pass) and offset BREW TIME so its center matches.
   lv_obj_update_layout(s_grind_caption);
   lv_obj_update_layout(s_brew_time_caption);
   const int32_t grind_caption_cx =
@@ -2408,12 +2451,12 @@ void build_post_group(lv_obj_t* scr) {
 
   s_brew_time_value = lv_label_create(s_post_group);
   lv_obj_set_style_text_color(s_brew_time_value, kColorText, LV_PART_MAIN);
-  lv_obj_set_style_text_font(s_brew_time_value, &lv_font_montserrat_36, LV_PART_MAIN);
-  // Centered horizontally at screen center; vertical via offset from
-  // LV_ALIGN_TOP_MID puts the glyph row center near kBrewTimeValueCenterY.
-  // (Mont 36 glyph height ≈ 38; shift up by half so center lands on Y.)
-  lv_obj_align(s_brew_time_value, LV_ALIGN_TOP_MID, 0,
-               kBrewTimeValueCenterY - 19);
+  lv_obj_set_style_text_font(s_brew_time_value, &lv_font_montserrat_46, LV_PART_MAIN);
+  // LV_ALIGN_CENTER offset is from screen center, so subtract kCenter to
+  // land the label's center exactly on kBrewValueCenterY — no font-height
+  // math needed; the auto-sized label width/height take care of itself.
+  lv_obj_align(s_brew_time_value, LV_ALIGN_CENTER, 0,
+               kBrewValueCenterY - kCenter);
   lv_label_set_text(s_brew_time_value, "0s");
 
   s_brew_delta_caption = lv_label_create(s_post_group);
@@ -2431,58 +2474,45 @@ void build_post_group(lv_obj_t* scr) {
   lv_obj_set_style_text_align(s_brew_delta_value, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_label_set_text(s_brew_delta_value, "0s");
 
-  // --- QUALITY caption + 5-star row (left/center) and taste pill stack
-  //     (right), all sharing the band between the BREW TIME row and the
-  //     y=210 separator. Pill stack and star row are vertically centered
-  //     on the same Y so the whole "rate this shot" tier reads as one
-  //     horizontal row, regardless of the stack being taller than the
-  //     stars.
-  constexpr int32_t kStarGap            = 8;
-  constexpr int32_t kStarRowY           = 153;
-  constexpr int32_t kStarRowX           = 115;
-  constexpr int32_t kQualityCaptionX    = kGrindCaptionX - 20;
-  constexpr int32_t kPillH              = 28;
-  constexpr int32_t kPillW              = 88;
-  constexpr int32_t kPillStackVGap      = 8;
-  constexpr int32_t kPillStackRightInset = 30;
-  constexpr int32_t kPillStackX         =
-      kScreen - kPillStackRightInset - kPillW;
-  constexpr int32_t kPillStackTopY      = 140;
-  static_assert(kStarRowY + kStarSize / 2 ==
-                kPillStackTopY + kPillH + kPillStackVGap / 2,
-                "star row center Y must match pill stack avg Y");
+  // --- Sub-center band: Sour/Bitter pills (right) + QUALITY + star row
+  // ---
+  // Below the BREW TIME readout, above the center line. The pill row
+  // right-aligns with Submit's column; the star row is centered on the
+  // screen with the QUALITY caption parked at the left (Mont 14 wraps to
+  // the star row's vertical midline). Pills row Y is derived from the
+  // DELTA value's bottom + a row gap so the whole band moves together if
+  // the BREW TIME spacing is later tuned.
+  // Star row is parked just below the BREW TIME row; the Sour/Bitter
+  // pills stack vertically on the right, mid-aligned with the star row's
+  // vertical center so the rating tier reads as one visual band. Pills
+  // wear the same outline-when-off / filled-when-on chrome as the action
+  // buttons (see refresh_taste_toggles).
+  constexpr int32_t kBrewBottomY     = kBrewDeltaValueTopY + 18;
+  constexpr int32_t kStarRowGap      = 14;     // gap below the BREW TIME row
+  constexpr int32_t kStarRowY        = kBrewBottomY + kStarRowGap;
+  constexpr int32_t kStarGap         = 8;
+  constexpr int32_t kStarRowW        =
+      kMaxStars * kStarSize + (kMaxStars - 1) * kStarGap;
+  constexpr int32_t kStarRowX0       = kCenter - kStarRowW / 2;
+  constexpr int32_t kQualityCaptionX = kGrindCaptionX - 20;
+  constexpr int32_t kStarRowMidY     = kStarRowY + kStarSize / 2;
+  static_assert(kStarRowY + kStarSize <=
+                kCenterLineY - kPostBtnH / 2,
+                "star row must clear the center line buttons");
 
-  // QUALITY caption — vertically centered on the star row. lv_label is
-  // auto-sized; measuring after update_layout gives us the rendered height
-  // so the caption sits on the star's vertical midline.
-  s_quality_caption = lv_label_create(s_post_group);
-  lv_obj_set_style_text_color(s_quality_caption, kColorLabel, LV_PART_MAIN);
-  lv_obj_set_style_text_font(s_quality_caption, &lv_font_montserrat_14,
-                             LV_PART_MAIN);
-  lv_label_set_text(s_quality_caption, "QUALITY");
-  lv_obj_update_layout(s_quality_caption);
-  const int32_t quality_caption_y =
-      kStarRowY + (kStarSize - lv_obj_get_height(s_quality_caption)) / 2;
-  lv_obj_set_pos(s_quality_caption, kQualityCaptionX, quality_caption_y);
+  constexpr int32_t kPillH           = 28;
+  constexpr int32_t kPillW           = 84;
+  constexpr int32_t kPillStackVGap   = 6;
+  constexpr int32_t kPillStackH      = 2 * kPillH + kPillStackVGap;
+  constexpr int32_t kPillStackTopY   = kStarRowMidY - kPillStackH / 2;
+  constexpr int32_t kPillStackX      =
+      kScreen - kCenterEdgeInset - kPillW;     // right edge aligns with Submit
+  static_assert(kPillStackTopY >= kBrewBottomY,
+                "pill stack top must clear the BREW TIME readout");
+  static_assert(kPillStackTopY + kPillStackH <=
+                kCenterLineY - kPostBtnH / 2,
+                "pill stack bottom must clear the center line buttons");
 
-  for (uint8_t i = 0; i < kMaxStars; ++i) {
-    lv_obj_t* tap = lv_obj_create(s_post_group);
-    lv_obj_set_size(tap, kStarSize, kStarSize);
-    lv_obj_set_pos(tap, kStarRowX + i * (kStarSize + kStarGap), kStarRowY);
-    lv_obj_set_style_bg_opa(tap, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_border_width(tap, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(tap, 0, LV_PART_MAIN);
-    lv_obj_clear_flag(tap, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(tap, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(tap, on_star_tap, LV_EVENT_CLICKED,
-                        reinterpret_cast<void*>(static_cast<uintptr_t>(i)));
-    s_star_btns[i]  = tap;
-    s_star_icons[i] = make_star(tap, &s_star_states[i]);
-  }
-
-  // --- Sour / Bitter toggle pills, stacked vertically on the right ---
-  // The stack right-aligns with Submit (same kCenterEdgeInset == 30 from
-  // the screen edge) so Submit and the pills share a vertical column.
   struct PillCfg { const char* text; uint8_t mask; lv_obj_t** btn; lv_obj_t** lbl; };
   PillCfg pills[2] = {
       {"Sour",   storage::kTasteSour,   &s_sour_btn,   &s_sour_label},
@@ -2493,7 +2523,13 @@ void build_post_group(lv_obj_t* scr) {
     lv_obj_set_size(b, kPillW, kPillH);
     lv_obj_set_style_radius(b, kPillH / 2, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(b, 0, LV_PART_MAIN);
-    lv_obj_set_style_border_width(b, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(b, 0, LV_PART_MAIN);
+    // Border always present at the same color as the "on" fill so toggling
+    // bg_opa is enough to flip outline ↔ filled without touching the
+    // border state. refresh_taste_toggles owns bg_opa + text color.
+    lv_obj_set_style_border_color(b, kColorAccent, LV_PART_MAIN);
+    lv_obj_set_style_border_width(b, kPostBtnStroke, LV_PART_MAIN);
+    lv_obj_set_style_border_opa(b, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_pos(b, kPillStackX,
                    kPillStackTopY + i * (kPillH + kPillStackVGap));
     lv_obj_add_event_cb(b, on_taste_tap, LV_EVENT_CLICKED,
@@ -2507,46 +2543,78 @@ void build_post_group(lv_obj_t* scr) {
     *pills[i].lbl = lbl;
   }
 
-  // --- Center line: ✕ (left), preset readonly (mid), Submit (right) ---
-  // Shares kCenterLineOffsetY with the idle POST button so the row stays
-  // pinned to the same y when swapping between idle and post modes.
-  constexpr int32_t kCenterEdgeInset  = 30;
-  constexpr int32_t kCancelSize       = 40;
-  constexpr int32_t kSubmitW          = 100;
-  constexpr int32_t kSubmitH          = 44;
+  // QUALITY caption — Mont 14, vertically centered on the star row by
+  // measuring its rendered height after update_layout.
+  s_quality_caption = lv_label_create(s_post_group);
+  lv_obj_set_style_text_color(s_quality_caption, kColorLabel, LV_PART_MAIN);
+  lv_obj_set_style_text_font(s_quality_caption, &lv_font_montserrat_14,
+                             LV_PART_MAIN);
+  lv_label_set_text(s_quality_caption, "QUALITY");
+  lv_obj_update_layout(s_quality_caption);
+  const int32_t quality_caption_y =
+      kStarRowY + (kStarSize - lv_obj_get_height(s_quality_caption)) / 2;
+  lv_obj_set_pos(s_quality_caption, kQualityCaptionX, quality_caption_y);
+
+  for (uint8_t i = 0; i < kMaxStars; ++i) {
+    lv_obj_t* tap = lv_obj_create(s_post_group);
+    lv_obj_set_size(tap, kStarSize, kStarSize);
+    lv_obj_set_pos(tap, kStarRowX0 + i * (kStarSize + kStarGap), kStarRowY);
+    lv_obj_set_style_bg_opa(tap, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(tap, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(tap, 0, LV_PART_MAIN);
+    lv_obj_clear_flag(tap, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(tap, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(tap, on_star_tap, LV_EVENT_CLICKED,
+                        reinterpret_cast<void*>(static_cast<uintptr_t>(i)));
+    s_star_btns[i]  = tap;
+    s_star_icons[i] = make_star(tap, &s_star_states[i]);
+  }
+
+  // --- Center line: preset readout (left), ✕ (middle), Submit (right) ---
+  // Preset is a two-line read-only label at the same LEFT_MID anchor as
+  // idle's preset button so the readout doesn't jump on mode swap. ✕ is
+  // centered on the line in Temperature red (outline-only, matches the
+  // POST button's stroke pattern). Submit is the same outline pattern;
+  // its border + label color is driven by refresh_submit_enabled and
+  // toggles between kColorSubmitEnabled (humidity blue) and
+  // kColorSubmitDisabled (muted gray).
+  s_preset_post_label = lv_label_create(s_post_group);
+  lv_obj_set_style_text_color(s_preset_post_label, kColorText, LV_PART_MAIN);
+  lv_obj_set_style_text_font(s_preset_post_label, &lv_font_montserrat_24,
+                             LV_PART_MAIN);
+  lv_obj_set_style_text_align(s_preset_post_label, LV_TEXT_ALIGN_CENTER,
+                              LV_PART_MAIN);
+  lv_obj_align(s_preset_post_label, LV_ALIGN_CENTER, 0, kCenterLineOffsetY);
 
   s_cancel_btn = lv_button_create(s_post_group);
-  lv_obj_set_size(s_cancel_btn, kCancelSize, kCancelSize);
-  lv_obj_set_style_radius(s_cancel_btn, kCancelSize / 2, LV_PART_MAIN);
-  lv_obj_set_style_bg_color(s_cancel_btn, kColorMuted3, LV_PART_MAIN);
+  lv_obj_set_size(s_cancel_btn, kPostBtnH, kPostBtnH);
+  lv_obj_set_style_radius(s_cancel_btn, kPostBtnH / 2, LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(s_cancel_btn, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_shadow_width(s_cancel_btn, 0, LV_PART_MAIN);
-  lv_obj_set_style_border_width(s_cancel_btn, 0, LV_PART_MAIN);
+  lv_obj_set_style_border_color(s_cancel_btn, kColorCancel, LV_PART_MAIN);
+  lv_obj_set_style_border_width(s_cancel_btn, kPostBtnStroke, LV_PART_MAIN);
+  lv_obj_set_style_border_opa(s_cancel_btn, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_align(s_cancel_btn, LV_ALIGN_LEFT_MID, kCenterEdgeInset,
                kCenterLineOffsetY);
   lv_obj_add_event_cb(s_cancel_btn, on_cancel_tap, LV_EVENT_CLICKED, nullptr);
   lv_obj_t* cancel_lbl = lv_label_create(s_cancel_btn);
-  lv_obj_set_style_text_color(cancel_lbl, kColorMuted, LV_PART_MAIN);
+  lv_obj_set_style_text_color(cancel_lbl, kColorCancel, LV_PART_MAIN);
   lv_obj_set_style_text_font(cancel_lbl, &lv_font_montserrat_24, LV_PART_MAIN);
   lv_label_set_text(cancel_lbl, LV_SYMBOL_CLOSE);
   lv_obj_center(cancel_lbl);
 
-  // Read-only preset string, same format as the idle preset button. Centered
-  // between ✕ and Submit. Not tappable — cycling presets mid-form would
-  // invalidate the delta bar's seeded default.
-  s_preset_post_label = lv_label_create(s_post_group);
-  lv_obj_set_style_text_color(s_preset_post_label, kColorMuted, LV_PART_MAIN);
-  lv_obj_set_style_text_font(s_preset_post_label, &lv_font_montserrat_14,
-                             LV_PART_MAIN);
-  lv_obj_align(s_preset_post_label, LV_ALIGN_CENTER, 0, kCenterLineOffsetY);
-
   s_submit_btn = lv_button_create(s_post_group);
-  lv_obj_set_size(s_submit_btn, kSubmitW, kSubmitH);
-  lv_obj_set_style_radius(s_submit_btn, kSubmitH / 2, LV_PART_MAIN);
+  lv_obj_set_size(s_submit_btn, kPostBtnW, kPostBtnH);
+  lv_obj_set_style_radius(s_submit_btn, kPostBtnH / 2, LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(s_submit_btn, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_shadow_width(s_submit_btn, 0, LV_PART_MAIN);
-  lv_obj_set_style_border_width(s_submit_btn, 0, LV_PART_MAIN);
-  lv_obj_align(s_submit_btn, LV_ALIGN_RIGHT_MID, -kCenterEdgeInset,
+  lv_obj_set_style_border_color(s_submit_btn, kColorSubmitDisabled, LV_PART_MAIN);
+  lv_obj_set_style_border_width(s_submit_btn, kPostBtnStroke, LV_PART_MAIN);
+  lv_obj_set_style_border_opa(s_submit_btn, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_align(s_submit_btn, LV_ALIGN_RIGHT_MID, -kPrimaryBtnRightInset,
                kCenterLineOffsetY);
   s_submit_label = lv_label_create(s_submit_btn);
+  lv_obj_set_style_text_color(s_submit_label, kColorSubmitDisabled, LV_PART_MAIN);
   lv_obj_set_style_text_font(s_submit_label, &lv_font_montserrat_24,
                              LV_PART_MAIN);
   lv_label_set_text(s_submit_label, "Submit");
@@ -2589,7 +2657,6 @@ void start_report() {
                              kDeltaSpec.min, kDeltaSpec.max);
 
   refresh_preset_label();
-  refresh_preset_post_label();
   refresh_grind_value_label();
   refresh_stars();
   refresh_taste_toggles();
