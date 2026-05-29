@@ -328,6 +328,7 @@ lv_obj_t* s_brew_time_value     = nullptr;  // big "30s" readout, centered (Mont
 lv_obj_t* s_brew_delta_caption  = nullptr;  // "DELTA" header right of value, mirror of SUGGESTION caption
 lv_obj_t* s_brew_delta_value    = nullptr;  // "+/-Ns" tinted by abs(delta), mirror of suggestion value line
 lv_obj_t* s_preset_post_label   = nullptr;  // read-only preset string parked on the center line in post mode
+lv_obj_t* s_quality_caption     = nullptr;  // "QUALITY" caption to the left of the star row
 lv_obj_t* s_star_btns [kMaxStars] = {};      // transparent tap targets sized to each star
 lv_obj_t* s_star_icons[kMaxStars] = {};      // custom-drawn star widgets (outline when unlit, filled fan when lit)
 // Per-star lit/unlit flag read by draw_star_event each paint. Declared as a
@@ -1867,44 +1868,31 @@ lv_obj_t* make_arrow(lv_obj_t* parent, ArrowState* state, int32_t widget_size) {
   return a;
 }
 
-// Draw a filled polygon as a triangle fan rooted at (cx, cy) — works for any
-// shape whose centroid lies inside the polygon (convex, plus star-shaped
-// concave shapes like a 5-point star). Emits n_segments triangles, one per
-// (pts[i], pts[i+1]) edge. Caller is responsible for ordering points so
-// consecutive vertices form actual polygon edges; for a closed polygon, pass
-// the array with the first vertex repeated at the end and n_segments =
-// len - 1. Reusable building block for any future filled-icon drawing.
-void draw_filled_polygon_fan(lv_layer_t* layer,
-                             lv_value_precise_t cx, lv_value_precise_t cy,
-                             const lv_point_precise_t* pts, size_t n_segments,
-                             lv_color_t color, lv_opa_t opa = LV_OPA_COVER) {
-  lv_draw_triangle_dsc_t tri;
-  lv_draw_triangle_dsc_init(&tri);
-  tri.color = color;
-  tri.opa   = opa;
-  for (size_t i = 0; i < n_segments; ++i) {
-    tri.p[0].x = cx;
-    tri.p[0].y = cy;
-    tri.p[1]   = pts[i];
-    tri.p[2]   = pts[i + 1];
-    lv_draw_triangle(layer, &tri);
-  }
-}
-
-// 5-point star polyline, 11 vertices (5 outer + 5 inner alternating, with the
-// first vertex repeated at index 10 to close the polygon). Inner/outer ratio
-// is the golden-ratio classic 0.382. All five Quality stars share the same
-// size, so the polyline lives in a single static array that every star widget
+// 5-point star polyline, 11 vertices (5 outer + 5 inner alternating, with
+// the first vertex repeated at the end to close the polygon). Inner/outer
+// ratio drives how chunky the arms read — smaller ratio gives the slim
+// golden-ratio classic, larger ratio gives the bolder Font-Awesome-style
+// filled look. Tune kStarInnerRatio when the stars feel too spindly or too
+// puffy for the layout. All five Quality stars share the same size, so the
+// polyline lives in a single static array that every star widget
 // references; the draw handler translates it to layer coords per paint, so
 // the array can be widget-relative and shared across positions.
-constexpr int32_t kStarSize = 38;
+constexpr int32_t kStarSize        = 38;
+constexpr float   kStarInnerRatio  = 0.5f;
+// Sub-pixel outward push applied to each triangle vertex (from the
+// triangle's own centroid) so adjacent triangles overlap slightly along
+// their shared edges. LVGL's AA rasterizer otherwise leaves seam pixels
+// uncovered where two triangles meet — visible as faint lines. Bumping
+// the perimeter outward by this fraction of a pixel is invisible at the
+// star's size; the seam lines are not.
+constexpr float   kStarFillOverlap = 0.5f;
 lv_point_precise_t s_star_polyline[11];
 bool s_star_polyline_built = false;
 
 void build_star_polyline() {
   if (s_star_polyline_built) return;
   const float R = static_cast<float>(kStarSize) * 0.5f;
-  const float r = R * 0.382f;
+  const float r = R * kStarInnerRatio;
   for (int i = 0; i <= 10; ++i) {
     // i=0 is the top outer vertex; subsequent vertices step 36° clockwise,
     // alternating outer (even i) and inner (odd i). i=10 closes back to i=0.
@@ -1936,13 +1924,53 @@ void draw_star_event(lv_event_t* e) {
   }
 
   if (state->lit) {
-    // Fill: 10-wedge triangle fan from the star's center through each pair
-    // of consecutive outer/inner vertices.
-    const lv_value_precise_t cx =
-        ox + static_cast<lv_value_precise_t>(kStarSize) * 0.5f;
-    const lv_value_precise_t cy =
-        oy + static_cast<lv_value_precise_t>(kStarSize) * 0.5f;
-    draw_filled_polygon_fan(layer, cx, cy, pts, 10, kColorAccent);
+    // Fill the star as inner-pentagon + 5 arm triangles. A centroid fan
+    // would converge 10 triangles at one sub-pixel, leaving a pinhole
+    // LVGL's AA can't fill; this decomposition shares only full edges
+    // between adjacent triangles.
+    //
+    // Vertex layout in pts[]: even indices (0,2,4,6,8) are outer tips,
+    // odd indices (1,3,5,7,9) are the inner V's between tips.
+    //
+    // Each triangle is then pushed outward from its own centroid by
+    // kStarFillOverlap so adjacent triangles overlap along their shared
+    // edge — without this, LVGL's per-triangle AA coverage along the
+    // shared edge sums to <100% and a faint seam line shows through.
+    const lv_point_precise_t raw_tris[8][3] = {
+      // Inner pentagon — fan from inner V at index 1 through the others.
+      {pts[1], pts[3], pts[5]},
+      {pts[1], pts[5], pts[7]},
+      {pts[1], pts[7], pts[9]},
+      // Arms: (prev inner V, outer tip, next inner V). Top tip's prev
+      // inner V wraps from the polyline's end.
+      {pts[9], pts[0], pts[1]},
+      {pts[1], pts[2], pts[3]},
+      {pts[3], pts[4], pts[5]},
+      {pts[5], pts[6], pts[7]},
+      {pts[7], pts[8], pts[9]},
+    };
+
+    lv_draw_triangle_dsc_t tri;
+    lv_draw_triangle_dsc_init(&tri);
+    tri.color = kColorAccent;
+    tri.opa   = LV_OPA_COVER;
+    for (const auto& src : raw_tris) {
+      const lv_value_precise_t cx = (src[0].x + src[1].x + src[2].x) / 3.0f;
+      const lv_value_precise_t cy = (src[0].y + src[1].y + src[2].y) / 3.0f;
+      for (int v = 0; v < 3; ++v) {
+        const lv_value_precise_t dx = src[v].x - cx;
+        const lv_value_precise_t dy = src[v].y - cy;
+        const float len = std::sqrt(
+            static_cast<float>(dx * dx + dy * dy));
+        if (len > 1e-6f) {
+          tri.p[v].x = src[v].x + dx * kStarFillOverlap / len;
+          tri.p[v].y = src[v].y + dy * kStarFillOverlap / len;
+        } else {
+          tri.p[v] = src[v];
+        }
+      }
+      lv_draw_triangle(layer, &tri);
+    }
   } else {
     // Outline: 10 stroke segments with rounded caps so the joints read as
     // continuous (matches the prior lv_line widget output).
@@ -2289,12 +2317,14 @@ void build_post_group(lv_obj_t* scr) {
   //   y= 82  delta bar (kDeltaBarY; band [0, 100])
   //   y=115  BREW TIME caption (left, x=50) · value "30s" Mont 36 (center,
   //          glyph row y=96–134) · DELTA + "+/-Ns" two-line block (right)
-  //   y=138  5-star row (kStarSize=38; reads as "quality" without a label —
-  //          star outlines are self-explanatory)
-  //   y=178  Sour / Bitter pill row (kPillH=28; bottom y=206, gap 4 above
-  //          the y=210 separator)
+  //   y=153  QUALITY caption (left, x=50, vert-centered on stars) ·
+  //          5-star row (kStarSize=38) · Sour/Bitter pill stack (right)
   //   y=210  ── separator (shared) ──
   //   y=253  ✕  preset readonly  Submit
+  //
+  // The stars row and the pill stack share the same vertical band — the
+  // pills are stacked so their column avg-Y matches the star row center
+  // Y, reading as a single horizontal "rate this shot" tier.
 
   // --- Downward cursor at the top, pointing at the bar below ---
   // draw_arrow_event's default orientation puts the tip at (0, +h/2) — i.e.
@@ -2371,20 +2401,44 @@ void build_post_group(lv_obj_t* scr) {
   lv_obj_set_style_text_align(s_brew_delta_value, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_label_set_text(s_brew_delta_value, "0s");
 
-  // --- 5 stars (Quality, no separate caption) ---
-  // Stars ride directly below the BREW TIME row. Five outline stars read as
-  // "rate this shot" without needing a caption label competing for the y
-  // budget — vertical room is tight between the BREW TIME row and the
-  // y=210 separator.
-  constexpr int32_t kStarGap  = 10;
-  constexpr int32_t kStarRowY = 138;
-  const int32_t row_width =
-      kMaxStars * kStarSize + (kMaxStars - 1) * kStarGap;
-  const int32_t row_x0 = kCenter - row_width / 2;
+  // --- QUALITY caption + 5-star row (left/center) and taste pill stack
+  //     (right), all sharing the band between the BREW TIME row and the
+  //     y=210 separator. Pill stack and star row are vertically centered
+  //     on the same Y so the whole "rate this shot" tier reads as one
+  //     horizontal row, regardless of the stack being taller than the
+  //     stars.
+  constexpr int32_t kStarGap            = 8;
+  constexpr int32_t kStarRowY           = 153;
+  constexpr int32_t kStarRowX           = 115;
+  constexpr int32_t kQualityCaptionX    = kGrindCaptionX;
+  constexpr int32_t kPillH              = 28;
+  constexpr int32_t kPillW              = 88;
+  constexpr int32_t kPillStackVGap      = 8;
+  constexpr int32_t kPillStackRightInset = 30;
+  constexpr int32_t kPillStackX         =
+      kScreen - kPillStackRightInset - kPillW;
+  constexpr int32_t kPillStackTopY      = 140;
+  static_assert(kStarRowY + kStarSize / 2 ==
+                kPillStackTopY + kPillH + kPillStackVGap / 2,
+                "star row center Y must match pill stack avg Y");
+
+  // QUALITY caption — vertically centered on the star row. lv_label is
+  // auto-sized; measuring after update_layout gives us the rendered height
+  // so the caption sits on the star's vertical midline.
+  s_quality_caption = lv_label_create(s_post_group);
+  lv_obj_set_style_text_color(s_quality_caption, kColorLabel, LV_PART_MAIN);
+  lv_obj_set_style_text_font(s_quality_caption, &lv_font_montserrat_14,
+                             LV_PART_MAIN);
+  lv_label_set_text(s_quality_caption, "QUALITY");
+  lv_obj_update_layout(s_quality_caption);
+  const int32_t quality_caption_y =
+      kStarRowY + (kStarSize - lv_obj_get_height(s_quality_caption)) / 2;
+  lv_obj_set_pos(s_quality_caption, kQualityCaptionX, quality_caption_y);
+
   for (uint8_t i = 0; i < kMaxStars; ++i) {
     lv_obj_t* tap = lv_obj_create(s_post_group);
     lv_obj_set_size(tap, kStarSize, kStarSize);
-    lv_obj_set_pos(tap, row_x0 + i * (kStarSize + kStarGap), kStarRowY);
+    lv_obj_set_pos(tap, kStarRowX + i * (kStarSize + kStarGap), kStarRowY);
     lv_obj_set_style_bg_opa(tap, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_border_width(tap, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(tap, 0, LV_PART_MAIN);
@@ -2396,17 +2450,9 @@ void build_post_group(lv_obj_t* scr) {
     s_star_icons[i] = make_star(tap, &s_star_states[i]);
   }
 
-  // --- Sour / Bitter toggle pills ---
-  // Pills sit just below the stars row (stars bottom at y=186 with kStarSize=38)
-  // and just above the y=210 separator. Height kept at 28 — Mont 14 text with
-  // 7 px padding top/bottom — to fit in the remaining ~22 px of vertical room.
-  constexpr int32_t kPillH    = 28;
-  constexpr int32_t kPillW    = 88;
-  constexpr int32_t kPillGap  = 16;
-  constexpr int32_t kPillRowY = 178;  // top y of the pill row → bottom y=206
-  const int32_t pill_row_w = 2 * kPillW + kPillGap;
-  const int32_t pill_x0    = kCenter - pill_row_w / 2;
-
+  // --- Sour / Bitter toggle pills, stacked vertically on the right ---
+  // The stack right-aligns with Submit (same kCenterEdgeInset == 30 from
+  // the screen edge) so Submit and the pills share a vertical column.
   struct PillCfg { const char* text; uint8_t mask; lv_obj_t** btn; lv_obj_t** lbl; };
   PillCfg pills[2] = {
       {"Sour",   storage::kTasteSour,   &s_sour_btn,   &s_sour_label},
@@ -2418,7 +2464,8 @@ void build_post_group(lv_obj_t* scr) {
     lv_obj_set_style_radius(b, kPillH / 2, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(b, 0, LV_PART_MAIN);
     lv_obj_set_style_border_width(b, 0, LV_PART_MAIN);
-    lv_obj_set_pos(b, pill_x0 + i * (kPillW + kPillGap), kPillRowY);
+    lv_obj_set_pos(b, kPillStackX,
+                   kPillStackTopY + i * (kPillH + kPillStackVGap));
     lv_obj_add_event_cb(b, on_taste_tap, LV_EVENT_CLICKED,
                         reinterpret_cast<void*>(
                             static_cast<uintptr_t>(pills[i].mask)));
