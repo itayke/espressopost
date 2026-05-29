@@ -26,10 +26,27 @@ constexpr const char* kTag = "report";
 constexpr int32_t kScreen          = 466;
 constexpr int32_t kCenter          = kScreen / 2;
 
-// Horizontal divider at the top of the grinder area, drawn in idle mode only
-// (hidden along with the climate strip in post mode). Per-bar PRESSED hit-test
-// uses BarSpec.y_band_{top,bottom} now — this constant is purely visual.
+// Horizontal dividers framing the center line — climate area sits above
+// kClimateSeparatorY, grinder area below kGrinderSeparatorY, with the
+// center button row parked midway between them (kCenterLineY). Both
+// dividers are drawn in idle mode only (the climate strip and column
+// separators hide when the top area swaps to the post form; the bottom
+// horizontal divider is parented to scr and stays visible across modes,
+// see build_idle_group). kGrinderSeparatorY is purely visual — per-bar
+// PRESSED hit-test uses BarSpec.y_band_{top,bottom}. Tune these two Y's
+// and the center line + climate area position track them automatically.
 constexpr int32_t kGrinderSeparatorY = 296;
+constexpr int32_t kClimateSeparatorY = 210;
+
+// Vertical midline between the two separators — where the center button
+// row (POST + preset btn in idle, ✕/preset/Submit in post) sits. NOT the
+// screen's geometric center: the grinder area is taller than the climate
+// strip, so a true mid-screen line would land low inside the grinder
+// band. kCenterLineOffsetY is the offset to feed LV_ALIGN_CENTER when
+// placing widgets onto this line.
+constexpr int32_t kCenterLineY       =
+    (kClimateSeparatorY + kGrinderSeparatorY) / 2;
+constexpr int32_t kCenterLineOffsetY = kCenterLineY - kCenter;
 
 // ---------------------------------------------------------------------------
 // Grind dial — kGrindMin..kGrindMax in 0.1 steps. Linear horizontal tick bar
@@ -1200,7 +1217,17 @@ void delta_on_touched(BarState*) {
 // round-display chord at the icon y is narrower than the screen, so the
 // outer columns shift content inward by kOuterContentShift to avoid the
 // round-clipped edge. Separators stay on the geometric thirds.
-constexpr int32_t kClimateBottomY  = 210;
+// Tile container geometry. kClimateAreaHeight is the fixed vertical span
+// the icon / label / value rows are designed against (their offsets —
+// kTileIconY, kTileLabelY, kTileValueY below — are relative to the
+// container top). Keeping it independent of kClimateSeparatorY means
+// moving the separator only translates the container up or down,
+// leaving the internal row positions intact. kClimateTopY can go
+// negative when the container extends above the round-display chord; the
+// chord clips the unused top band, no further math needed.
+constexpr int32_t kClimateAreaHeight = 210;
+constexpr int32_t kClimateTopY       =
+    kClimateSeparatorY - kClimateAreaHeight;
 constexpr int32_t kColLeftEdge0    = 0;
 constexpr int32_t kColLeftEdge1    = 155;
 constexpr int32_t kColLeftEdge2    = 311;
@@ -2151,8 +2178,8 @@ void build_climate_tile(lv_obj_t* parent, uint8_t idx,
   ClimateTile& t = s_climate_tiles[idx];
 
   t.container = lv_obj_create(parent);
-  lv_obj_set_size(t.container, tile_w, kClimateBottomY);
-  lv_obj_set_pos(t.container, left_edge, 0);
+  lv_obj_set_size(t.container, tile_w, kClimateAreaHeight);
+  lv_obj_set_pos(t.container, left_edge, kClimateTopY);
   lv_obj_set_style_bg_opa(t.container, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_border_width(t.container, 0, LV_PART_MAIN);
   lv_obj_set_style_pad_all(t.container, 0, LV_PART_MAIN);
@@ -2228,14 +2255,13 @@ void build_idle_group(lv_obj_t* scr) {
   // --- Climate area ---
   // Two vertical separators on the geometric thirds (idle-only — they segment
   // climate columns and hide when the top area swaps to post UI). The
-  // horizontal separator below the climate strip (at kClimateBottomY) is
-  // parented to `scr` instead so it stays visible across both modes — it sits
-  // above the center line and the user wants it preserved in post too.
+  // horizontal separator at kClimateSeparatorY is parented to `scr` instead
+  // so it stays visible across both modes — it caps the post form too.
   make_separator(s_idle_group, kColLeftEdge1 - kSeparatorThickness / 2, kSeparatorInset,
-                 kSeparatorThickness, kClimateBottomY - 2 * kSeparatorInset);
+                 kSeparatorThickness, kClimateSeparatorY - 2 * kSeparatorInset);
   make_separator(s_idle_group, kColLeftEdge2 - kSeparatorThickness / 2, kSeparatorInset,
-                 kSeparatorThickness, kClimateBottomY - 2 * kSeparatorInset);
-  make_separator(scr, kSeparatorInset, kClimateBottomY - kSeparatorThickness / 2,
+                 kSeparatorThickness, kClimateSeparatorY - 2 * kSeparatorInset);
+  make_separator(scr, kSeparatorInset, kClimateSeparatorY - kSeparatorThickness / 2,
                  kScreen - 2 * kSeparatorInset, kSeparatorThickness);
 
   build_climate_tile(s_idle_group, 0, kColLeftEdge0,  kColLeftEdge1,
@@ -2254,13 +2280,15 @@ void build_idle_group(lv_obj_t* scr) {
   // Post button — opens the post-mode form. Lives in s_idle_group so it hides
   // when entering post (post mode replaces the center line with ✕ / preset /
   // Submit).
+  constexpr int32_t kPostBtnW = 140;
+  constexpr int32_t kPostBtnH = 62;
   s_post_btn = lv_button_create(s_idle_group);
-  lv_obj_set_size(s_post_btn, 140, 52);
-  lv_obj_set_style_radius(s_post_btn, 26, LV_PART_MAIN);
+  lv_obj_set_size(s_post_btn, kPostBtnW, kPostBtnH);
+  lv_obj_set_style_radius(s_post_btn, kPostBtnH / 2, LV_PART_MAIN);
   lv_obj_set_style_bg_color(s_post_btn, kColorAccent, LV_PART_MAIN);
   lv_obj_set_style_shadow_width(s_post_btn, 0, LV_PART_MAIN);
   lv_obj_set_style_border_width(s_post_btn, 0, LV_PART_MAIN);
-  lv_obj_align(s_post_btn, LV_ALIGN_CENTER, 0, 20);
+  lv_obj_align(s_post_btn, LV_ALIGN_CENTER, 0, kCenterLineOffsetY);
   lv_obj_add_event_cb(s_post_btn, on_post_tap, LV_EVENT_CLICKED, nullptr);
   lv_obj_t* post_lbl = lv_label_create(s_post_btn);
   lv_obj_set_style_text_color(post_lbl, kColorBg, LV_PART_MAIN);
@@ -2410,7 +2438,7 @@ void build_post_group(lv_obj_t* scr) {
   constexpr int32_t kStarGap            = 8;
   constexpr int32_t kStarRowY           = 153;
   constexpr int32_t kStarRowX           = 115;
-  constexpr int32_t kQualityCaptionX    = kGrindCaptionX;
+  constexpr int32_t kQualityCaptionX    = kGrindCaptionX - 20;
   constexpr int32_t kPillH              = 28;
   constexpr int32_t kPillW              = 88;
   constexpr int32_t kPillStackVGap      = 8;
@@ -2478,10 +2506,8 @@ void build_post_group(lv_obj_t* scr) {
   }
 
   // --- Center line: ✕ (left), preset readonly (mid), Submit (right) ---
-  // y_offset = 20 matches the idle POST button's LV_ALIGN_CENTER offset so
-  // the center line sits on the same horizontal as idle's POST. Mode swap
-  // replaces idle's POST + preset_btn with this triplet at the same y.
-  constexpr int32_t kCenterRowOffsetY = 20;
+  // Shares kCenterLineOffsetY with the idle POST button so the row stays
+  // pinned to the same y when swapping between idle and post modes.
   constexpr int32_t kCenterEdgeInset  = 30;
   constexpr int32_t kCancelSize       = 40;
   constexpr int32_t kSubmitW          = 100;
@@ -2494,7 +2520,7 @@ void build_post_group(lv_obj_t* scr) {
   lv_obj_set_style_shadow_width(s_cancel_btn, 0, LV_PART_MAIN);
   lv_obj_set_style_border_width(s_cancel_btn, 0, LV_PART_MAIN);
   lv_obj_align(s_cancel_btn, LV_ALIGN_LEFT_MID, kCenterEdgeInset,
-               kCenterRowOffsetY);
+               kCenterLineOffsetY);
   lv_obj_add_event_cb(s_cancel_btn, on_cancel_tap, LV_EVENT_CLICKED, nullptr);
   lv_obj_t* cancel_lbl = lv_label_create(s_cancel_btn);
   lv_obj_set_style_text_color(cancel_lbl, kColorMuted, LV_PART_MAIN);
@@ -2509,7 +2535,7 @@ void build_post_group(lv_obj_t* scr) {
   lv_obj_set_style_text_color(s_preset_post_label, kColorMuted, LV_PART_MAIN);
   lv_obj_set_style_text_font(s_preset_post_label, &lv_font_montserrat_14,
                              LV_PART_MAIN);
-  lv_obj_align(s_preset_post_label, LV_ALIGN_CENTER, 0, kCenterRowOffsetY);
+  lv_obj_align(s_preset_post_label, LV_ALIGN_CENTER, 0, kCenterLineOffsetY);
 
   s_submit_btn = lv_button_create(s_post_group);
   lv_obj_set_size(s_submit_btn, kSubmitW, kSubmitH);
@@ -2517,7 +2543,7 @@ void build_post_group(lv_obj_t* scr) {
   lv_obj_set_style_shadow_width(s_submit_btn, 0, LV_PART_MAIN);
   lv_obj_set_style_border_width(s_submit_btn, 0, LV_PART_MAIN);
   lv_obj_align(s_submit_btn, LV_ALIGN_RIGHT_MID, -kCenterEdgeInset,
-               kCenterRowOffsetY);
+               kCenterLineOffsetY);
   s_submit_label = lv_label_create(s_submit_btn);
   lv_obj_set_style_text_font(s_submit_label, &lv_font_montserrat_24,
                              LV_PART_MAIN);
