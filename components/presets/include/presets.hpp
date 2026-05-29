@@ -17,17 +17,25 @@ constexpr uint8_t kNameLen    = 16;   // including NUL terminator
 // `version` lets future preset schema changes be detected without a separate
 // catalog header — same trick we use on ShotRecord. v1 (20 B, no version
 // byte, int8 click_anchor) is detected by blob size in presets::init() and
-// transparently rewritten to v2 on first boot.
+// transparently rewritten. v3 keeps the v2 24-byte layout unchanged and only
+// repurposes the former `_pad` byte as `yield_g`; the v2→v3 migration uses
+// the `version` byte (not size) as the disambiguator and backfills yield
+// from dose at the classic espresso ratio.
 //
 // `grind_anchor` is the model's per-preset baseline grind setting, in the
 // same absolute units the user dials on their grinder. Used as a starting
 // hint for new shots (the Report UI pre-populates the grind stepper with
 // this value) and as the prior peak for the Step-5 model.
+//
+// `yield_g` is the preset's target espresso output in grams. The brew ratio
+// is implicit (`yield_g / dose_g`); no separate ratio field. Not surfaced
+// on the ShotRecord — shots carry only the dialed grind + the time delta,
+// not the per-shot yield.
 struct __attribute__((packed)) Preset {
-  uint8_t version;          // 2 (current)
+  uint8_t version;          // 3 (current)
   uint8_t target_time_s;
   uint8_t dose_g;
-  uint8_t _pad;             // align grind_anchor to a 4-byte offset for readability
+  uint8_t yield_g;
   char    name[kNameLen];
   float   grind_anchor;
 };

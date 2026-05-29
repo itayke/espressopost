@@ -19,7 +19,7 @@ uint8_t s_count       = 0;
 uint8_t s_selected    = 0;
 Preset  s_table[kMaxPresets] = {};
 
-constexpr uint8_t kPresetVersion = 2;
+constexpr uint8_t kPresetVersion = 3;
 
 // Default starting grind for seeded presets. Picked to match the historical
 // state the user has been grinding at on this device; future builds with
@@ -29,11 +29,12 @@ constexpr float kDefaultGrindAnchor = 5.2f;
 
 // Default presets seeded on first boot — picked to cover the common single-
 // basket pulls. The user can curate this list once the Preset editor screen
-// lands; until then these are good enough for daily use.
+// lands; until then these are good enough for daily use. Yields are seeded
+// at the same classic espresso ratio used for the v2→v3 backfill below.
 constexpr Preset kDefaults[] = {
-    {kPresetVersion, 30, 18, 0, "espresso",  kDefaultGrindAnchor},
-    {kPresetVersion, 40, 18, 0, "lungo",     kDefaultGrindAnchor},
-    {kPresetVersion, 22, 18, 0, "ristretto", kDefaultGrindAnchor},
+    {kPresetVersion, 30, 17, 34, "PRESET 1", kDefaultGrindAnchor},
+    {kPresetVersion, 40, 18, 36, "PRESET 2", kDefaultGrindAnchor},
+    {kPresetVersion, 22, 18, 36, "PRESET 3", kDefaultGrindAnchor},
 };
 constexpr uint8_t kDefaultCount = sizeof(kDefaults) / sizeof(kDefaults[0]);
 static_assert(kDefaultCount <= kMaxPresets, "default table exceeds cap");
@@ -85,9 +86,12 @@ esp_err_t seed_defaults(nvs_handle_t h) {
   return nvs_commit(h);
 }
 
-// Read one preset blob, auto-migrating from v1 (20 B) to v2 (24 B) if the
-// stored size matches the older layout. On migration, the rewritten blob
-// is written straight back to NVS so the next boot is a fast v2 read.
+// Read one preset blob and bring it up to the current schema in place. Two
+// migration paths are supported: v1 (20 B) → current (a full rewrite), and
+// v2 → v3 (same 24 B size, differentiated by the version byte, backfills
+// yield_g from dose_g at the classic espresso ratio). On any migration the
+// rewritten blob is written straight back to NVS so the next boot is a
+// fast current-version read.
 esp_err_t load_one_preset(nvs_handle_t h, uint8_t i, bool* out_migrated) {
   char key[4];
   preset_key(i, key);
@@ -100,7 +104,19 @@ esp_err_t load_one_preset(nvs_handle_t h, uint8_t i, bool* out_migrated) {
 
   if (sz == sizeof(Preset)) {
     err = nvs_get_blob(h, key, &s_table[i], &sz);
-    return err;
+    if (err != ESP_OK) return err;
+    // v2 used the same 24-byte layout but had `yield_g` as `_pad` (always
+    // zero on write). Detect by the version byte and backfill yield from
+    // the recorded dose at the default espresso ratio.
+    Preset& cur = s_table[i];
+    if (cur.version < kPresetVersion) {
+      cur.version = kPresetVersion;
+      cur.yield_g = static_cast<uint8_t>(cur.dose_g * 2u);
+      err = nvs_set_blob(h, key, &cur, sizeof(cur));
+      if (err != ESP_OK) return err;
+      if (out_migrated) *out_migrated = true;
+    }
+    return ESP_OK;
   }
 
   if (sz == sizeof(PresetV1)) {
@@ -114,6 +130,9 @@ esp_err_t load_one_preset(nvs_handle_t h, uint8_t i, bool* out_migrated) {
     std::memcpy(dst.name, old_blob.name, kNameLen);
     dst.target_time_s = old_blob.target_time_s;
     dst.dose_g        = old_blob.dose_g;
+    // Same backfill rule the v2→v3 path uses — yield from dose at the
+    // default espresso ratio.
+    dst.yield_g       = static_cast<uint8_t>(old_blob.dose_g * 2u);
     // v1 click_anchor was always 0 in the seeded defaults (no UI to edit
     // it), so the user's confirmed grind setting is the only useful seed
     // for the new float field.
@@ -149,8 +168,8 @@ esp_err_t load_table(nvs_handle_t h) {
   if (any_migrated) {
     err = nvs_commit(h);
     if (err != ESP_OK) return err;
-    ESP_LOGW(kTag, "migrated preset table v1 → v2 (grind_anchor seeded to %.2f)",
-             static_cast<double>(kDefaultGrindAnchor));
+    ESP_LOGW(kTag, "migrated preset table to v%u (yield_g backfilled from dose_g)",
+             static_cast<unsigned>(kPresetVersion));
   }
   uint8_t sel = 0;
   err = nvs_get_u8(h, kKeySel, &sel);
