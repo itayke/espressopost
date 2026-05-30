@@ -1,5 +1,6 @@
 #include "storage.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -11,6 +12,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "presets.hpp"
 
 namespace espressopost::storage {
 namespace {
@@ -20,7 +22,7 @@ constexpr const char* kPartitionLbl  = "storage";   // matches partitions.csv
 constexpr const char* kBasePath      = "/littlefs";
 constexpr const char* kShotsPath     = "/littlefs/shots.bin";
 constexpr const char* kShotsTmpPath  = "/littlefs/shots.bin.tmp";
-constexpr uint8_t     kRecordVersion = 4;
+constexpr uint8_t     kRecordVersion = 5;
 
 // One-time backfill value applied to v2 → v3 migration. Hardcoded because
 // v2 had no grind field at all and the user has confirmed every existing
@@ -47,6 +49,32 @@ struct __attribute__((packed)) ShotRecordV2 {
 };
 static_assert(sizeof(ShotRecordV2) == 32, "v2 record size must match the schema we migrated away from");
 
+// v3 + v4 share a 40-byte layout; v4 only carved `taste_flags` out of v3's
+// reserved bytes (which read as zero — "none reported"). Both store the shot
+// time as a signed delta against the preset's target_time_s at submit time.
+// Kept here only so migrate_v4_to_v5() can decode the byte at offset 2 as a
+// signed delta before rewriting the same record at v5 with an unsigned
+// absolute brew time. Field-for-field identical to ShotRecord otherwise.
+struct __attribute__((packed)) ShotRecordV4 {
+  uint8_t  version;
+  uint8_t  preset_id;
+  int8_t   time_delta_s;
+  uint8_t  quality_stars;
+  uint8_t  flags;
+  uint8_t  confidence_pct;
+  uint8_t  taste_flags;
+  uint8_t  _reserved[1];
+  int64_t  timestamp_us;
+  uint32_t rtc_epoch_s;
+  float    temp_c;
+  float    humidity_pct;
+  float    pressure_hpa;
+  float    user_grind;
+  float    suggested_grind;
+};
+static_assert(sizeof(ShotRecordV4) == sizeof(ShotRecord),
+              "v4 and v5 records share a fixed 40-byte size; only byte 2's semantics changed");
+
 bool s_mounted = false;
 
 // Append + count both touch the same file; a mutex avoids torn writes if the
@@ -61,12 +89,12 @@ struct Guard {
   ~Guard() { if (ok) xSemaphoreGive(s_lock); }
 };
 
-// One-time rewrite of /littlefs/shots.bin from pre-v3 records (32 B) up to
-// the current 40 B layout. Runs once on the first boot after a schema bump
-// and becomes a no-op forever after, gated by the first record's version
-// byte. v3 and v4 share the same 40 B layout — the v4 schema only carved
-// taste_flags out of v3's reserved bytes (which read as zero, "none
-// reported"), so a v3 file needs no rewrite.
+// One-time rewrite of /littlefs/shots.bin from v1/v2 records (32 B) into the
+// 40 B v3 layout. Runs once on the first boot after a schema bump and becomes
+// a no-op forever after, gated by the first record's version byte. Output is
+// stamped as v3 (not the current version) because this path has no presets
+// access yet — `finalize_migrations()` later picks the records up and does
+// the v3/v4 → v5 conversion that needs each preset's target_time_s.
 //
 // Safety: writes to shots.bin.tmp first and only renames on success, so a
 // power loss mid-migration leaves the original file intact and the next
@@ -131,8 +159,12 @@ esp_err_t migrate_to_v3() {
   size_t count = 0;
   ShotRecordV2 old_rec = {};
   while (std::fread(&old_rec, 1, sizeof(old_rec), in) == sizeof(old_rec)) {
-    ShotRecord new_rec = {};
-    new_rec.version       = kRecordVersion;
+    // Output is v3, not the current schema, because this path runs before
+    // presets are loaded — we don't have the target_time_s lookup needed for
+    // the delta→actual conversion. `finalize_migrations()` will pick the v3
+    // records up shortly after and convert them to v5 in a second pass.
+    ShotRecordV4 new_rec = {};
+    new_rec.version       = 3;
     new_rec.preset_id     = old_rec.preset_id;
     new_rec.time_delta_s  = old_rec.time_delta_s;
     new_rec.quality_stars = old_rec.quality_stars;
@@ -177,6 +209,111 @@ esp_err_t migrate_to_v3() {
   return ESP_OK;
 }
 
+// Two-step rewrite of /littlefs/shots.bin: v3 and v4 records (40 B, with a
+// signed delta-vs-target at byte 2) get converted to v5 (40 B, with an
+// unsigned absolute brew time at byte 2). Each record's `actual_time_s` is
+// rebuilt as `clamp(time_delta_s + presets::get(preset_id).target_time_s,
+// 0..255)`. If the slot is now inactive its `target_time_s` reads as 0, so
+// those records survive as raw deltas — best effort for orphaned data.
+//
+// Runs once after presets::init() has loaded the table. Becomes a no-op once
+// all records on disk are at v5 or later. Same temp-file-then-rename safety
+// as migrate_to_v3().
+esp_err_t migrate_to_v5() {
+  struct stat st = {};
+  if (stat(kShotsPath, &st) != 0 || st.st_size == 0) return ESP_OK;
+
+  FILE* in = std::fopen(kShotsPath, "rb");
+  if (!in) {
+    ESP_LOGE(kTag, "migrate v5: open %s for read failed", kShotsPath);
+    return ESP_FAIL;
+  }
+
+  uint8_t first_version = 0;
+  if (std::fread(&first_version, 1, 1, in) != 1) {
+    std::fclose(in);
+    return ESP_FAIL;
+  }
+  if (first_version >= 5) {
+    std::fclose(in);
+    return ESP_OK;
+  }
+  // Anything that survived migrate_to_v3 should be v3 or v4 (both 40-byte
+  // layouts with delta at byte 2). v1/v2 would have been promoted to v3 by
+  // the earlier pass; if first_version is below 3 here, the earlier pass
+  // didn't run or failed — bail rather than misinterpret the bytes.
+  if (first_version < 3) {
+    std::fclose(in);
+    ESP_LOGE(kTag, "migrate v5: unexpected on-disk version %u",
+             static_cast<unsigned>(first_version));
+    return ESP_ERR_INVALID_VERSION;
+  }
+  if (st.st_size % sizeof(ShotRecordV4) != 0) {
+    std::fclose(in);
+    ESP_LOGE(kTag, "migrate v5: file size %ld not a multiple of v3/v4 record size %u",
+             static_cast<long>(st.st_size), static_cast<unsigned>(sizeof(ShotRecordV4)));
+    return ESP_ERR_INVALID_SIZE;
+  }
+  std::rewind(in);
+
+  unlink(kShotsTmpPath);
+  FILE* out = std::fopen(kShotsTmpPath, "wb");
+  if (!out) {
+    std::fclose(in);
+    ESP_LOGE(kTag, "migrate v5: open %s for write failed", kShotsTmpPath);
+    return ESP_FAIL;
+  }
+
+  size_t count = 0;
+  ShotRecordV4 old_rec = {};
+  while (std::fread(&old_rec, 1, sizeof(old_rec), in) == sizeof(old_rec)) {
+    const presets::Preset p = presets::get(old_rec.preset_id);
+    const int target = static_cast<int>(p.target_time_s);  // 0 if slot inactive
+    const int actual_i = std::clamp(old_rec.time_delta_s + target, 0, 255);
+
+    ShotRecord new_rec = {};
+    new_rec.version         = kRecordVersion;
+    new_rec.preset_id       = old_rec.preset_id;
+    new_rec.actual_time_s   = static_cast<uint8_t>(actual_i);
+    new_rec.quality_stars   = old_rec.quality_stars;
+    new_rec.flags           = old_rec.flags;
+    new_rec.confidence_pct  = old_rec.confidence_pct;
+    new_rec.taste_flags     = old_rec.taste_flags;
+    // _reserved zeroed by `= {}`.
+    new_rec.timestamp_us    = old_rec.timestamp_us;
+    new_rec.rtc_epoch_s     = old_rec.rtc_epoch_s;
+    new_rec.temp_c          = old_rec.temp_c;
+    new_rec.humidity_pct    = old_rec.humidity_pct;
+    new_rec.pressure_hpa    = old_rec.pressure_hpa;
+    new_rec.user_grind      = old_rec.user_grind;
+    new_rec.suggested_grind = old_rec.suggested_grind;
+
+    if (std::fwrite(&new_rec, 1, sizeof(new_rec), out) != sizeof(new_rec)) {
+      ESP_LOGE(kTag, "migrate v5: short write");
+      std::fclose(in);
+      std::fclose(out);
+      unlink(kShotsTmpPath);
+      return ESP_FAIL;
+    }
+    ++count;
+  }
+  std::fflush(out);
+  const int outfd = fileno(out);
+  if (outfd >= 0) fsync(outfd);
+  std::fclose(out);
+  std::fclose(in);
+
+  if (std::rename(kShotsTmpPath, kShotsPath) != 0) {
+    ESP_LOGE(kTag, "migrate v5: rename failed");
+    unlink(kShotsTmpPath);
+    return ESP_FAIL;
+  }
+
+  ESP_LOGW(kTag, "migrated %u shots from v3/v4 → v5 (delta + preset target → actual seconds)",
+           static_cast<unsigned>(count));
+  return ESP_OK;
+}
+
 }  // namespace
 
 esp_err_t init() {
@@ -200,12 +337,14 @@ esp_err_t init() {
     return err;
   }
 
-  // Migrate any pre-v3 shot records before we let callers read the file or
-  // observe shot_count(). Failure leaves the original file alone (logged at
-  // the migration site); we still mount so the rest of the device boots.
+  // v2 → v3 runs here because it doesn't need the presets table. The second
+  // hop (v3/v4 → v5, which DOES need preset target_time_s) defers to
+  // finalize_migrations(), invoked from app_main after presets::init().
+  // Failure on either path leaves the file alone and the boot continues —
+  // worst case the model just can't read the log.
   const esp_err_t mig_err = migrate_to_v3();
   if (mig_err != ESP_OK) {
-    ESP_LOGE(kTag, "shot record migration failed: %s — leaving file untouched",
+    ESP_LOGE(kTag, "shot record v2 → v3 migration failed: %s — leaving file untouched",
              esp_err_to_name(mig_err));
   }
 
@@ -224,6 +363,18 @@ esp_err_t init() {
     ESP_LOGI(kTag, "littlefs mounted at %s (info unavailable)", kBasePath);
   }
 
+  return ESP_OK;
+}
+
+esp_err_t finalize_migrations() {
+  if (!s_mounted) return ESP_ERR_INVALID_STATE;
+
+  const esp_err_t mig_err = migrate_to_v5();
+  if (mig_err != ESP_OK) {
+    ESP_LOGE(kTag, "shot record v4 → v5 migration failed: %s — leaving file untouched",
+             esp_err_to_name(mig_err));
+  }
+
   // TEMPORARY DIAGNOSTIC — dump every shot on disk as a parseable line so the
   // host-test fixture can be built from real device history. Capped at 64 so
   // a future power user doesn't flood the boot log. Heap-allocated because a
@@ -237,12 +388,12 @@ esp_err_t init() {
     for (size_t i = 0; i < n_dump; ++i) {
       const auto& r = dump_buf[i];
       ESP_LOGI(kTag,
-               "dump[%u]: ver=%u preset=%u t_d=%d stars=%u flags=0x%02x "
+               "dump[%u]: ver=%u preset=%u t_s=%u stars=%u flags=0x%02x "
                "T=%.2f H=%.2f P=%.2f grind=%.2f sugg=%.2f conf=%u rtc=%u "
                "taste=0x%02x",
                static_cast<unsigned>(i), static_cast<unsigned>(r.version),
                static_cast<unsigned>(r.preset_id),
-               static_cast<int>(r.time_delta_s),
+               static_cast<unsigned>(r.actual_time_s),
                static_cast<unsigned>(r.quality_stars),
                static_cast<unsigned>(r.flags),
                static_cast<double>(r.temp_c),

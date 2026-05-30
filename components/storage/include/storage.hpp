@@ -45,14 +45,20 @@ constexpr uint8_t kTasteBalanced   = 1u << 5;
 // rewrites any v2 records present at first v3 boot. v4 keeps the v3 40-byte
 // layout unchanged and only carves `taste_flags` out of the reserved space;
 // v3 records are read as-is and their reserved bytes naturally read as zero
-// (all taste toggles off) — no on-disk migration needed.
+// (all taste toggles off) — no on-disk migration needed. v5 reinterprets the
+// byte at offset 2: v4's `time_delta_s` (int8, shot time vs preset target) is
+// replaced by `actual_time_s` (uint8, raw shot seconds). Storing the absolute
+// time decouples the record from the preset's target_time_s — so changing a
+// preset's target doesn't silently invalidate the history. The v4→v5 migration
+// runs after presets::init and rewrites each record as
+// `actual = clamp(delta + preset[id].target_time_s, 0..255)`.
 //
 // `rtc_epoch_s` is 0 if the PCF85063 hasn't been seeded yet — fall back to
 // `timestamp_us` (esp_timer ticks since boot) for ordering then.
 struct __attribute__((packed)) ShotRecord {
-  uint8_t  version;          // 4 (current)
+  uint8_t  version;          // 5 (current)
   uint8_t  preset_id;        // index into presets::get(); persisted in NVS
-  int8_t   time_delta_s;     // user-reported shot time vs target, signed seconds
+  uint8_t  actual_time_s;    // user-reported raw shot time in seconds (0..255). Replaced v4's int8 `time_delta_s` so the record is self-contained against future preset target_time_s changes.
   uint8_t  quality_stars;    // user-reported taste, 1..5
   uint8_t  flags;            // see kFlag* above; 0 = normal, immutable in v1
   uint8_t  confidence_pct;   // model's confidence at submit time, 0..95 in 5-unit steps; 0 = unknown/suppressed. Carved out of the v3 reserved space — old records naturally read 0 ("unknown"), no migration needed.
@@ -68,10 +74,18 @@ struct __attribute__((packed)) ShotRecord {
 };
 static_assert(sizeof(ShotRecord) == 40, "ShotRecord wire size must be stable");
 
-// Mount LittleFS on the `storage` partition (label matches partitions.csv).
-// Formats the partition on first boot or after corruption. Safe to call once.
-// Returns ESP_ERR_INVALID_STATE on a second call.
+// Mount LittleFS on the `storage` partition (label matches partitions.csv),
+// then run any preset-independent migrations (currently v2 → v3). Formats the
+// partition on first boot or after corruption. Safe to call once. Returns
+// ESP_ERR_INVALID_STATE on a second call.
 esp_err_t init();
+
+// Run any migrations that require the presets table to be loaded (currently
+// v4 → v5, which rewrites stored time deltas as absolute brew seconds using
+// each shot's preset target_time_s). Must be called after `presets::init()`
+// and before `model::init()` reads the shot log. Also emits the temporary
+// shot-log dump so the dump format matches the post-migration schema.
+esp_err_t finalize_migrations();
 
 // Append one shot record to the log. The record's `version` and `_pad` are
 // overwritten internally — callers should leave them zeroed. Other fields are

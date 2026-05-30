@@ -55,7 +55,7 @@ FitSample to_sample(const storage::ShotRecord& r) {
       r.temp_c,
       r.humidity_pct,
       r.pressure_hpa,
-      static_cast<float>(r.time_delta_s),
+      static_cast<float>(r.actual_time_s),
   };
 }
 
@@ -149,8 +149,13 @@ Suggestion suggest_for_preset(uint8_t preset_id) {
   const climate::Reading c = climate::latest();
   if (c.timestamp_us == 0) return none;
 
+  // Pull the live preset target each call so an edit (when the editor UI
+  // lands) shifts the suggestion immediately, no refit required — β stays
+  // invariant and only the standardized target moves.
+  const presets::Preset p = presets::get(preset_id);
   return suggest(s_fits[preset_id],
-                 ClimateInput{c.temp_c, c.humidity_pct, c.pressure_hpa});
+                 ClimateInput{c.temp_c, c.humidity_pct, c.pressure_hpa},
+                 static_cast<float>(p.target_time_s));
 }
 
 }  // namespace espressopost::model

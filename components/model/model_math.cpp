@@ -25,9 +25,15 @@ constexpr float kPriorPrec = 3.0f;
 // Synthetic "phantom" shots prepended to every preset's training data. They
 // encode the one universal fact about grind→time that we don't want the model
 // to have to rediscover from scratch: lower grind number = finer = longer
-// pull (assumed convention; flip the time_delta_s signs if a future grinder's
+// pull (assumed convention; flip the phantom y signs if a future grinder's
 // dial runs the other way). Climate values land at typical room conditions
 // so the phantoms barely touch β_T/β_H/β_P after standardization.
+//
+// `delta_from_target_s` is the phantom's brew time RELATIVE to the
+// per-preset target — at fit time we add the caller-provided target to get
+// the absolute brew seconds the math layer regresses on. Storing the
+// phantoms as deltas keeps them target-agnostic so the same prior shape
+// reads correctly whether a preset targets 22 s or 40 s.
 //
 // Two purposes:
 //   1) Inject grind variance — your first dozen shots may all be at the same
@@ -61,7 +67,7 @@ constexpr float kPriorPrec = 3.0f;
 // human; the model behaves nearly identically at ±0.1 or ±5.0.
 struct PriorShot {
   float user_grind;
-  float time_delta_s;
+  float delta_from_y_center_s;  // signed seconds offset from the real-shot mean brew time; absolute time is added in at fit time
 };
 constexpr float kPriorShotWeight     = 0.5f;
 constexpr float kPriorShotGrindSpread = 0.5f;
@@ -203,19 +209,33 @@ PresetFit fit(const FitSample* samples, std::size_t n_real) {
   PresetFit f = {};
   if (n_real < kMinShotsForFit) return f;
 
-  // --- Step 0: real-shot grind centroid drives phantom placement -------
+  // --- Step 0: real-shot centroids drive phantom placement -------------
   // Phantoms are built symmetrically around the user's actual operating
   // point so the directional prior ("finer→longer") lands near real data
   // regardless of where on the dial the user lives. The symmetric ±spread
   // placement also makes the phantom contributions to mean_g cancel out,
   // so f.mean_g (computed below across all weighted samples) will equal
   // this real-only centroid algebraically.
+  //
+  // Shot records now carry absolute brew seconds (v5+), so the phantom
+  // brew-time anchor follows the real-shot mean too — finer phantom = mean
+  // + 10 s, coarser phantom = mean − 10 s. Anchoring on the user's actual
+  // brew range instead of on the preset target keeps the prior shape
+  // sensible whether the user pulls 22 s shots or 40 s shots.
   double sum_g_real = 0.0;
-  for (std::size_t i = 0; i < n_real; ++i) sum_g_real += samples[i].user_grind;
+  double sum_y_real = 0.0;
+  for (std::size_t i = 0; i < n_real; ++i) {
+    sum_g_real += samples[i].user_grind;
+    sum_y_real += samples[i].actual_time_s;
+  }
   const float g_real_mean = static_cast<float>(sum_g_real / n_real);
+  const float y_real_mean = static_cast<float>(sum_y_real / n_real);
   const PriorShot phantoms[] = {
       {g_real_mean - kPriorShotGrindSpread, +10.0f},  // finer  → longer
       {g_real_mean + kPriorShotGrindSpread, -10.0f},  // coarser → shorter
+  };
+  auto phantom_y = [&](const PriorShot& ph) {
+    return y_real_mean + ph.delta_from_y_center_s;
   };
 
   // --- Step 1: weighted means + stds ------------------------------------
@@ -231,7 +251,7 @@ PresetFit fit(const FitSample* samples, std::size_t n_real) {
     sum_T += samples[i].temp_c;
     sum_H += samples[i].humidity_pct;
     sum_P += samples[i].pressure_hpa;
-    sum_y += samples[i].time_delta_s;
+    sum_y += samples[i].actual_time_s;
   }
   for (const auto& ph : phantoms) {
     w_sum += kPriorShotWeight;
@@ -239,7 +259,7 @@ PresetFit fit(const FitSample* samples, std::size_t n_real) {
     sum_T += kPriorShotWeight * kPriorShotTempC;
     sum_H += kPriorShotWeight * kPriorShotHumidity;
     sum_P += kPriorShotWeight * kPriorShotPressure;
-    sum_y += kPriorShotWeight * ph.time_delta_s;
+    sum_y += kPriorShotWeight * phantom_y(ph);
   }
 
   f.mean_g = static_cast<float>(sum_g / w_sum);
@@ -254,7 +274,7 @@ PresetFit fit(const FitSample* samples, std::size_t n_real) {
     const float dT = samples[i].temp_c       - f.mean_T;
     const float dH = samples[i].humidity_pct - f.mean_H;
     const float dP = samples[i].pressure_hpa - f.mean_P;
-    const float dy = samples[i].time_delta_s - f.mean_y;
+    const float dy = samples[i].actual_time_s - f.mean_y;
     var_g += dg * dg;
     var_T += dT * dT;
     var_H += dH * dH;
@@ -266,7 +286,7 @@ PresetFit fit(const FitSample* samples, std::size_t n_real) {
     const float dT = kPriorShotTempC     - f.mean_T;
     const float dH = kPriorShotHumidity  - f.mean_H;
     const float dP = kPriorShotPressure  - f.mean_P;
-    const float dy = ph.time_delta_s     - f.mean_y;
+    const float dy = phantom_y(ph)        - f.mean_y;
     var_g += kPriorShotWeight * dg * dg;
     var_T += kPriorShotWeight * dT * dT;
     var_H += kPriorShotWeight * dH * dH;
@@ -319,11 +339,11 @@ PresetFit fit(const FitSample* samples, std::size_t n_real) {
   for (std::size_t i = 0; i < n_real; ++i) {
     accumulate(1.0f, samples[i].user_grind, samples[i].temp_c,
                samples[i].humidity_pct, samples[i].pressure_hpa,
-               samples[i].time_delta_s);
+               samples[i].actual_time_s);
   }
   for (const auto& ph : phantoms) {
     accumulate(kPriorShotWeight, ph.user_grind, kPriorShotTempC,
-               kPriorShotHumidity, kPriorShotPressure, ph.time_delta_s);
+               kPriorShotHumidity, kPriorShotPressure, phantom_y(ph));
   }
   for (int r = 0; r < kNFeat; ++r) A[r * kNFeat + r] += kPriorPrec;
 
@@ -343,27 +363,29 @@ PresetFit fit(const FitSample* samples, std::size_t n_real) {
   return f;
 }
 
-Suggestion suggest(const PresetFit& f, ClimateInput c, float target_time_delta) {
+Suggestion suggest(const PresetFit& f, ClimateInput c, float target_time_s) {
   Suggestion none = {std::nanf(""), 0};
   if (!f.valid) return none;
 
-  // grind_z is unknown — we're solving for it. Plug the target time_delta
+  // grind_z is unknown — we're solving for it. Plug the target brew time
   // into the standardized regression equation:
   //   y_z = β_g·g_z + β_T·T_z + β_H·H_z + β_P·P_z
-  //   target y_raw = target_time_delta → target y_z = (target - mean_y) / std_y
+  //   target y_raw = target_time_s → target y_z = (target - mean_y) / std_y
   // Rearrange:
   //   g_z = (target_y_z - β_T·T_z - β_H·H_z - β_P·P_z) / β_g
-  // Standardize climate to raw z-values first — the confidence channel uses
-  // them un-clamped so it can surface "you're extrapolating" honestly. Then
-  // produce clamped versions for the point-estimate solver, which we want
-  // bounded against runaway extrapolation regardless of confidence.
+  // Because records now carry absolute brew seconds, retuning a preset's
+  // target only shifts target_y_z — β stays put. Standardize climate to raw
+  // z-values first — the confidence channel uses them un-clamped so it can
+  // surface "you're extrapolating" honestly. Then produce clamped versions
+  // for the point-estimate solver, which we want bounded against runaway
+  // extrapolation regardless of confidence.
   const float T_z_raw = (c.temp_c       - f.mean_T) / f.std_T;
   const float H_z_raw = (c.humidity_pct - f.mean_H) / f.std_H;
   const float P_z_raw = (c.pressure_hpa - f.mean_P) / f.std_P;
   const float T_z = std::clamp(T_z_raw, -kClimateClampZ, kClimateClampZ);
   const float H_z = std::clamp(H_z_raw, -kClimateClampZ, kClimateClampZ);
   const float P_z = std::clamp(P_z_raw, -kClimateClampZ, kClimateClampZ);
-  const float target_y_z = (target_time_delta - f.mean_y) / f.std_y;
+  const float target_y_z = (target_time_s - f.mean_y) / f.std_y;
 
   // β_g (grind coefficient) near zero means the model didn't learn a useful
   // grind→time relationship — usually because every shot used the same grind

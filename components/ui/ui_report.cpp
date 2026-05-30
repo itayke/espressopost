@@ -132,8 +132,9 @@ constexpr int32_t kBarStripBgHeight   = 14;
 // Time-delta bar — value is the user's reported actual brew time in seconds.
 // Range starts at 0 (a coffee can't run negative time) and tops out below the
 // 3-digit threshold (a 100+ s pull means the basket is choked and the user is
-// dumping it, not journaling it). The stored ShotRecord field is signed delta
-// from the preset's target, computed at submit time.
+// dumping it, not journaling it). The stored ShotRecord field is the raw
+// brew time in seconds (v5+); the delta-vs-target readout shown alongside
+// is purely for the user — derived on the fly from the live preset target.
 constexpr float kDeltaMin = 0.0f;
 constexpr float kDeltaMax = 99.0f;
 constexpr float kDeltaStep = 1.0f;
@@ -1136,17 +1137,13 @@ void on_submit(lv_event_t*) {
   const climate::Reading r = climate::latest();
   storage::ShotRecord rec = {};
   rec.preset_id       = presets::selected_id();
-  // Snap the floating bar value to a whole second, then subtract the preset's
-  // expected target to get the stored delta. int8 clamp guards against the
-  // theoretical 0 vs target=99 case (delta = -99); realistic deltas land
-  // comfortably inside [-30, +30].
+  // Snap the floating bar value to a whole second and store it raw — v5+
+  // records carry absolute brew seconds so a later target-time edit doesn't
+  // silently retroactively reinterpret old history. Bar range is 0..99 and
+  // the field is uint8_t (0..255); the clamp is belt-and-suspenders.
   {
-    const auto p = presets::get(presets::selected_id());
-    const int   snapped_s = static_cast<int>(std::lround(s_delta.value));
-    const int   delta     = std::clamp(snapped_s -
-                                       static_cast<int>(p.target_time_s),
-                                       -128, 127);
-    rec.time_delta_s = static_cast<int8_t>(delta);
+    const int snapped_s = static_cast<int>(std::lround(s_delta.value));
+    rec.actual_time_s = static_cast<uint8_t>(std::clamp(snapped_s, 0, 255));
   }
   rec.quality_stars   = s_stars_value;
   rec.taste_flags     = s_taste_flags;

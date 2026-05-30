@@ -1,8 +1,8 @@
 // espressopost — Step 3: shot logging skeleton.
 //
 // Initializes the AMOLED + touch + LVGL, mounts LittleFS for shot records,
-// starts the BME280 climate read loop, and shows the Report screen (time
-// delta + 1-5 stars + Submit, append to /littlefs/shots.bin). Climate is
+// starts the BME280 climate read loop, and shows the Report screen (brew
+// time + 1-5 stars + Submit, append to /littlefs/shots.bin). Climate is
 // optional; storage is also non-fatal so a wedged partition doesn't brick
 // boot — the UI will just refuse Submit and log the error.
 
@@ -42,6 +42,15 @@ extern "C" void app_main(void) {
              esp_err_to_name(presets_err));
   }
 
+  // Storage's v3/v4 → v5 migration needs preset target_time_s to convert each
+  // record's old time delta into an absolute brew time, so it has to run
+  // after presets::init() and before model::init() reads the shot log.
+  const esp_err_t finalize_err = espressopost::storage::finalize_migrations();
+  if (finalize_err != ESP_OK) {
+    ESP_LOGE(kTag, "storage finalize failed (%s) — model may misread old records",
+             esp_err_to_name(finalize_err));
+  }
+
   const esp_err_t climate_err = espressopost::climate::init();
   if (climate_err != ESP_OK) {
     ESP_LOGW(kTag, "climate sensor unavailable (%s); records will log 0s",
@@ -74,5 +83,5 @@ extern "C" void app_main(void) {
 
   espressopost::ui::start_report();
 
-  ESP_LOGI(kTag, "report screen up — set delta + stars + submit");
+  ESP_LOGI(kTag, "report screen up — set brew time + stars + submit");
 }

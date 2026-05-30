@@ -24,6 +24,14 @@ namespace {
 // suggestion in "no real climate trend" tests resolves around mean grind.
 constexpr ClimateInput kTypicalClimate = {22.0f, 50.0f, 1013.0f};
 
+// Default preset target brew time used across the test suite. Most tests
+// previously expressed their y values as "delta from target" (i.e. centered
+// around 0); with v5 records carrying absolute brew seconds, shots are
+// expressed as `kTestTargetS + delta` and every `suggest()` call passes
+// kTestTargetS as the target. Picking 30 s keeps the deltas readable as
+// the same numbers the device's stored deltas used to be.
+constexpr float kTestTargetS = 30.0f;
+
 // Deterministic, repeatable pseudo-random — same seed → same shots, so a
 // failure is reproducible. Plain LCG; quality is fine for a unit test.
 struct Rng {
@@ -36,9 +44,14 @@ struct Rng {
   float uniform(float lo, float hi) { return lo + next01() * (hi - lo); }
 };
 
-// Synthesize N shots that obey time_delta = β_g_real·(grind - g_center)
-// + climate terms + noise. Grind is sampled uniformly in [g_center -
-// g_spread, g_center + g_spread], climate stays constant per call.
+// Synthesize N shots that obey
+//   actual_time_s = kTestTargetS + β_g_real·(grind - g_center)
+//                   + climate terms + noise.
+// Grind is sampled uniformly in [g_center - g_spread, g_center + g_spread],
+// climate stays constant per call. The kTestTargetS shift converts the
+// (intuitively delta-centered) synthetic relationship into the absolute brew
+// times v5+ records carry — adding a constant offset doesn't change β, so
+// every existing test continues to pin the same slope/direction properties.
 std::vector<FitSample> synth_grind_slope(int n,
                                          float g_center, float g_spread,
                                          float beta_g_real,
@@ -51,7 +64,7 @@ std::vector<FitSample> synth_grind_slope(int n,
   for (int i = 0; i < n; ++i) {
     const float g = rng.uniform(g_center - g_spread, g_center + g_spread);
     const float noise = (rng.next01() - 0.5f) * 2.0f * noise_amp;
-    const float y = beta_g_real * (g - g_center) + noise;
+    const float y = kTestTargetS + beta_g_real * (g - g_center) + noise;
     out.push_back({g, climate.temp_c, climate.humidity_pct,
                    climate.pressure_hpa, y});
   }
@@ -77,15 +90,15 @@ TEST_CASE("zero real shots → invalid fit", "[fit]") {
 }
 
 TEST_CASE("one real shot is below floor → invalid fit", "[fit]") {
-  FitSample s = {5.2f, 22.0f, 50.0f, 1013.0f, +1.0f};
+  FitSample s = {5.2f, 22.0f, 50.0f, 1013.0f, kTestTargetS + 1.0f};
   PresetFit f = fit(&s, 1);
   REQUIRE_FALSE(f.valid);
 }
 
 TEST_CASE("two real shots cross the floor and produce a fit", "[fit]") {
   FitSample shots[] = {
-      {5.2f, 22.0f, 50.0f, 1013.0f, +2.0f},
-      {5.2f, 22.0f, 50.0f, 1013.0f, -1.0f},
+      {5.2f, 22.0f, 50.0f, 1013.0f, kTestTargetS + 2.0f},
+      {5.2f, 22.0f, 50.0f, 1013.0f, kTestTargetS - 1.0f},
   };
   PresetFit f = fit(shots, 2);
   REQUIRE(f.valid);
@@ -106,7 +119,7 @@ TEST_CASE("phantom prior gives β_g the right sign when real shots are uninforma
   // grind→time slope to learn; with phantoms (finer→longer) β_g should land
   // negative in standardized space.
   std::vector<FitSample> shots(5,
-      {5.2f, 22.0f, 50.0f, 1013.0f, +1.0f});
+      {5.2f, 22.0f, 50.0f, 1013.0f, kTestTargetS + 1.0f});
   PresetFit f = fit(shots.data(), shots.size());
   REQUIRE(f.valid);
   REQUIRE(f.beta[0] < 0.0f);
@@ -129,7 +142,8 @@ TEST_CASE("phantom prior is weak — real slope dominates with ~20 shots",
 // -----------------------------------------------------------------------------
 
 TEST_CASE("clear synthetic slope is recovered within tolerance", "[fit]") {
-  // True relationship: time_delta = -2.0 · (grind - 5.5) + small noise.
+  // True relationship: actual_time = kTestTargetS + (-2.0) · (grind - 5.5)
+  //                                 + small noise.
   auto shots = synth_grind_slope(/*n=*/30, 5.5f, 1.0f, -2.0f, kTypicalClimate,
                                  /*noise=*/0.5f);
   PresetFit f = fit(shots.data(), shots.size());
@@ -143,11 +157,12 @@ TEST_CASE("clear synthetic slope is recovered within tolerance", "[fit]") {
 // -----------------------------------------------------------------------------
 
 TEST_CASE("suggestion lands inside the trained grind range", "[suggest]") {
-  // Time_delta mean ≈ 0 by construction → suggested grind sits near g_center.
+  // Shots are centered on kTestTargetS by construction → solving for that
+  // same target should land suggested grind near g_center.
   auto shots = synth_grind_slope(/*n=*/30, 5.5f, 1.0f, -2.0f, kTypicalClimate,
                                  /*noise=*/0.5f);
   PresetFit f = fit(shots.data(), shots.size());
-  Suggestion s = suggest(f, kTypicalClimate);
+  Suggestion s = suggest(f, kTypicalClimate, kTestTargetS);
   REQUIRE(s.confidence_pct > 0);
   REQUIRE(s.grind > 4.5f);
   REQUIRE(s.grind < 6.5f);
@@ -155,24 +170,24 @@ TEST_CASE("suggestion lands inside the trained grind range", "[suggest]") {
 
 TEST_CASE("climate trend in training data shifts the suggested grind",
           "[suggest][climate]") {
-  // Build shots where time_delta depends on BOTH grind AND temp:
-  //   y = -2·(g - 5.5) - 0.5·(T - 23)
-  // → hotter climate makes shots run shorter → to land time_delta=0 the
+  // Build shots where actual brew time depends on BOTH grind AND temp:
+  //   y = kTestTargetS - 2·(g - 5.5) - 0.5·(T - 23)
+  // → hotter climate makes shots run shorter → to land the target the
   //   model should suggest FINER grind (lower number) at higher T.
   Rng rng(42);
   std::vector<FitSample> shots;
   for (int i = 0; i < 40; ++i) {
     const float g = rng.uniform(4.5f, 6.5f);
     const float T = rng.uniform(20.0f, 26.0f);
-    const float y = -2.0f * (g - 5.5f) - 0.5f * (T - 23.0f)
+    const float y = kTestTargetS - 2.0f * (g - 5.5f) - 0.5f * (T - 23.0f)
                   + (rng.next01() - 0.5f);
     shots.push_back({g, T, 50.0f, 1013.0f, y});
   }
   PresetFit f = fit(shots.data(), shots.size());
   REQUIRE(f.valid);
 
-  Suggestion hot  = suggest(f, {26.0f, 50.0f, 1013.0f});
-  Suggestion cold = suggest(f, {20.0f, 50.0f, 1013.0f});
+  Suggestion hot  = suggest(f, {26.0f, 50.0f, 1013.0f}, kTestTargetS);
+  Suggestion cold = suggest(f, {20.0f, 50.0f, 1013.0f}, kTestTargetS);
   REQUIRE(hot.confidence_pct > 0);
   REQUIRE(cold.confidence_pct > 0);
   // Hot → finer (lower grind) than cold.
@@ -181,7 +196,7 @@ TEST_CASE("climate trend in training data shifts the suggested grind",
 
 TEST_CASE("invalid fit yields suppress-suggestion", "[suggest]") {
   PresetFit f = fit(nullptr, 0);  // invalid
-  Suggestion s = suggest(f, kTypicalClimate);
+  Suggestion s = suggest(f, kTypicalClimate, kTestTargetS);
   REQUIRE(s.confidence_pct == 0);
   REQUIRE(std::isnan(s.grind));
 }
@@ -197,7 +212,7 @@ TEST_CASE("confidence is rounded to 5% steps", "[confidence]") {
     auto shots = synth_grind_slope(n, 5.5f, 1.0f, -2.0f, kTypicalClimate,
                                    /*noise=*/0.5f, /*seed=*/static_cast<unsigned>(n));
     PresetFit f = fit(shots.data(), shots.size());
-    Suggestion s = suggest(f, kTypicalClimate);
+    Suggestion s = suggest(f, kTypicalClimate, kTestTargetS);
     INFO("n=" << n << " conf=" << static_cast<int>(s.confidence_pct));
     REQUIRE(s.confidence_pct % 5 == 0);
   }
@@ -209,7 +224,7 @@ TEST_CASE("confidence never exceeds the 95% display cap", "[confidence]") {
   auto shots = synth_grind_slope(/*n=*/200, 5.5f, 1.0f, -2.0f, kTypicalClimate,
                                  /*noise=*/0.1f);
   PresetFit f = fit(shots.data(), shots.size());
-  Suggestion s = suggest(f, kTypicalClimate);
+  Suggestion s = suggest(f, kTypicalClimate, kTestTargetS);
   REQUIRE(s.confidence_pct <= 95);
 }
 
@@ -225,7 +240,7 @@ TEST_CASE("confidence has a stable plateau within the safe climate band",
   for (int i = 0; i < 30; ++i) {
     const float g = rng.uniform(4.5f, 6.5f);
     const float T = rng.uniform(20.0f, 26.0f);
-    const float y = -2.0f * (g - 5.5f) - 0.5f * (T - 23.0f)
+    const float y = kTestTargetS - 2.0f * (g - 5.5f) - 0.5f * (T - 23.0f)
                   + (rng.next01() - 0.5f);
     shots.push_back({g, T, 50.0f, 1013.0f, y});
   }
@@ -233,10 +248,10 @@ TEST_CASE("confidence has a stable plateau within the safe climate band",
   REQUIRE(f.valid);
 
   // Queries inside the safe band: same confidence number.
-  const uint8_t centroid    = suggest(f, {f.mean_T,              50.0f, 1013.0f}).confidence_pct;
-  const uint8_t mild_warm   = suggest(f, {f.mean_T + 0.3f * f.std_T, 50.0f, 1013.0f}).confidence_pct;
+  const uint8_t centroid    = suggest(f, {f.mean_T,              50.0f, 1013.0f}, kTestTargetS).confidence_pct;
+  const uint8_t mild_warm   = suggest(f, {f.mean_T + 0.3f * f.std_T, 50.0f, 1013.0f}, kTestTargetS).confidence_pct;
   // Outside the safe band: penalty kicks in.
-  const uint8_t far_warm    = suggest(f, {f.mean_T + 2.5f * f.std_T, 50.0f, 1013.0f}).confidence_pct;
+  const uint8_t far_warm    = suggest(f, {f.mean_T + 2.5f * f.std_T, 50.0f, 1013.0f}, kTestTargetS).confidence_pct;
   INFO("centroid=" << int(centroid) << " mild=" << int(mild_warm) << " far=" << int(far_warm));
   REQUIRE(centroid == mild_warm);
   REQUIRE(far_warm < centroid);
@@ -255,13 +270,13 @@ TEST_CASE("confidence does not decrease as more data arrives",
     for (int i = 0; i < n; ++i) {
       const float g = rng.uniform(4.5f, 6.5f);
       const float T = rng.uniform(20.0f, 26.0f);
-      const float y = -2.0f * (g - 5.5f) - 0.5f * (T - 23.0f)
+      const float y = kTestTargetS - 2.0f * (g - 5.5f) - 0.5f * (T - 23.0f)
                     + (rng.next01() - 0.5f);
       shots.push_back({g, T, 50.0f, 1013.0f, y});
     }
     PresetFit f = fit(shots.data(), shots.size());
     if (!f.valid) return 0;
-    return suggest(f, {26.0f, 50.0f, 1013.0f}).confidence_pct;
+    return suggest(f, {26.0f, 50.0f, 1013.0f}, kTestTargetS).confidence_pct;
   };
   const int c5  = pull_conf(5);
   const int c20 = pull_conf(20);
@@ -288,14 +303,18 @@ TEST_CASE("confidence does not decrease as more data arrives",
 
 namespace {
 
+// Real-device fixtures stored as deltas-from-target in source for readability
+// — the absolute brew seconds the model consumes are derived at fixture-build
+// time by adding kTestTargetS (30 s). Shots originally captured against a 30 s
+// preset, so the absolutes match what the device actually logged.
 constexpr FitSample kRealShots[] = {
-    {5.20f, 21.10f, 44.86f,  999.61f,  0.0f},  // 5★
-    {5.20f, 22.53f, 46.47f,  999.53f,  1.0f},  // 5★
-    {5.20f, 19.18f, 58.69f, 1005.89f,  4.0f},  // 4★
-    {5.20f, 23.20f, 44.18f, 1000.63f, -2.0f},  // 4★
-    {5.20f, 22.95f, 53.68f, 1003.41f, -8.0f},  // 5★
-    {5.10f, 23.20f, 51.98f, 1008.58f, -6.0f},  // 5★
-    {5.00f, 25.92f, 50.88f, 1006.91f,  8.0f},  // 5★  ← hottest climate, finer grind, ran LONG (contradicts β_T<0)
+    {5.20f, 21.10f, 44.86f,  999.61f, kTestTargetS +  0.0f},  // 5★
+    {5.20f, 22.53f, 46.47f,  999.53f, kTestTargetS +  1.0f},  // 5★
+    {5.20f, 19.18f, 58.69f, 1005.89f, kTestTargetS +  4.0f},  // 4★
+    {5.20f, 23.20f, 44.18f, 1000.63f, kTestTargetS -  2.0f},  // 4★
+    {5.20f, 22.95f, 53.68f, 1003.41f, kTestTargetS -  8.0f},  // 5★
+    {5.10f, 23.20f, 51.98f, 1008.58f, kTestTargetS -  6.0f},  // 5★
+    {5.00f, 25.92f, 50.88f, 1006.91f, kTestTargetS +  8.0f},  // 5★  ← hottest climate, finer grind, ran LONG (contradicts β_T<0)
 };
 constexpr uint8_t kRealStars[] = {5, 5, 4, 4, 5, 5, 5};
 constexpr size_t  kRealN       = sizeof(kRealShots) / sizeof(kRealShots[0]);
@@ -304,14 +323,14 @@ constexpr size_t  kRealN       = sizeof(kRealShots) / sizeof(kRealShots[0]);
 // hardware (78°F = 25.5°C); H/P estimated from the two most-recent shots.
 constexpr ClimateInput kLiveClimate = {25.5f, 50.0f, 1008.0f};
 
-// Quality-weighted mean time_delta across "good" shots (4-5 stars). With this
-// fixture every shot qualifies, so it's just the unweighted mean.
+// Quality-weighted mean actual brew time across "good" shots (4-5 stars).
+// With this fixture every shot qualifies, so it's just the unweighted mean.
 float quality_weighted_target(const FitSample* shots, const uint8_t* stars,
                               size_t n, uint8_t min_stars = 4) {
   float sum = 0.0f;
   int   cnt = 0;
   for (size_t i = 0; i < n; ++i) {
-    if (stars[i] >= min_stars) { sum += shots[i].time_delta_s; ++cnt; }
+    if (stars[i] >= min_stars) { sum += shots[i].actual_time_s; ++cnt; }
   }
   return cnt > 0 ? sum / static_cast<float>(cnt) : 0.0f;
 }
@@ -335,7 +354,7 @@ TEST_CASE("real-data: model suggests within the trained grind range",
        << "  σ[0] = " << f.sigma[0]
        << "  real grind slope = " << (f.beta[0] * f.std_y / f.std_g) << " s/unit");
 
-  Suggestion s = suggest(f, kLiveClimate);
+  Suggestion s = suggest(f, kLiveClimate, kTestTargetS);
   INFO("CURRENT: suggested=" << s.grind << " conf=" << int(s.confidence_pct));
   REQUIRE(s.confidence_pct > 0);
   REQUIRE(s.grind >= 4.5f);
@@ -345,19 +364,19 @@ TEST_CASE("real-data: model suggests within the trained grind range",
 TEST_CASE("real-data: quality-weighted target converges to baseline when all shots are good",
           "[real-data]") {
   // When every training shot is rated 4-5★, the quality-weighted mean is
-  // basically the unweighted mean of all time_deltas, and that's already
-  // what `target=0` targets after mean-centering. So the hack should
-  // produce a result very close to baseline — useful behavior to confirm
-  // (the hack doesn't *break* anything when there's no quality signal to
-  // separate good from bad shots).
+  // basically the unweighted mean of all actual brew times — close to
+  // kTestTargetS (the preset target). Passing it as the solver target
+  // should produce a suggestion very close to the baseline (target =
+  // kTestTargetS), confirming the hack doesn't break anything when there's
+  // no quality signal to separate good from bad shots.
   PresetFit f = fit(kRealShots, kRealN);
   REQUIRE(f.valid);
 
   const float t_qw = quality_weighted_target(kRealShots, kRealStars, kRealN);
-  Suggestion baseline = suggest(f, kLiveClimate, /*target=*/0.0f);
+  Suggestion baseline = suggest(f, kLiveClimate, kTestTargetS);
   Suggestion hacked   = suggest(f, kLiveClimate, /*target=*/t_qw);
 
-  INFO("quality-weighted target time_delta = " << t_qw);
+  INFO("quality-weighted target actual_time = " << t_qw);
   INFO("BASELINE: suggested=" << baseline.grind);
   INFO("HACK    : suggested=" << hacked.grind);
   REQUIRE(std::fabs(hacked.grind - baseline.grind) < 0.5f);
@@ -365,9 +384,10 @@ TEST_CASE("real-data: quality-weighted target converges to baseline when all sho
 
 TEST_CASE("real-data: target that exactly matches mean_y returns the centroid grind",
           "[real-data]") {
-  // Sanity probe — if you set the target equal to mean_y, target_y_z = 0, so
-  // the solver should suggest exactly mean_g. This isolates "what does the
-  // model think is the centroid?" from any climate extrapolation effect.
+  // Sanity probe — if you set the target equal to mean_y (the weighted mean
+  // brew time across real + phantom shots), target_y_z = 0, so the solver
+  // should suggest exactly mean_g. Isolates "what does the model think is
+  // the centroid?" from any climate extrapolation effect.
   PresetFit f = fit(kRealShots, kRealN);
   REQUIRE(f.valid);
 
@@ -397,8 +417,8 @@ TEST_CASE("real-data: combined confidence differentiates extrapolation distance"
   PresetFit f6 = fit(kRealShots, 6);  // pre-shot-6 fit
   PresetFit f7 = fit(kRealShots, 7);  // current fit
 
-  const Suggestion past    = suggest(f6, {25.50f, 50.0f, 1008.0f});
-  const Suggestion current = suggest(f7, {26.57f, 50.54f, 1006.41f});
+  const Suggestion past    = suggest(f6, {25.50f, 50.0f, 1008.0f}, kTestTargetS);
+  const Suggestion current = suggest(f7, {26.57f, 50.54f, 1006.41f}, kTestTargetS);
   INFO("past=" << past.grind << "@" << int(past.confidence_pct) << "%"
        << "  current=" << current.grind << "@" << int(current.confidence_pct) << "%");
   // Both surface a suggestion (averaging can't zero one factor's bad news).
@@ -420,9 +440,11 @@ TEST_CASE("real-data: in-range climate query gets higher confidence than extrapo
   PresetFit f = fit(kRealShots, kRealN);
   REQUIRE(f.valid);
 
-  const Suggestion at_centroid    = suggest(f, {f.mean_T, f.mean_H, f.mean_P});
+  const Suggestion at_centroid    = suggest(f, {f.mean_T, f.mean_H, f.mean_P},
+                                            kTestTargetS);
   const Suggestion at_extrapolate = suggest(f, {f.mean_T + 3.0f * f.std_T,
-                                                 f.mean_H, f.mean_P});
+                                                 f.mean_H, f.mean_P},
+                                            kTestTargetS);
   INFO("centroid="  << at_centroid.grind    << "@" << int(at_centroid.confidence_pct)    << "%");
   INFO("extrapol.=" << at_extrapolate.grind << "@" << int(at_extrapolate.confidence_pct) << "%");
   REQUIRE(at_centroid.confidence_pct > at_extrapolate.confidence_pct);
@@ -433,14 +455,14 @@ TEST_CASE("real-data: in-range climate query gets higher confidence than extrapo
 // flagged the confidence as feeling too high for an apparent extrapolation.
 namespace {
 constexpr FitSample kRealShots8[] = {
-    {5.20f, 21.10f, 44.86f,  999.61f,  0.0f},
-    {5.20f, 22.53f, 46.47f,  999.53f,  1.0f},
-    {5.20f, 19.18f, 58.69f, 1005.89f,  4.0f},
-    {5.20f, 23.20f, 44.18f, 1000.63f, -2.0f},
-    {5.20f, 22.95f, 53.68f, 1003.41f, -8.0f},
-    {5.10f, 23.20f, 51.98f, 1008.58f, -6.0f},
-    {5.00f, 25.92f, 50.88f, 1006.91f,  8.0f},
-    {5.10f, 27.48f, 49.05f, 1005.43f, -8.0f},  // ← newest
+    {5.20f, 21.10f, 44.86f,  999.61f, kTestTargetS +  0.0f},
+    {5.20f, 22.53f, 46.47f,  999.53f, kTestTargetS +  1.0f},
+    {5.20f, 19.18f, 58.69f, 1005.89f, kTestTargetS +  4.0f},
+    {5.20f, 23.20f, 44.18f, 1000.63f, kTestTargetS -  2.0f},
+    {5.20f, 22.95f, 53.68f, 1003.41f, kTestTargetS -  8.0f},
+    {5.10f, 23.20f, 51.98f, 1008.58f, kTestTargetS -  6.0f},
+    {5.00f, 25.92f, 50.88f, 1006.91f, kTestTargetS +  8.0f},
+    {5.10f, 27.48f, 49.05f, 1005.43f, kTestTargetS -  8.0f},  // ← newest
 };
 constexpr size_t kRealN8 = sizeof(kRealShots8) / sizeof(kRealShots8[0]);
 constexpr ClimateInput kLiveClimate8 = {27.55f, 49.33f, 1005.37f};
@@ -457,7 +479,7 @@ TEST_CASE("real-data 8-shot: grind-extrap factor brings confidence in line",
   PresetFit f = fit(kRealShots8, kRealN8);
   REQUIRE(f.valid);
 
-  Suggestion s = suggest(f, kLiveClimate8);
+  Suggestion s = suggest(f, kLiveClimate8, kTestTargetS);
   INFO("mean_g=" << f.mean_g << " std_g_real=" << f.std_g_real);
   INFO("suggested grind=" << s.grind
        << "  grind z=" << std::fabs((s.grind - f.mean_g) / f.std_g_real));
@@ -472,15 +494,17 @@ TEST_CASE("real-data 8-shot: grind-extrap factor brings confidence in line",
 TEST_CASE("real-data: target = recent-shots quality-weighted mean (last 3)",
           "[real-data]") {
   // What if we weight recency too — average only the last 3 high-quality
-  // shots' time_deltas? With the user's data those are -2, -8, -6 → mean
-  // -5.33s. Closer to current behavior but reflects the recent trend.
+  // shots' brew times? With the user's data those landed at deltas
+  // -8, -6, +8 → mean -2s → absolute target = kTestTargetS − 2. Closer to
+  // current behavior but reflects the recent trend.
   PresetFit f = fit(kRealShots, kRealN);
   REQUIRE(f.valid);
 
-  // Last 3 shots: t_d = -8, -6, +8 → mean -2. The +8 outlier (today's hot
-  // brew at the finer grind) dramatically changes the recency-weighted view
-  // compared to the 6-shot fixture, where the recent-3 mean was -5.33s.
-  const float t_recent = (-8.0f + -6.0f + 8.0f) / 3.0f;
+  // Last 3 shots: deltas -8, -6, +8 → mean -2 → recent target = 28 s.
+  // The +8 outlier (today's hot brew at the finer grind) dramatically
+  // changes the recency-weighted view compared to the 6-shot fixture, where
+  // the recent-3 mean delta was -5.33s.
+  const float t_recent = kTestTargetS + (-8.0f + -6.0f + 8.0f) / 3.0f;
   Suggestion s = suggest(f, kLiveClimate, /*target=*/t_recent);
   INFO("recent-3 target=" << t_recent << "  suggested=" << s.grind);
   // With the recent-only target, suggestion should be noticeably higher

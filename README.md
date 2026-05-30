@@ -1,8 +1,8 @@
 # espressopost
 
 Standalone ESP32-S3 firmware for an espresso-grind helper. Reads ambient
-climate, logs per-shot feedback (time delta + 1–5 quality stars), and
-learns a per-preset grind adjustment from local data. Offline-first.
+climate, logs per-shot feedback (raw brew seconds + 1–5 quality stars),
+and learns a per-preset grind adjustment from local data. Offline-first.
 
 ## Status
 
@@ -33,12 +33,16 @@ flow lands); subsequent boots read the live clock straight off the chip
 and `ShotRecord.rtc_epoch_s` is a real wall-clock value.
 
 **Model v1 (time model only):** per-preset Bayesian linear regression
-on `time_delta_s ~ grind + T + H + P` with a unit-variance Gaussian
-ridge prior (effective ≈ 3 shots per coefficient). Two synthetic
-"phantom" shots get folded into every fit at `{real_mean − 0.5, +10s}`
-and `{real_mean + 0.5, −10s}` (weight 0.5 each), built at fit time so
-the directional prior tracks wherever on the dial the user actually
-grinds. They (a) inject grind variance so `std_g` never sits at the
+on `actual_time_s ~ grind + T + H + P` with a unit-variance Gaussian
+ridge prior (effective ≈ 3 shots per coefficient). Shot records carry the
+raw brew time in seconds (v5+) instead of a delta against the preset
+target, so retuning a preset's target time only shifts what `suggest()`
+aims for — β stays invariant and no history is invalidated. Two synthetic
+"phantom" shots get folded into every fit at
+`{grind_mean − 0.5, time_mean + 10s}` and
+`{grind_mean + 0.5, time_mean − 10s}` (weight 0.5 each), built at fit
+time so the directional prior tracks wherever on the dial — and wherever
+in the brew-time range — the user actually pulls. They (a) inject grind variance so `std_g` never sits at the
 floor while real shots cluster at one dial setting, (b) seed `β_g`
 with the right sign (finer→longer) so the first suggestion points the
 user the right way, and (c) fade as real data accumulates (two real
@@ -62,15 +66,20 @@ while data accumulates, and recency weighting was dropped in v1 because
 we have no signal yet that bean-age / grinder drift matters enough to
 justify guessing a half-life.
 
-**One-time v2 → v3 migration runs on first boot of this build:** every
-existing v2 shot (32 B, no grind data) gets rewritten to v3 (40 B) with
-`user_grind = 5.2f` and `suggested_grind = NaN`, atomically via a temp
-file + rename so a power loss mid-migration retries on the next boot.
-Preset blobs in NVS get the same treatment — v1 (20 B, int8
-`click_anchor`) is expanded to v2 (24 B, float `grind_anchor = 5.2f`).
-After the first boot logs `storage: migrated N shots from v2 → v3` and
-`presets: migrated preset table v1 → v2`, both migrations become no-ops
-forever.
+**Shot-record migrations run on first boot of this build:** any v1/v2
+records (32 B, no grind data) get rewritten in storage::init() to the
+40 B v3 layout with `user_grind = 5.2f` and `suggested_grind = NaN`. A
+second pass in `storage::finalize_migrations()` (called after
+`presets::init()` so it can look up each shot's `preset.target_time_s`)
+converts v3/v4 records — which stored `time_delta_s` — to v5, where the
+byte at offset 2 holds the raw `actual_time_s` instead. Both steps go
+through a temp file + atomic rename so a power loss mid-migration retries
+on the next boot. Preset blobs in NVS get the same family of treatment:
+v1 (20 B, int8 `click_anchor`) → v2 (24 B, float `grind_anchor = 5.2f`),
+v2 → v3 (last byte repurposed as `yield_g`). After first boot logs
+`storage: migrated N shots from v2 → v3` /
+`storage: migrated N shots from v3/v4 → v5` and the preset migration
+line, every step becomes a no-op forever.
 
 The full build order lives in the kickoff brief. Each step ends in a
 runnable device state.
@@ -216,20 +225,23 @@ instead.
    = dial UP), and the value is clamped to 0.0 … 30.0. The final value
    on release is persisted to NVS so a reboot resumes on the same dial
    setting per preset.
-5. Tapping **Post** swaps the center for a time-delta stepper (`-` / `+`
-   around a value, range −30 … +30), five gray quality circles, and a
-   muted **Submit** button (disabled until both delta and stars are
-   set). The ring + cursor + predicted arrow stay live — if the user
-   forgot to dial before tapping Post, they can finish from here. A
-   small `×` near the top cancels back to Idle without saving.
-6. Once time delta and stars are set, Submit lights amber. Tapping it
-   appends a 40-byte v3 record to `/littlefs/shots.bin` (carrying
-   `user_grind` from the dial and `suggested_grind` from whatever the
-   predicted arrow was pointing at at submit time — NaN when the arrow
-   was hidden), briefly shows `Saved #N` near the top, returns to Idle,
-   and clears the post-form fields. The model refits immediately after
-   the append, so the predicted arrow on the next climate tick reflects
-   the new data point.
+5. Tapping **Post** swaps the center for a brew-time stepper (`-` / `+`
+   around a value in seconds, range 0 … 99 — the live delta vs the
+   preset's target is shown alongside, derived on the fly), five gray
+   quality circles, and a muted **Submit** button (disabled until both
+   the time and stars are set). The ring + cursor + predicted arrow
+   stay live — if the user forgot to dial before tapping Post, they can
+   finish from here. A small `×` near the top cancels back to Idle
+   without saving.
+6. Once brew time and stars are set, Submit lights amber. Tapping it
+   appends a 40-byte v5 record to `/littlefs/shots.bin` (carrying
+   `actual_time_s` from the brew-time stepper, `user_grind` from the
+   dial, and `suggested_grind` from whatever the predicted arrow was
+   pointing at at submit time — NaN when the arrow was hidden), briefly
+   shows `Saved #N` near the top, returns to Idle, and clears the
+   post-form fields. The model refits immediately after the append, so
+   the predicted arrow on the next climate tick reflects the new data
+   point.
 7. Power-cycling restores the last-selected preset (NVS persists it),
    the last grind value for each preset, and the shot count carries
    over (`Saved #2`, `#3`, …). Older firmware (pre-30.0 cap) that left a
@@ -247,8 +259,9 @@ instead.
    come up red (low band) for the first few shots and warm to orange /
    green as real data accumulates. The convention encoded in the
    phantoms is "lower grind number = finer = longer shot" — if your
-   grinder runs the opposite direction, flip the `time_delta_s` signs
-   in the `phantoms[]` array inside `fit()` in
+   grinder runs the opposite direction, flip the
+   `delta_from_y_center_s` signs in the `phantoms[]` array inside
+   `fit()` in
    [`components/model/model_math.cpp`](components/model/model_math.cpp).
 
 If any of these fail, the most likely culprits in order:
@@ -309,7 +322,7 @@ memory notes for design decisions already locked in.
 ├── partitions.csv              custom: nvs + factory (4 MB) + littlefs (~12 MB)
 ├── sdkconfig.defaults          PSRAM, flash, partition table, FreeRTOS tick
 ├── main/
-│   ├── app_main.cpp            display → touch → storage → presets → climate → rtc → model → power → ui
+│   ├── app_main.cpp            display → touch → storage → presets → storage.finalize_migrations → climate → rtc → model → power → ui
 │   ├── board_pins.hpp          verbatim from Waveshare's reference repo
 │   ├── idf_component.yml       managed deps: lvgl, CO5300, CST9217, littlefs
 │   └── CMakeLists.txt
@@ -326,7 +339,7 @@ memory notes for design decisions already locked in.
     │   ├── include/model_math.hpp pure math API (FitSample, fit, suggest, Suggestion)
     │   ├── model.cpp              IDF glue: mutex, storage, climate, logging
     │   └── model_math.cpp         pure math: standardization, ridge prior, Σ
-    └── ui/                     Report screen (preset / delta / grind / suggestion / stars / Submit)
+    └── ui/                     Report screen (preset / brew time / grind / suggestion / stars / Submit)
 
 tests/
 └── host/                          host-side unit tests for model_math (no IDF)

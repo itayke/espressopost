@@ -24,13 +24,17 @@ constexpr float kGrindStep = 0.05f;
 
 // Minimum feature row the fit needs from one shot. Decoupled from
 // storage::ShotRecord to keep the math layer free of storage's (and therefore
-// IDF's) includes.
+// IDF's) includes. `actual_time_s` is the raw shot time in seconds — the
+// model regresses it against the other features and `suggest()` solves for
+// the grind that lands the preset's `target_time_s` (passed in by the
+// caller). Storing absolute time keeps the math invariant against later
+// preset target changes: only the target plugged into `suggest()` shifts.
 struct FitSample {
   float user_grind;
   float temp_c;
   float humidity_pct;
   float pressure_hpa;
-  float time_delta_s;
+  float actual_time_s;
 };
 
 // Live climate at predict time. The wrapper pulls this from climate::latest();
@@ -103,14 +107,15 @@ PresetFit fit(const FitSample* samples, std::size_t n_real);
 // caller should hide the row" (insufficient data, β_g near zero, predictive
 // variance above threshold).
 //
-// `target_time_delta` lets callers override the suggestion solver's
-// objective. The default (0) means "solve for the grind that lands the
-// preset's stated target time" — current production behavior. Pass a
-// non-zero value (e.g. the quality-weighted mean of historical time_deltas)
-// to nudge the model toward a different time target without re-fitting; the
-// host tests use this to compare the in-product behavior against the
-// "quality-weighted target" hack discussed in the parked-suggestion memory.
+// `target_time_s` is the brew time the solver aims for (typically the
+// preset's `target_time_s`). With shot records now storing absolute brew
+// seconds, this is the only knob that shifts when a user retunes a preset's
+// target — β stays invariant and only the standardized target moves. Callers
+// that want to override the target with a non-zero alternative (e.g. the
+// quality-weighted mean of historical brew times) can pass any positive
+// value; host tests do this to compare in-product behavior against the
+// "quality-weighted target" hack from the parked-suggestion memory.
 Suggestion suggest(const PresetFit& f, ClimateInput climate,
-                   float target_time_delta = 0.0f);
+                   float target_time_s);
 
 }  // namespace espressopost::model

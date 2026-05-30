@@ -24,12 +24,15 @@ ANOMALY = 0x02
 
 # `taste=0x..` is v4+; v3 dump lines omit it entirely. Keep the group optional
 # so a single regex parses both — when absent, taste_flags reads 0 ("none
-# reported"), which matches the on-device backward-compat behavior.
+# reported"), which matches the on-device backward-compat behavior. v5 dump
+# lines replace the signed `t_d=<delta>` field with an unsigned `t_s=<actual>`
+# raw brew time; only v5 dumps reach this script in practice (the on-device
+# migration rewrites older records on first boot), so the regex matches v5.
 DUMP_RE = re.compile(
     r"dump\[(?P<idx>\d+)\]:\s*"
     r"ver=(?P<ver>\d+)\s+"
     r"preset=(?P<preset>\d+)\s+"
-    r"t_d=(?P<td>-?\d+)\s+"
+    r"t_s=(?P<ts>\d+)\s+"
     r"stars=(?P<stars>\d+)\s+"
     r"flags=0x(?P<flags>[0-9a-fA-F]+)\s+"
     r"T=(?P<T>-?[0-9.]+|nan)\s+"
@@ -47,7 +50,7 @@ DUMP_RE = re.compile(
 class Shot:
     idx: int
     preset: int
-    td: int
+    ts: int   # actual brew time in seconds (v5+)
     stars: int
     flags: int
     T: float
@@ -77,7 +80,7 @@ def parse(stream):
         shots.append(Shot(
             idx=int(m["idx"]),
             preset=int(m["preset"]),
-            td=int(m["td"]),
+            ts=int(m["ts"]),
             stars=int(m["stars"]),
             flags=int(m["flags"], 16),
             T=_f(m["T"]), H=_f(m["H"]), P=_f(m["P"]),
@@ -107,24 +110,24 @@ def temp_bin_block(shots):
         ("mid  (22-25°C)", lambda s: 22 <= s.T < 25),
         ("hot  (≥25°C)",   lambda s: s.T >= 25),
     ]
-    print(f"{'bin':<16} {'n':>3} {'grind':>6} {'sugg':>6} {'t_d':>6} {'stars':>6}")
+    print(f"{'bin':<16} {'n':>3} {'grind':>6} {'sugg':>6} {'t_s':>6} {'stars':>6}")
     for label, pred in bins:
         sub = [s for s in shots if pred(s)]
         if not sub:
             continue
         gs = np.array([s.grind for s in sub])
         sugs = np.array([s.sugg for s in sub if not math.isnan(s.sugg)])
-        tds = np.array([s.td for s in sub])
+        tss = np.array([s.ts for s in sub])
         st = np.array([s.stars for s in sub])
         sug_s = f"{sugs.mean():>6.2f}" if len(sugs) else "  n/a "
-        print(f"{label:<16} {len(sub):>3} {gs.mean():>6.2f} {sug_s} {tds.mean():>6.1f} {st.mean():>6.1f}")
+        print(f"{label:<16} {len(sub):>3} {gs.mean():>6.2f} {sug_s} {tss.mean():>6.1f} {st.mean():>6.1f}")
 
 
 def corr_block(shots):
-    cols = ["T", "H", "P", "grind", "sugg", "t_d", "stars"]
+    cols = ["T", "H", "P", "grind", "sugg", "t_s", "stars"]
     rows = []
     for s in shots:
-        row = [s.T, s.H, s.P, s.grind, s.sugg, s.td, s.stars]
+        row = [s.T, s.H, s.P, s.grind, s.sugg, s.ts, s.stars]
         if any(math.isnan(x) for x in row):
             continue
         rows.append(row)
@@ -140,7 +143,7 @@ def corr_block(shots):
 
 
 def ols_block(shots):
-    rows = [(s.T, s.H, s.P, s.grind, s.td) for s in shots if not math.isnan(s.T)]
+    rows = [(s.T, s.H, s.P, s.grind, s.ts) for s in shots if not math.isnan(s.T)]
     if len(rows) < 5:
         print(f"(skipping — only {len(rows)} rows, need ≥5)")
         return
@@ -165,7 +168,7 @@ def ols_block(shots):
         ("P",     1.0,   "per +1 hPa"),
         ("grind", 0.05,  "per +0.05 step"),
     ]
-    print(f"  intercept (t_d at climate centroid):  {beta[0]:+.2f} s")
+    print(f"  intercept (actual brew seconds at climate centroid):  {beta[0]:+.2f} s")
     print(f"  {'feature':<7} {'std':>6} {'β/1σ':>7}   {'practical reading':<20}")
     for (name, step, descr), b_std, sx in zip(features, beta[1:], std_X):
         if sx == 0:
@@ -224,7 +227,7 @@ def report(shots):
         temp_bin_block(ps)
         print("\n[correlation matrix (Pearson r), non-NaN rows only]")
         corr_block(ps)
-        print("\n[OLS: time_delta ~ T + H + P + grind   (standardized)]")
+        print("\n[OLS: actual_time_s ~ T + H + P + grind   (standardized)]")
         ols_block(ps)
         print("\n[suggestion calibration]")
         sugg_calib_block(ps)
