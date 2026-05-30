@@ -56,6 +56,11 @@ constexpr int32_t kCenterLineOffsetY = kCenterLineY - kCenter;
 constexpr int32_t kPostBtnW          = 120;
 constexpr int32_t kPostBtnH          =  58;
 constexpr int32_t kPostBtnStroke     =   4;
+// Hit-area padding on every side of the action buttons (POST, ✕, Submit,
+// (-)/(+) brew steppers). The visual disc stays kPostBtnH; the click
+// target grows by this amount on all sides. Overlap between adjacent
+// buttons is fine — LVGL dispatches to the topmost-hit widget.
+constexpr int32_t kPostBtnExtClick   =  10;
 constexpr int32_t kCenterEdgeInset   =  30;
 // Right-edge inset used only by the primary action buttons (idle POST,
 // post Submit). Tighter than kCenterEdgeInset so the action button sits
@@ -2029,6 +2034,9 @@ lv_obj_t* make_arrow(lv_obj_t* parent, ArrowState* state, int32_t widget_size) {
 // references; the draw handler translates it to layer coords per paint, so
 // the array can be widget-relative and shared across positions.
 constexpr int32_t kStarSize        = 38;
+// Hit-area padding on every side of each star's tap target. Overlap
+// between adjacent stars is fine — LVGL picks the topmost-hit widget.
+constexpr int32_t kStarExtClick    = 10;
 constexpr float   kStarInnerRatio  = 0.5f;
 // Sub-pixel outward push applied to each triangle vertex (from the
 // triangle's own centroid) so adjacent triangles overlap slightly along
@@ -2416,6 +2424,7 @@ void build_idle_group(lv_obj_t* scr) {
   lv_obj_set_style_border_opa(s_post_btn, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_align(s_post_btn, LV_ALIGN_RIGHT_MID, -kPrimaryBtnRightInset,
                kCenterLineOffsetY);
+  lv_obj_set_ext_click_area(s_post_btn, kPostBtnExtClick);
   lv_obj_add_event_cb(s_post_btn, on_post_tap, LV_EVENT_CLICKED, nullptr);
   lv_obj_t* post_lbl = lv_label_create(s_post_btn);
   lv_obj_set_style_text_color(post_lbl, kColorAccent, LV_PART_MAIN);
@@ -2525,6 +2534,7 @@ void build_post_group(lv_obj_t* scr) {
     lv_obj_set_style_border_width(b, kPostBtnStroke, LV_PART_MAIN);
     lv_obj_set_style_border_opa(b, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_align(b, LV_ALIGN_CENTER, s.dx, kBrewRowCenterY - kCenter);
+    lv_obj_set_ext_click_area(b, kPostBtnExtClick);
     lv_obj_add_event_cb(b, s.cb, LV_EVENT_CLICKED, nullptr);
     lv_obj_t* lbl = lv_label_create(b);
     lv_obj_set_style_text_color(lbl, kColorAccent, LV_PART_MAIN);
@@ -2550,6 +2560,9 @@ void build_post_group(lv_obj_t* scr) {
   constexpr int32_t kPillH            = (kPostBtnH * 4) / 5;
   constexpr int32_t kPillRowGap       = 6;
   constexpr int32_t kPillTextPaddingX = 27;   // total chrome around pill text (5 each side)
+  // Hit-area padding on every side of each pill. Adjacent pills overlap
+  // here — LVGL dispatches to the topmost-hit widget.
+  constexpr int32_t kPillExtClick     = 10;
   constexpr int32_t kPillRowMidY      = 175;
   constexpr int32_t kPillRowY         = kPillRowMidY - kPillH / 2;
   constexpr int32_t kStarsToPillsGap  = 30;
@@ -2620,6 +2633,7 @@ void build_post_group(lv_obj_t* scr) {
     lv_obj_set_style_pad_all(tap, 0, LV_PART_MAIN);
     lv_obj_clear_flag(tap, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(tap, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(tap, kStarExtClick);
     lv_obj_add_event_cb(tap, on_star_tap, LV_EVENT_CLICKED,
                         reinterpret_cast<void*>(static_cast<uintptr_t>(i)));
     s_star_btns[i]  = tap;
@@ -2639,6 +2653,7 @@ void build_post_group(lv_obj_t* scr) {
     lv_obj_set_style_border_opa(b, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_pos(b, pill_x, kPillRowY);
     pill_x += pill_w[i] + kPillRowGap;
+    lv_obj_set_ext_click_area(b, kPillExtClick);
     lv_obj_add_event_cb(b, on_taste_tap, LV_EVENT_CLICKED,
                         reinterpret_cast<void*>(
                             static_cast<uintptr_t>(pills[i].mask)));
@@ -2671,6 +2686,7 @@ void build_post_group(lv_obj_t* scr) {
   lv_obj_set_style_border_opa(s_cancel_btn, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_align(s_cancel_btn, LV_ALIGN_LEFT_MID, kCenterEdgeInset,
                kCenterLineOffsetY);
+  lv_obj_set_ext_click_area(s_cancel_btn, kPostBtnExtClick);
   lv_obj_add_event_cb(s_cancel_btn, on_cancel_tap, LV_EVENT_CLICKED, nullptr);
   lv_obj_t* cancel_lbl = lv_label_create(s_cancel_btn);
   lv_obj_set_style_text_color(cancel_lbl, kColorCancel, LV_PART_MAIN);
@@ -2688,6 +2704,7 @@ void build_post_group(lv_obj_t* scr) {
   lv_obj_set_style_border_opa(s_submit_btn, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_align(s_submit_btn, LV_ALIGN_RIGHT_MID, -kPrimaryBtnRightInset,
                kCenterLineOffsetY);
+  lv_obj_set_ext_click_area(s_submit_btn, kPostBtnExtClick);
   s_submit_label = lv_label_create(s_submit_btn);
   lv_obj_set_style_text_color(s_submit_label, kColorSubmitDisabled, LV_PART_MAIN);
   lv_obj_set_style_text_font(s_submit_label, &lv_font_montserrat_24,
