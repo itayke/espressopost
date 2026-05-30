@@ -133,15 +133,15 @@ constexpr int32_t kTinyTickLen        = 2;
 constexpr int32_t kBarStripBgHeight   = 14;
 // Tick colors are declared after the kColor* palette below.
 
-// Time-delta bar — value is the user's reported actual brew time in seconds.
-// Range starts at 0 (a coffee can't run negative time) and tops out below the
-// 3-digit threshold (a 100+ s pull means the basket is choked and the user is
-// dumping it, not journaling it). The stored ShotRecord field is the raw
-// brew time in seconds (v5+); the delta-vs-target readout shown alongside
-// is purely for the user — derived on the fly from the live preset target.
-constexpr float kDeltaMin = 0.0f;
-constexpr float kDeltaMax = 99.0f;
-constexpr float kDeltaStep = 1.0f;
+// Brew time — value is the user's reported actual brew time in seconds,
+// captured in post mode via the (-)/(+) buttons. Range starts at 0 (a
+// coffee can't run negative time) and tops out below the 3-digit threshold
+// (a 100+ s pull means the basket is choked and the user is dumping it,
+// not journaling it). Stored verbatim in ShotRecord.actual_time_s; the
+// model and journal derive any delta-vs-target on the fly from the live
+// preset target.
+constexpr uint8_t kBrewMinS = 0;
+constexpr uint8_t kBrewMaxS = 99;
 
 constexpr uint8_t kMaxStars = 5;
 
@@ -222,16 +222,18 @@ struct BarSpec {
   float    step;                  // snap grid; value rounds here at settle
   float    visible_half_range;    // value units shown from cursor center to bar edge
   int32_t  y;                     // screen y of bar centerline
-  // PRESSED hit-test band in screen y. Wider than the visible bar so a slightly
-  // mistargeted swipe still lands. The two bars' bands must NOT overlap, or a
-  // single press would race both bars' drag flags.
+  // PRESSED hit-test band in screen y. Wider than the visible bar so a
+  // slightly mistargeted swipe still lands. If a second bar is ever added,
+  // its band must NOT overlap this one, or a single press would race both
+  // bars' drag flags.
   int32_t  y_band_top;
   int32_t  y_band_bottom;
-  int      big_every;             // 1-of-N tick indices is "big"   (integer in grind; 10 s in delta)
-  int      mid_every;             // 1-of-N tick indices is "mid"   (half-unit grind; 5 s delta)
-  int      small_every;           // 1-of-N tick indices is "small"; the rest are "tiny". 0 disables the
-                                  // tiny tier (delta) so every non-big/non-mid index renders as small.
-  float    tick_unit;             // value step between adjacent ticks (sub-step in grind, 1 s in delta)
+  int      big_every;             // 1-of-N tick indices is "big"
+  int      mid_every;             // 1-of-N tick indices is "mid"
+  int      small_every;           // 1-of-N tick indices is "small"; the rest are "tiny".
+                                  // Sentinel 0 disables the tiny tier — every non-big/non-mid
+                                  // index renders as small.
+  float    tick_unit;             // value step between adjacent ticks
 };
 
 struct BarState;
@@ -270,35 +272,12 @@ constexpr int      kMomentumMaxTicks = 17;     // ≈500 ms at 30 ms/tick
 constexpr float    kMomentumDecay    = 0.85f;  // per tick → ~6% left after 17 ticks
 constexpr float    kMomentumMinSpeed = 0.5f;   // value units/sec — below this we stop
 
-// Time-delta bar lives in the post group only — mirror image of the grind
-// area: cursor at the TOP of the screen pointing DOWN at the bar, bar
-// directly below, value readout (BREW TIME caption + big number + DELTA
-// block) below that. Big tick lands on every 10 s, mid tick on every 5 s.
-constexpr int32_t kDeltaBarY = 82;
-
-// BREW TIME value sits below the delta bar by the same gap GRIND VALUE
-// sits above its bar, so its absolute Y mirrors across the bar. Promoted
-// to file scope so the delta y-band can reach down through it without
-// hardcoding a magic number — tune kGrindValueY and kBrewValueCenterY
-// follows automatically. kBrewValueHalfHeight is the rough Mont 46 glyph
-// half-row used to extend the band past the value's bottom.
-constexpr int32_t kGrindValueCenterY = kCenter + kGrindValueY;
-constexpr int32_t kBrewValueCenterY  =
-    kDeltaBarY + (kBarY - kGrindValueCenterY);
-constexpr int32_t kBrewValueHalfHeight = 25;
-
-// y-band bounds.
-//   - Grind keeps the legacy "everything below the cap separator" range —
-//     the bottom area (bar + cursor + big number + captions + SUGGESTION) is
-//     identical in idle and post, so the band shouldn't change either; a
-//     press anywhere over the GRIND VALUE readout still starts a scrub.
-//   - Delta mirrors grind: it owns from the top edge of the screen down
-//     through the BREW TIME readout, so a press on the downward cursor,
-//     the bar, OR the seconds value all start a scrub.
-//   - The bands cannot overlap. Quiet zone is y=(delta band_bottom+1)..297.
-// visible_half_range × 2 is the total value span across the bar's width.
-// Smaller half-range → more px per tick → finer drag-feel without touching
-// kBarHalfWidth. Tune here when the dial feels too twitchy or too coarse.
+// Grind bar y-band: the bottom area (bar + cursor + big number + captions
+// + SUGGESTION) is identical in idle and post, so a press anywhere over the
+// GRIND VALUE readout still starts a scrub. visible_half_range × 2 is the
+// total value span across the bar's width — smaller half-range → more px
+// per tick → finer drag-feel without touching kBarHalfWidth. Tune here
+// when the dial feels too twitchy or too coarse.
 constexpr BarSpec kGrindSpec = {
   /*min*/                kGrindMin,
   /*max*/                kGrindMax,
@@ -318,20 +297,6 @@ constexpr BarSpec kGrindSpec = {
 constexpr float kBarPxPerUnit =
     static_cast<float>(kBarHalfWidth) / kGrindSpec.visible_half_range;
 
-constexpr BarSpec kDeltaSpec = {
-  /*min*/                kDeltaMin,
-  /*max*/                kDeltaMax,
-  /*step*/               kDeltaStep,
-  /*visible_half_range*/ 7.5f,
-  /*y*/                  kDeltaBarY,
-  /*y_band_top*/         0,
-  /*y_band_bottom*/      kBrewValueCenterY + kBrewValueHalfHeight,
-  /*big_every*/          10,
-  /*mid_every*/          5,
-  /*small_every*/        0,
-  /*tick_unit*/          1.0f,
-};
-
 // ---------------------------------------------------------------------------
 // Widget handles. Grouped by visual role; null until start_report() builds them.
 // ---------------------------------------------------------------------------
@@ -344,10 +309,19 @@ lv_obj_t* s_grind_caption      = nullptr; // "GRIND VALUE" header next to the bi
 lv_obj_t* s_suggestion_caption = nullptr; // static "SUGGESTION" header, right of the big value
 lv_obj_t* s_suggested_label   = nullptr;  // "x.xx (xx%)" value line under SUGGESTION caption
 
-// The two bars themselves. spec is wired at start_report(); widgets at
-// build_grinder. Grind is shown in both modes; delta only in post.
+// The grind bar — spec is wired at start_report(), widget at build_grinder.
+// Shown in both modes.
 BarState s_grind = {};
-BarState s_delta = {};
+
+// Brew time captured by the post-mode (-)/(+) buttons. `touched` flips
+// false→true on the first tap (so the value displays as "--" until then
+// and Submit stays gated), `value_s` carries the current seconds within
+// [kBrewMinS, kBrewMaxS].
+struct BrewTimeState {
+  uint8_t value_s;
+  bool    touched;
+};
+BrewTimeState s_brew = {};
 
 // Idle group:
 lv_obj_t* s_idle_group          = nullptr;
@@ -370,9 +344,9 @@ lv_obj_t* s_post_btn            = nullptr;
 
 // Idle-mode readout (lives inside s_preset_btn) and post-mode read-only
 // readout (lives inside s_post_group). The post variant has no button
-// chrome since cycling presets mid-form would invalidate the delta bar's
-// seeded default. QUALITY caption sits next to the star row above the
-// center line.
+// chrome since cycling presets mid-form would invalidate the brew-time
+// pre-seed (see reset_post_form). QUALITY caption sits next to the star
+// row in the middle band.
 PresetReadout s_idle_preset     = {};
 PresetReadout s_post_preset     = {};
 lv_obj_t*     s_quality_caption = nullptr;
@@ -410,11 +384,10 @@ ClimateTile s_climate_tiles[3] = {};
 
 // Post group:
 lv_obj_t* s_post_group          = nullptr;
-lv_obj_t* s_delta_cursor        = nullptr;  // downward-pointing arrow at the top, mirror of the grind cursor
-lv_obj_t* s_brew_time_caption   = nullptr;  // "BREW TIME" caption left of the value, mirror of GRIND VALUE
-lv_obj_t* s_brew_time_value     = nullptr;  // big "30s" readout, centered (Mont 46)
-lv_obj_t* s_brew_delta_caption  = nullptr;  // "DELTA" header right of value, mirror of SUGGESTION caption
-lv_obj_t* s_brew_delta_value    = nullptr;  // "+/-Ns" tinted by abs(delta), mirror of suggestion value line
+lv_obj_t* s_brew_time_caption   = nullptr;  // "BREW TIME" caption at the top of the post screen
+lv_obj_t* s_brew_time_value     = nullptr;  // big "30s" / "--" readout (Mont 46), centered between the (-)/(+) buttons
+lv_obj_t* s_brew_minus_btn      = nullptr;  // (-) disc, same chrome as the ✕ button
+lv_obj_t* s_brew_plus_btn       = nullptr;  // (+) disc, same chrome as the ✕ button
 lv_obj_t* s_star_btns [kMaxStars] = {};      // transparent tap targets sized to each star
 lv_obj_t* s_star_icons[kMaxStars] = {};      // custom-drawn star widgets (outline when unlit, filled fan when lit)
 // Per-star lit/unlit flag read by draw_star_event each paint. Declared as a
@@ -495,10 +468,6 @@ constexpr int32_t kSuggestionArrowTipGap   = -4;
 
 ArrowState s_cursor_arrow_state = {0.0f, COLOR(0xE0E0E0),
                                    kCursorArrowHalfBase, kCursorArrowHeight};
-// Mirror of the grind cursor — 180° so the tip points DOWN at the delta bar
-// from above. Same size as the grind cursor for visual parity.
-ArrowState s_delta_cursor_state  = {180.0f, COLOR(0xE0E0E0),
-                                    kCursorArrowHalfBase, kCursorArrowHeight};
 // Suggestion arrow color is reassigned per confidence tier on every refresh;
 // initial value is just a placeholder until the first refresh_grinder().
 ArrowState s_suggestion_arrow_state = {0.0f, COLOR(0xE0E0E0),
@@ -564,8 +533,8 @@ void draw_arrow_event(lv_event_t* e) {
 // Generic bar tick painter. Pulls BarState* off the widget's user_data, reads
 // the spec's range / tick rules, and emits the bg rail + tick rects centered
 // on the widget's coord box. Out-of-range ticks (below spec.min or above
-// spec.max) are clipped — the delta bar can't go under 0 s, so ticks below
-// 0 must not render even when the cursor sits near the floor.
+// spec.max) are clipped so a bar whose range starts at 0 doesn't bleed
+// ticks below the floor when the cursor sits there.
 void draw_bar_event(lv_event_t* e) {
   lv_layer_t* layer = lv_event_get_layer(e);
   if (layer == nullptr) return;
@@ -642,10 +611,9 @@ void draw_bar_event(lv_event_t* e) {
     const float x_offset = (v_i - value) * px_per_unit;
     if (std::fabs(x_offset) > static_cast<float>(kBarHalfWidth) + 0.5f) continue;
     const int32_t tick_x = cx + static_cast<int32_t>(std::lround(x_offset));
-    // Tier: big_every (integers in grind, 10 s in delta) > mid_every
-    // (half-unit grind, 5 s delta) > small_every (when set; the rest are
-    // tiny). When small_every == 0 (delta), the tiny tier is disabled and
-    // every non-big/non-mid index falls through as small. Tiny shares the
+    // Tier: big_every > mid_every > small_every (when set; the rest are
+    // tiny). When small_every == 0 the tiny tier is disabled and every
+    // non-big/non-mid index falls through as small. Tiny shares the
     // small color + thickness; only length differs.
     const bool is_big   = (idx % spec.big_every == 0);
     const bool is_mid   = !is_big && (idx % spec.mid_every == 0);
@@ -889,45 +857,20 @@ void refresh_preset_label() {
   }
 }
 
-// Tier color for the DELTA readout — same palette as confidence_color but
-// keyed on |delta|. Tight pulls (|Δt| < 3 s) read as blue, mid drift as
-// purple, wide misses as red. Mirrors the confidence-tier visual cue so the
-// user reads color the same way across both Post readouts.
-lv_color_t delta_color(int delta_s) {
-  const int abs_d = std::abs(delta_s);
-  if (abs_d < 3) return kColorConfidenceHigh;
-  if (abs_d < 6) return kColorConfidenceMed;
-  return kColorConfidenceLow;
-}
-
-// BREW TIME row — value (e.g. "30s") + DELTA block ("+/-Ns" tinted by tier).
-// Called from delta_on_change so the readout tracks the bar value frame by
-// frame, and from reset_post_form / enter_post on seed.
-void refresh_brew_time_labels() {
-  const int brew_s   = static_cast<int>(std::lround(s_delta.value));
-  const auto p       = presets::get(presets::selected_id());
-  const int delta_s  = brew_s - static_cast<int>(p.target_time_s);
-
-  if (s_brew_time_value != nullptr) {
-    char buf[8];
-    std::snprintf(buf, sizeof(buf), "%ds", brew_s);
-    lv_label_set_text(s_brew_time_value, buf);
+// BREW TIME big readout — "Ns" once the user has tapped (-) or (+),
+// muted "--" before that. Called from on_brew_minus_tap / on_brew_plus_tap
+// on each step and from reset_post_form on form reset.
+void refresh_brew_time_value() {
+  if (s_brew_time_value == nullptr) return;
+  if (!s_brew.touched) {
+    lv_label_set_text(s_brew_time_value, "--");
+    lv_obj_set_style_text_color(s_brew_time_value, kColorMuted, LV_PART_MAIN);
+    return;
   }
-  if (s_brew_delta_value != nullptr) {
-    char buf[8];
-    // Show a sign on non-zero deltas ("+3s" / "-3s"); plain "0s" reads cleaner
-    // than "+0s" for a pull that landed exactly on target.
-    if (delta_s == 0) std::snprintf(buf, sizeof(buf), "0s");
-    else              std::snprintf(buf, sizeof(buf), "%+ds", delta_s);
-    lv_label_set_text(s_brew_delta_value, buf);
-    // Caption and value share the tier color so the whole block reads as
-    // one unit — same trick the SUGGESTION block uses with confidence_color.
-    const lv_color_t tier = delta_color(delta_s);
-    lv_obj_set_style_text_color(s_brew_delta_value, tier, LV_PART_MAIN);
-    if (s_brew_delta_caption != nullptr) {
-      lv_obj_set_style_text_color(s_brew_delta_caption, tier, LV_PART_MAIN);
-    }
-  }
+  char buf[8];
+  std::snprintf(buf, sizeof(buf), "%us", static_cast<unsigned>(s_brew.value_s));
+  lv_label_set_text(s_brew_time_value, buf);
+  lv_obj_set_style_text_color(s_brew_time_value, kColorText, LV_PART_MAIN);
 }
 
 // Flip each star's lit flag against s_stars_value and invalidate so the
@@ -967,18 +910,19 @@ void refresh_taste_toggles() {
 
 void refresh_submit_enabled() {
   if (s_submit_btn == nullptr) return;
-  // Submit unlocks only after BOTH quality is set AND the delta bar has been
-  // touched. The touched gate prevents a one-tap submit that records the
-  // preset's default brew time verbatim — even a "delta zero" pull should be
-  // an explicit confirmation, not the form's initial state.
-  const bool ready  = s_stars_value > 0 && s_delta.touched;
+  // Submit unlocks only after BOTH quality is set AND the user has tapped
+  // (-) or (+) at least once. The touched gate prevents a one-tap submit
+  // that records the preset's default brew time verbatim — even a pull
+  // that landed exactly on target should be an explicit confirmation, not
+  // the form's initial state.
+  const bool ready  = s_stars_value > 0 && s_brew.touched;
   const lv_color_t color =
       ready ? kColorSubmitEnabled : kColorSubmitDisabled;
   // Outline-only button — toggle the border + label color in lockstep
   // so the disabled state reads as a muted ghost of the armed one. We
   // intentionally do NOT use LV_STATE_DISABLED: LVGL's theme injects a
   // half-opacity override on that state that shadows our color choice.
-  // on_submit's own gate (s_stars_value > 0 && s_delta.touched) drops
+  // on_submit's own gate (s_stars_value > 0 && s_brew.touched) drops
   // any click that lands while disabled, so we don't need the state
   // to suppress events either.
   lv_obj_set_style_border_color(s_submit_btn, color, LV_PART_MAIN);
@@ -1063,23 +1007,21 @@ void apply_mode() {
 }
 
 // Reset post-form state to the preset's defaults. Pulled out of enter_idle so
-// enter_post can share the same reseed (e.g. preset target time → delta bar
+// enter_post can share the same reseed (e.g. preset target time → brew time
 // seed) without duplicating the logic. Grind survives — the user already
 // dialed it for this shot and the bar/cursor are still showing that.
 void reset_post_form() {
-  s_stars_value     = 0;
-  s_taste_flags     = 0;
-  s_delta.touched   = false;
-  s_delta.velocity  = 0.0f;
-  // Seed the delta bar at the preset's expected brew time so the cursor lands
-  // on the user's normal target. They drag from there to their actual time.
-  const auto p = presets::get(presets::selected_id());
-  s_delta.value = std::clamp(static_cast<float>(p.target_time_s),
-                             kDeltaSpec.min, kDeltaSpec.max);
-  if (s_delta.widget != nullptr) lv_obj_invalidate(s_delta.widget);
+  s_stars_value   = 0;
+  s_taste_flags   = 0;
+  s_brew.touched  = false;
+  // Pre-seed the brew time at the preset's target so the first (-)/(+) tap
+  // can promote it straight to the user's normal target value without an
+  // intervening jump. The "--" display stays until `touched` flips.
+  const auto p   = presets::get(presets::selected_id());
+  s_brew.value_s = std::clamp<uint8_t>(p.target_time_s, kBrewMinS, kBrewMaxS);
   refresh_stars();
   refresh_taste_toggles();
-  refresh_brew_time_labels();
+  refresh_brew_time_value();
   refresh_submit_enabled();
 }
 
@@ -1092,7 +1034,7 @@ void enter_idle() {
 void enter_post() {
   s_mode = Mode::Post;
   // Re-seed on entry too — preset may have been cycled in idle since the last
-  // post session, and the delta bar's default needs to follow the new target.
+  // post session, and the brew-time pre-seed needs to follow the new target.
   reset_post_form();
   apply_mode();
 }
@@ -1153,20 +1095,38 @@ void on_taste_tap(lv_event_t* e) {
   // gate Submit.
 }
 
+// Brew time (-) / (+) tap handlers. The first tap of EITHER button just
+// flips `touched` so the readout transitions from "--" to the pre-seeded
+// preset target (set in reset_post_form); subsequent taps step the value
+// by 1 second in the tapped direction, clamped to [kBrewMinS, kBrewMaxS].
+// This matches "first click jumps to preset, then +/- adjusts from there".
+void on_brew_minus_tap(lv_event_t*) {
+  if (!s_brew.touched) {
+    s_brew.touched = true;
+  } else if (s_brew.value_s > kBrewMinS) {
+    --s_brew.value_s;
+  }
+  refresh_brew_time_value();
+  refresh_submit_enabled();
+}
+
+void on_brew_plus_tap(lv_event_t*) {
+  if (!s_brew.touched) {
+    s_brew.touched = true;
+  } else if (s_brew.value_s < kBrewMaxS) {
+    ++s_brew.value_s;
+  }
+  refresh_brew_time_value();
+  refresh_submit_enabled();
+}
+
 void on_submit(lv_event_t*) {
-  if (!(s_stars_value > 0 && s_delta.touched)) return;  // belt-and-suspenders
+  if (!(s_stars_value > 0 && s_brew.touched)) return;  // belt-and-suspenders
 
   const climate::Reading r = climate::latest();
   storage::ShotRecord rec = {};
   rec.preset_id       = presets::selected_id();
-  // Snap the floating bar value to a whole second and store it raw — v5+
-  // records carry absolute brew seconds so a later target-time edit doesn't
-  // silently retroactively reinterpret old history. Bar range is 0..99 and
-  // the field is uint8_t (0..255); the clamp is belt-and-suspenders.
-  {
-    const int snapped_s = static_cast<int>(std::lround(s_delta.value));
-    rec.actual_time_s = static_cast<uint8_t>(std::clamp(snapped_s, 0, 255));
-  }
+  rec.actual_time_s   = s_brew.value_s;
   rec.quality_stars   = s_stars_value;
   rec.taste_flags     = s_taste_flags;
   rec.timestamp_us    = esp_timer_get_time();
@@ -1210,11 +1170,11 @@ void on_submit(lv_event_t*) {
 }
 
 // ---------------------------------------------------------------------------
-// Generic bar mechanics. Each BarState owns its own value, drag bookkeeping,
-// and momentum timer. Hit-test, drag advance, momentum flick, and settle-snap
-// are uniform — grind vs delta differs only in BarSpec values and on_change /
-// on_settle / on_touched hooks. on_grind_bar_event and on_delta_bar_event are
-// thin forwarders the overlay registers; everything below them is shared.
+// Generic bar mechanics. The grind bar is the only consumer now (the brew
+// time bar was replaced with the post-mode (-)/(+) button row), but the
+// chassis stays generic so a future second bar can drop in without
+// duplicating the drag/momentum bookkeeping. on_grind_bar_event is a thin
+// forwarder the swipe overlay registers; everything below it is shared.
 // ---------------------------------------------------------------------------
 void bar_cancel_momentum(BarState* s) {
   if (s->momentum_timer != nullptr) {
@@ -1349,36 +1309,22 @@ void bar_dispatch_event(lv_event_t* e, BarState* s) {
   }
 }
 
-// Per-bar forwarders. The grind overlay is always live; the delta overlay
-// gates on mode so a press in post-mode coords during idle doesn't fire it.
+// Overlay forwarder. Only the grind bar uses the swipe overlay now — the
+// brew time captured by the post-mode (-)/(+) buttons doesn't touch this
+// path.
 void on_grind_bar_event(lv_event_t* e) {
   bar_dispatch_event(e, &s_grind);
 }
 
-void on_delta_bar_event(lv_event_t* e) {
-  if (s_mode != Mode::Post) return;
-  bar_dispatch_event(e, &s_delta);
-}
-
-// Per-bar hooks invoked by bar_dispatch_event / bar_momentum_tick when value
-// changes, the drag/glide settles, or the bar is touched for the first time
-// in a form session.
+// Grind bar hooks invoked by bar_dispatch_event / bar_momentum_tick when
+// the value moves, the drag/glide settles, or the bar is touched for the
+// first time in a form session.
 void grind_on_change(BarState*) {
   refresh_grinder();
   refresh_grind_value_label();
 }
 void grind_on_settle(BarState*) {
   presets::set_last_grind(presets::selected_id(), s_grind.value);
-}
-
-void delta_on_change(BarState* s) {
-  if (s->widget != nullptr) lv_obj_invalidate(s->widget);
-  // BREW TIME readout tracks the bar value frame-by-frame — same pattern as
-  // grind_on_change → refresh_grind_value_label.
-  refresh_brew_time_labels();
-}
-void delta_on_touched(BarState*) {
-  refresh_submit_enabled();
 }
 
 // ---------------------------------------------------------------------------
@@ -2206,10 +2152,10 @@ lv_obj_t* make_star(lv_obj_t* parent, StarState* state) {
 // ---------------------------------------------------------------------------
 // Group builders.
 // ---------------------------------------------------------------------------
-// Make one bar's tick-strip widget. Parent decides visibility — the grind bar
-// goes on the screen (visible both modes); the delta bar goes inside
-// s_post_group so the mode swap hides it. The BarState's spec/widget/hooks
-// must be wired by the caller before lv_obj_invalidate triggers a paint.
+// Make one bar's tick-strip widget. Parent decides visibility — the grind
+// bar goes on the screen (visible in both modes). The BarState's
+// spec/widget/hooks must be wired by the caller before lv_obj_invalidate
+// triggers a paint.
 lv_obj_t* make_bar_widget(lv_obj_t* parent, BarState* state) {
   lv_obj_t* w = lv_obj_create(parent);
   lv_obj_set_size(w, 2 * kBarHalfWidth, kBarStripHeight);
@@ -2229,16 +2175,19 @@ lv_obj_t* make_bar_widget(lv_obj_t* parent, BarState* state) {
 
 void build_grinder(lv_obj_t* scr) {
   // Wire the grind bar state. Spec is constexpr; widget+value+hooks attach
-  // here. (Delta bar is wired in build_post_group, on its own group.)
+  // here. Brew time has no bar in post mode anymore — it's captured by the
+  // (-)/(+) buttons built in build_post_group, which dispatch directly via
+  // on_brew_minus_tap / on_brew_plus_tap.
   s_grind.spec      = &kGrindSpec;
   s_grind.on_change = grind_on_change;
   s_grind.on_settle = grind_on_settle;
   s_grind.on_touched = nullptr;  // grind doesn't gate any UI on "touched"
 
-  // Transparent full-screen overlay catches horizontal swipes for BOTH bars.
-  // Per-bar forwarders hit-test against their own spec.y_band and ignore
-  // events that don't belong to them. Sits BEHIND the climate tiles + Post
-  // button + Post-mode buttons so those widgets take their own taps first.
+  // Transparent full-screen overlay catches horizontal swipes for the grind
+  // bar. on_grind_bar_event hit-tests against kGrindSpec's y_band and
+  // ignores events that don't land inside it. Sits BEHIND the climate tiles
+  // + Post button + Post-mode buttons so those widgets take their own taps
+  // first.
   s_grinder_overlay = lv_obj_create(scr);
   lv_obj_set_size(s_grinder_overlay, kScreen, kScreen);
   lv_obj_set_pos(s_grinder_overlay, 0, 0);
@@ -2250,7 +2199,6 @@ void build_grinder(lv_obj_t* scr) {
   for (auto code : {LV_EVENT_PRESSED, LV_EVENT_PRESSING, LV_EVENT_RELEASED,
                     LV_EVENT_PRESS_LOST}) {
     lv_obj_add_event_cb(s_grinder_overlay, on_grind_bar_event, code, nullptr);
-    lv_obj_add_event_cb(s_grinder_overlay, on_delta_bar_event, code, nullptr);
   }
 
   // Tick bar — custom-drawn widget centered on (kCenter, kBarY). On every
@@ -2426,15 +2374,16 @@ void build_idle_group(lv_obj_t* scr) {
   lv_obj_clear_flag(s_idle_group, LV_OBJ_FLAG_CLICKABLE);
 
   // --- Climate area ---
-  // All three separators (two vertical column dividers + the horizontal cap
-  // at kClimateSeparatorY) are idle-only — parented to s_idle_group so they
-  // hide with the climate strip when the top area swaps to post UI.
+  // The two vertical column dividers are idle-only — parented to s_idle_group
+  // so they hide with the climate strip when the top area swaps to post UI.
+  // The horizontal cap at kClimateSeparatorY is parented to `scr` (further
+  // below, next to the grinder separator) so it stays visible across both
+  // modes — in idle it caps the climate strip; in post it doubles as the
+  // top boundary of the Quality section.
   make_separator(s_idle_group, kColLeftEdge1 - kSeparatorThickness / 2, kSeparatorInset,
                  kSeparatorThickness, kClimateSeparatorY - 2 * kSeparatorInset);
   make_separator(s_idle_group, kColLeftEdge2 - kSeparatorThickness / 2, kSeparatorInset,
                  kSeparatorThickness, kClimateSeparatorY - 2 * kSeparatorInset);
-  make_separator(s_idle_group, kSeparatorInset, kClimateSeparatorY - kSeparatorThickness / 2,
-                 kScreen - 2 * kSeparatorInset, kSeparatorThickness);
 
   build_climate_tile(s_idle_group, 0, kColLeftEdge0,  kColLeftEdge1,
                      kIconGauge,  kColorIconPressure, "PRESSURE",
@@ -2469,9 +2418,14 @@ void build_idle_group(lv_obj_t* scr) {
   lv_label_set_text(post_lbl, "Post");
   lv_obj_center(post_lbl);
 
-  // Horizontal separator capping the grinder area. Parented to `scr` so it
-  // stays visible across both modes — the bottom (grind) area below it is
-  // identical in idle and post.
+  // Horizontal separators capping the climate strip (top) and the grinder
+  // area (bottom). Parented to `scr` so they stay visible across both
+  // modes — the climate cap doubles as the Quality-section top boundary
+  // in post mode, and the grinder cap frames the bottom area (identical
+  // in idle and post).
+  make_separator(scr, kSeparatorInset,
+                 kClimateSeparatorY - kSeparatorThickness / 2,
+                 kScreen - 2 * kSeparatorInset, kSeparatorThickness);
   make_separator(scr, kSeparatorInset,
                  kGrinderSeparatorY - kSeparatorThickness / 2,
                  kScreen - 2 * kSeparatorInset, kSeparatorThickness);
@@ -2480,7 +2434,7 @@ void build_idle_group(lv_obj_t* scr) {
   // line (POST btn lives to the right; preset is the dominant readout).
   // Lives in s_idle_group so it hides in post mode, where the post readout
   // takes its place at the same anchor (read-only — cycling presets
-  // mid-form would invalidate the delta seed).
+  // mid-form would invalidate the brew-time pre-seed).
   s_preset_btn = lv_button_create(s_idle_group);
   lv_obj_set_style_bg_opa(s_preset_btn, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_shadow_width(s_preset_btn, 0, LV_PART_MAIN);
@@ -2503,179 +2457,114 @@ void build_post_group(lv_obj_t* scr) {
   lv_obj_clear_flag(s_post_group, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_clear_flag(s_post_group, LV_OBJ_FLAG_CLICKABLE);
 
-  // Top-area layout (replaces climate strip in idle). Cursor at the TOP
-  // pointing down, delta bar below, then the BREW TIME row (big Mont 46
-  // value + BREW TIME caption left + DELTA block right) mirroring the
-  // grind area's value-with-flanking-labels pattern. The Sour/Bitter
-  // pills + QUALITY-labeled star row stack between the BREW TIME row and
-  // the center line. The climate cap separator at kClimateSeparatorY is
-  // idle-only, so the band from delta bar to kCenterLineY is fully owned
-  // by this form.
+  // Post-mode layout (replaces idle's climate strip in the top area; the
+  // grind area below kGrinderSeparatorY is shared across modes):
   //
-  //   delta cursor tip (downward arrow, mirror of grind cursor)
-  //   delta bar (kDeltaBarY; band [0, 100])
-  //   big BREW TIME value (Mont 46), centered; BREW TIME caption flanks
-  //     its left, DELTA + "+/-Ns" two-line block flanks its right
-  //   QUALITY caption (left, x=kQualityCaptionX) · 5-star row (centered) ·
-  //     Sour / Bitter pills stacked on the right (outline when off, accent
-  //     fill when on — see refresh_taste_toggles)
-  //   center line: ✕ (LEFT, Temperature red, kCenterEdgeInset from edge) ·
-  //     preset readout (CENTER, Mont 24 / kColorText, two lines) ·
-  //     Submit (RIGHT, humidity-blue when armed, muted when not,
-  //     kCenterEdgeInset from edge)
-  //
-  // The grind area below — grind value, GRIND VALUE caption, SUGGESTION
-  // block, cap separator at kGrinderSeparatorY, grind bar — is unchanged
-  // across modes. Concrete y values are derived below from kDeltaBarY,
-  // kGrindValueY, and kGrindCaptionY, so tuning the grind layout
-  // auto-shifts the BREW TIME row to stay symmetric.
+  //   top area (y=0..kClimateSeparatorY):
+  //     BREW TIME caption (Mont 14, top-centered) + a row of
+  //     (-) | big value (Mont 46) | (+) centered horizontally. First tap
+  //     of either button promotes the value from "--" to the pre-seeded
+  //     preset target; subsequent taps step ±1 s.
+  //   climate separator at kClimateSeparatorY (shared, parented to `scr`
+  //     in build_idle_group — see comment there).
+  //   middle band (y=kClimateSeparatorY..kGrinderSeparatorY):
+  //     Quality-section separator just below the climate cap, then
+  //     QUALITY label LEFT + 5 stars centered, then Sour / Bitter pills
+  //     horizontal below the stars (50% bigger than the prior vertical
+  //     stack — see kPillW/H below; the pill row overlaps the right
+  //     edge of the Submit button by a few pixels since the wider pills
+  //     don't fit cleanly between ✕ and Submit and the user picked the
+  //     "keep center buttons on the center line" layout).
+  //   center line at kCenterLineY: ✕ (LEFT) · preset readout (CENTER) ·
+  //     Submit (RIGHT). Identical to the old layout.
 
-  // --- Downward cursor at the top, pointing at the bar below ---
-  // draw_arrow_event's default orientation puts the tip at (0, +h/2) — i.e.
-  // h/2 BELOW the widget center for a 180° (downward) arrow. To land the
-  // tip on kDeltaCursorTipY, the widget center must sit h/2 above it, so the
-  // widget top edge is (h + W) / 2 above the tip.
-  constexpr int32_t kDeltaCursorTipY = kDeltaBarY - kBigTickLen / 2 - kCursorTipGap;
-  s_delta_cursor = make_arrow(s_post_group, &s_delta_cursor_state, kCursorWidget);
-  lv_obj_set_pos(s_delta_cursor,
-                 kCenter - kCursorWidget / 2,
-                 kDeltaCursorTipY - (kCursorArrowHeight + kCursorWidget) / 2);
-
-  // --- Delta bar ---
-  // Wire state, then create the widget INSIDE the post group so the mode swap
-  // hides it. The shared overlay still owns touch dispatch; on_delta_bar_event
-  // filters by Mode::Post + spec.y_band.
-  s_delta.spec       = &kDeltaSpec;
-  s_delta.on_change  = delta_on_change;
-  s_delta.on_settle  = nullptr;             // delta persists at submit time, not per-glide
-  s_delta.on_touched = delta_on_touched;
-  s_delta.widget     = make_bar_widget(s_post_group, &s_delta);
-
-  // --- BREW TIME row (caption left, value center, DELTA block right) ---
-  // Mirrors the grind readout's spacing: same gap from bar to value
-  // center, same caption Y offsets from the value center, same SUGGESTION
-  // block geometry. Tuning kGrindValueY / kGrindCaptionY in the grind
-  // area auto-shifts the BREW TIME row to stay symmetric.
-  constexpr int32_t kBrewCaptionTopY      =
-      kBrewValueCenterY + (kGrindCaptionY - kGrindValueCenterY);
-  constexpr int32_t kBrewDeltaCaptionY    =
-      kBrewCaptionTopY + (kSuggestionCaptionY - kGrindCaptionY);
-  constexpr int32_t kBrewDeltaValueTopY   =
-      kBrewDeltaCaptionY + (kSuggestionValueY - kSuggestionCaptionY);
+  // --- BREW TIME caption + (-)/value/(+) row ---
+  constexpr int32_t kBrewCaptionTopY = 25;
+  constexpr int32_t kBrewRowCenterY  = 70;
+  constexpr int32_t kBrewBtnDX       = 90;   // (-)/(+) center distance from kCenter
 
   s_brew_time_caption = lv_label_create(s_post_group);
   lv_obj_set_style_text_color(s_brew_time_caption, kColorLabel, LV_PART_MAIN);
-  lv_obj_set_style_text_font(s_brew_time_caption, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_text_font(s_brew_time_caption, &lv_font_montserrat_14,
+                             LV_PART_MAIN);
   lv_label_set_text(s_brew_time_caption, "BREW TIME");
-  // Anchor BREW TIME under GRIND VALUE's column center — both labels are
-  // auto-sized to different widths, so a shared left edge would leave
-  // their centers misaligned. Measure GRIND VALUE's width (build_grinder
-  // runs first; update_layout makes the query reliable before LVGL's
-  // top-level pass) and offset BREW TIME so its center matches.
-  lv_obj_update_layout(s_grind_caption);
-  lv_obj_update_layout(s_brew_time_caption);
-  const int32_t grind_caption_cx =
-      kGrindCaptionX + lv_obj_get_width(s_grind_caption) / 2;
-  const int32_t brew_caption_x =
-      grind_caption_cx - lv_obj_get_width(s_brew_time_caption) / 2;
-  lv_obj_set_pos(s_brew_time_caption, brew_caption_x, kBrewCaptionTopY);
+  lv_obj_align(s_brew_time_caption, LV_ALIGN_TOP_MID, 0, kBrewCaptionTopY);
 
   s_brew_time_value = lv_label_create(s_post_group);
-  lv_obj_set_style_text_color(s_brew_time_value, kColorText, LV_PART_MAIN);
-  lv_obj_set_style_text_font(s_brew_time_value, &lv_font_montserrat_46, LV_PART_MAIN);
-  // LV_ALIGN_CENTER offset is from screen center, so subtract kCenter to
-  // land the label's center exactly on kBrewValueCenterY — no font-height
-  // math needed; the auto-sized label width/height take care of itself.
+  lv_obj_set_style_text_font(s_brew_time_value, &lv_font_montserrat_46,
+                             LV_PART_MAIN);
+  // Color + text are owned by refresh_brew_time_value (called from
+  // reset_post_form on enter_post / enter_idle and from the (-)/(+)
+  // handlers per tap). Seed a placeholder so the first layout pass has
+  // something to measure.
+  lv_label_set_text(s_brew_time_value, "--");
+  lv_obj_set_style_text_color(s_brew_time_value, kColorMuted, LV_PART_MAIN);
   lv_obj_align(s_brew_time_value, LV_ALIGN_CENTER, 0,
-               kBrewValueCenterY - kCenter);
-  lv_label_set_text(s_brew_time_value, "0s");
+               kBrewRowCenterY - kCenter);
 
-  s_brew_delta_caption = lv_label_create(s_post_group);
-  lv_obj_set_style_text_color(s_brew_delta_caption, kColorLabel, LV_PART_MAIN);
-  lv_obj_set_style_text_font(s_brew_delta_caption, &lv_font_montserrat_14, LV_PART_MAIN);
-  lv_label_set_text(s_brew_delta_caption, "DELTA");
-  lv_obj_set_pos(s_brew_delta_caption, kSuggestionBlockX, kBrewDeltaCaptionY);
-  lv_obj_set_width(s_brew_delta_caption, kSuggestionBlockW);
-  lv_obj_set_style_text_align(s_brew_delta_caption, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  // (-) and (+) discs. Same chrome as the ✕ button (kPostBtnH × kPostBtnH
+  // outline-only disc) but tinted with kColorAccent so the steppers read
+  // as a neutral action rather than a destructive one.
+  struct BrewStepCfg { const char* glyph; lv_obj_t** btn; lv_event_cb_t cb; int32_t dx; };
+  BrewStepCfg steppers[2] = {
+      {LV_SYMBOL_MINUS, &s_brew_minus_btn, on_brew_minus_tap, -kBrewBtnDX},
+      {LV_SYMBOL_PLUS,  &s_brew_plus_btn,  on_brew_plus_tap,  +kBrewBtnDX},
+  };
+  for (auto& s : steppers) {
+    lv_obj_t* b = lv_button_create(s_post_group);
+    lv_obj_set_size(b, kPostBtnH, kPostBtnH);
+    lv_obj_set_style_radius(b, kPostBtnH / 2, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(b, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(b, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_color(b, kColorAccent, LV_PART_MAIN);
+    lv_obj_set_style_border_width(b, kPostBtnStroke, LV_PART_MAIN);
+    lv_obj_set_style_border_opa(b, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_align(b, LV_ALIGN_CENTER, s.dx, kBrewRowCenterY - kCenter);
+    lv_obj_add_event_cb(b, s.cb, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t* lbl = lv_label_create(b);
+    lv_obj_set_style_text_color(lbl, kColorAccent, LV_PART_MAIN);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_24, LV_PART_MAIN);
+    lv_label_set_text(lbl, s.glyph);
+    lv_obj_center(lbl);
+    *s.btn = b;
+  }
 
-  s_brew_delta_value = lv_label_create(s_post_group);
-  lv_obj_set_style_text_font(s_brew_delta_value, &lv_font_montserrat_14, LV_PART_MAIN);
-  lv_obj_set_pos(s_brew_delta_value, kSuggestionBlockX, kBrewDeltaValueTopY);
-  lv_obj_set_width(s_brew_delta_value, kSuggestionBlockW);
-  lv_obj_set_style_text_align(s_brew_delta_value, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-  lv_label_set_text(s_brew_delta_value, "0s");
-
-  // --- Sub-center band: Sour/Bitter pills (right) + QUALITY + star row
-  // ---
-  // Below the BREW TIME readout, above the center line. The pill row
-  // right-aligns with Submit's column; the star row is centered on the
-  // screen with the QUALITY caption parked at the left (Mont 14 wraps to
-  // the star row's vertical midline). Pills row Y is derived from the
-  // DELTA value's bottom + a row gap so the whole band moves together if
-  // the BREW TIME spacing is later tuned.
-  // Star row is parked just below the BREW TIME row; the Sour/Bitter
-  // pills stack vertically on the right, mid-aligned with the star row's
-  // vertical center so the rating tier reads as one visual band. Pills
-  // wear the same outline-when-off / filled-when-on chrome as the action
-  // buttons (see refresh_taste_toggles).
-  constexpr int32_t kBrewBottomY     = kBrewDeltaValueTopY + 18;
-  constexpr int32_t kStarRowGap      = 14;     // gap below the BREW TIME row
-  constexpr int32_t kStarRowY        = kBrewBottomY + kStarRowGap;
+  // --- Quality section (middle band) ---
+  // Starts with its own thin separator just below the climate cap, then
+  // QUALITY label LEFT + 5 stars centered, then Sour / Bitter pills
+  // horizontal below the stars. Sizes are tuned to fit the band exactly
+  // between kClimateSeparatorY and kGrinderSeparatorY.
+  constexpr int32_t kQualitySepY     = 108;
+  constexpr int32_t kStarRowY        = kQualitySepY + 8;
   constexpr int32_t kStarGap         = 8;
   constexpr int32_t kStarRowW        =
       kMaxStars * kStarSize + (kMaxStars - 1) * kStarGap;
   constexpr int32_t kStarRowX0       = kCenter - kStarRowW / 2;
-  constexpr int32_t kQualityCaptionX = kGrindCaptionX - 20;
-  constexpr int32_t kStarRowMidY     = kStarRowY + kStarSize / 2;
-  static_assert(kStarRowY + kStarSize <=
-                kCenterLineY - kPostBtnH / 2,
-                "star row must clear the center line buttons");
+  // QUALITY caption hugs the screen's left edge so the chars sit inside
+  // the empty interior of the ✕ disc rather than crashing into its
+  // outline. ✕ is outline-only so a few pixels of text inside the disc
+  // body read fine.
+  constexpr int32_t kQualityCaptionX = 25;
 
-  constexpr int32_t kPillH           = 28;
-  constexpr int32_t kPillW           = 84;
-  constexpr int32_t kPillStackVGap   = 6;
-  constexpr int32_t kPillStackH      = 2 * kPillH + kPillStackVGap;
-  constexpr int32_t kPillStackTopY   = kStarRowMidY - kPillStackH / 2;
-  constexpr int32_t kPillStackX      =
-      kScreen - kCenterEdgeInset - kPillW;     // right edge aligns with Submit
-  static_assert(kPillStackTopY >= kBrewBottomY,
-                "pill stack top must clear the BREW TIME readout");
-  static_assert(kPillStackTopY + kPillStackH <=
-                kCenterLineY - kPostBtnH / 2,
-                "pill stack bottom must clear the center line buttons");
+  // Pills are 50% bigger in both dimensions than the previous vertical
+  // stack (84×28 → 126×42). Two side-by-side + a 10 px gap don't fit
+  // between ✕ and Submit (too wide for the 243 px middle channel), so
+  // the row is centered on the screen and the right pill overlaps the
+  // left edge of Submit by ~33 px — visually OK since both wear the
+  // same accent-colored chrome.
+  constexpr int32_t kPillW       = 126;
+  constexpr int32_t kPillH       = 42;
+  constexpr int32_t kPillGap     = 10;
+  constexpr int32_t kPillRowW    = 2 * kPillW + kPillGap;
+  constexpr int32_t kPillRowX0   = kCenter - kPillRowW / 2;
+  constexpr int32_t kPillRowY    = kStarRowY + kStarSize + 10;
+  static_assert(kPillRowY + kPillH <= kGrinderSeparatorY,
+                "pill row bottom must clear the grinder separator");
 
-  struct PillCfg { const char* text; uint8_t mask; lv_obj_t** btn; lv_obj_t** lbl; };
-  PillCfg pills[2] = {
-      {"Sour",   storage::kTasteSour,   &s_sour_btn,   &s_sour_label},
-      {"Bitter", storage::kTasteBitter, &s_bitter_btn, &s_bitter_label},
-  };
-  for (int i = 0; i < 2; ++i) {
-    lv_obj_t* b = lv_button_create(s_post_group);
-    lv_obj_set_size(b, kPillW, kPillH);
-    lv_obj_set_style_radius(b, kPillH / 2, LV_PART_MAIN);
-    lv_obj_set_style_shadow_width(b, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(b, 0, LV_PART_MAIN);
-    // Border always present at the same color as the "on" fill so toggling
-    // bg_opa is enough to flip outline ↔ filled without touching the
-    // border state. refresh_taste_toggles owns bg_opa + text color.
-    lv_obj_set_style_border_color(b, kColorAccent, LV_PART_MAIN);
-    lv_obj_set_style_border_width(b, kPostBtnStroke, LV_PART_MAIN);
-    lv_obj_set_style_border_opa(b, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_pos(b, kPillStackX,
-                   kPillStackTopY + i * (kPillH + kPillStackVGap));
-    lv_obj_add_event_cb(b, on_taste_tap, LV_EVENT_CLICKED,
-                        reinterpret_cast<void*>(
-                            static_cast<uintptr_t>(pills[i].mask)));
-    lv_obj_t* lbl = lv_label_create(b);
-    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_14, LV_PART_MAIN);
-    lv_label_set_text(lbl, pills[i].text);
-    lv_obj_center(lbl);
-    *pills[i].btn = b;
-    *pills[i].lbl = lbl;
-  }
+  make_separator(s_post_group, kSeparatorInset,
+                 kQualitySepY - kSeparatorThickness / 2,
+                 kScreen - 2 * kSeparatorInset, kSeparatorThickness);
 
-  // QUALITY caption — Mont 14, vertically centered on the star row by
-  // measuring its rendered height after update_layout.
   s_quality_caption = lv_label_create(s_post_group);
   lv_obj_set_style_text_color(s_quality_caption, kColorLabel, LV_PART_MAIN);
   lv_obj_set_style_text_font(s_quality_caption, &lv_font_montserrat_14,
@@ -2699,6 +2588,39 @@ void build_post_group(lv_obj_t* scr) {
                         reinterpret_cast<void*>(static_cast<uintptr_t>(i)));
     s_star_btns[i]  = tap;
     s_star_icons[i] = make_star(tap, &s_star_states[i]);
+  }
+
+  // Sour / Bitter pills — horizontal row below the stars. Pill chrome
+  // (outline when off, accent fill when on — see refresh_taste_toggles)
+  // and tap handler are unchanged; only size and position differ. Text
+  // scales to Mont 24 to match the bigger pill.
+  struct PillCfg { const char* text; uint8_t mask; lv_obj_t** btn; lv_obj_t** lbl; };
+  PillCfg pills[2] = {
+      {"Sour",   storage::kTasteSour,   &s_sour_btn,   &s_sour_label},
+      {"Bitter", storage::kTasteBitter, &s_bitter_btn, &s_bitter_label},
+  };
+  for (int i = 0; i < 2; ++i) {
+    lv_obj_t* b = lv_button_create(s_post_group);
+    lv_obj_set_size(b, kPillW, kPillH);
+    lv_obj_set_style_radius(b, kPillH / 2, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(b, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(b, 0, LV_PART_MAIN);
+    // Border always present at the same color as the "on" fill so toggling
+    // bg_opa is enough to flip outline ↔ filled without touching the
+    // border state. refresh_taste_toggles owns bg_opa + text color.
+    lv_obj_set_style_border_color(b, kColorAccent, LV_PART_MAIN);
+    lv_obj_set_style_border_width(b, kPostBtnStroke, LV_PART_MAIN);
+    lv_obj_set_style_border_opa(b, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_pos(b, kPillRowX0 + i * (kPillW + kPillGap), kPillRowY);
+    lv_obj_add_event_cb(b, on_taste_tap, LV_EVENT_CLICKED,
+                        reinterpret_cast<void*>(
+                            static_cast<uintptr_t>(pills[i].mask)));
+    lv_obj_t* lbl = lv_label_create(b);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_24, LV_PART_MAIN);
+    lv_label_set_text(lbl, pills[i].text);
+    lv_obj_center(lbl);
+    *pills[i].btn = b;
+    *pills[i].lbl = lbl;
   }
 
   // --- Center line: preset readout (left), ✕ (middle), Submit (right) ---
@@ -2776,11 +2698,12 @@ void start_report() {
   // something outside the new ring's range.
   s_grind.value = std::clamp(presets::last_grind(presets::selected_id()),
                              kGrindMin, kGrindMax);
-  // Seed delta bar at the current preset's target so first enter_post lands
-  // with the cursor on the user's expected time.
+  // Pre-seed brew time at the current preset's target so the first tap of
+  // (-)/(+) in post mode promotes the readout straight from "--" to the
+  // user's normal target value. `touched` stays false until that tap.
   const auto seed_preset = presets::get(presets::selected_id());
-  s_delta.value = std::clamp(static_cast<float>(seed_preset.target_time_s),
-                             kDeltaSpec.min, kDeltaSpec.max);
+  s_brew.value_s = std::clamp<uint8_t>(seed_preset.target_time_s,
+                                       kBrewMinS, kBrewMaxS);
 
   refresh_preset_label();
   refresh_grind_value_label();
