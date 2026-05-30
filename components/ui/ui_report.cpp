@@ -2541,8 +2541,8 @@ void build_post_group(lv_obj_t* scr) {
   // total horizontal chrome, so "Sour" is narrower than "Bitter". The
   // whole [stars | gap | pills] group is then screen-centered so the gap
   // left of star 0 matches the gap right of the last pill.
-  constexpr int32_t kQualityCaptionY = 130;
-  constexpr int32_t kStarRowY        = 160;
+  constexpr int32_t kQualityCaptionY = 125;
+  constexpr int32_t kStarRowY        = 155;
   constexpr int32_t kStarGap         = 8;
   constexpr int32_t kStarRowW        =
       kMaxStars * kStarSize + (kMaxStars - 1) * kStarGap;
@@ -2550,7 +2550,7 @@ void build_post_group(lv_obj_t* scr) {
   constexpr int32_t kPillH            = (kPostBtnH * 4) / 5;
   constexpr int32_t kPillRowGap       = 6;
   constexpr int32_t kPillTextPaddingX = 27;   // total chrome around pill text (5 each side)
-  constexpr int32_t kPillRowMidY      = 180;
+  constexpr int32_t kPillRowMidY      = 175;
   constexpr int32_t kPillRowY         = kPillRowMidY - kPillH / 2;
   constexpr int32_t kStarsToPillsGap  = 30;
 
