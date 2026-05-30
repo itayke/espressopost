@@ -168,6 +168,8 @@ const lv_color_t kColorMuted4 = COLOR(0x202020);
 
 // Disabled button color
 const lv_color_t kColorTasteDisabled = kColorMuted;
+// Unlit (disabled) outline color for the star rating row.
+const lv_color_t kColorStarDisabled  = kColorMuted;
 
 // Confidence-tier colors for the suggestion arrow + SUGGESTION block. Named
 // for the tier they represent rather than the hue so callers (confidence_color
@@ -2125,7 +2127,7 @@ void draw_star_event(lv_event_t* e) {
     // continuous (matches the prior lv_line widget output).
     lv_draw_line_dsc_t line;
     lv_draw_line_dsc_init(&line);
-    line.color       = kColorMuted3;
+    line.color       = kColorStarDisabled;
     line.width       = 3;
     line.opa         = LV_OPA_COVER;
     line.round_start = 1;
@@ -2539,8 +2541,8 @@ void build_post_group(lv_obj_t* scr) {
   // total horizontal chrome, so "Sour" is narrower than "Bitter". The
   // whole [stars | gap | pills] group is then screen-centered so the gap
   // left of star 0 matches the gap right of the last pill.
-  constexpr int32_t kQualityCaptionY = 120;
-  constexpr int32_t kStarRowY        = 150;
+  constexpr int32_t kQualityCaptionY = 130;
+  constexpr int32_t kStarRowY        = 160;
   constexpr int32_t kStarGap         = 8;
   constexpr int32_t kStarRowW        =
       kMaxStars * kStarSize + (kMaxStars - 1) * kStarGap;
@@ -2548,7 +2550,7 @@ void build_post_group(lv_obj_t* scr) {
   constexpr int32_t kPillH            = (kPostBtnH * 4) / 5;
   constexpr int32_t kPillRowGap       = 6;
   constexpr int32_t kPillTextPaddingX = 27;   // total chrome around pill text (5 each side)
-  constexpr int32_t kPillRowMidY      = 170;
+  constexpr int32_t kPillRowMidY      = 180;
   constexpr int32_t kPillRowY         = kPillRowMidY - kPillH / 2;
   constexpr int32_t kStarsToPillsGap  = 30;
 
