@@ -114,16 +114,20 @@ constexpr int32_t kBarStripHeight        = 36;
 // refresh_suggestion_arrow runs against grind specifically.
 // (Defined inline below kGrindSpec — kGrindSpec isn't visible yet here.)
 
-// Tick sizes. Big = integer (1.0 step), mid = 0.5 step, small = 0.1 step.
+// Tick sizes. Big = integer step, mid = half-step, small = the spec's
+// nominal tick_unit, tiny = sub-step (grind only) for ultra-fine grain.
 // Big ticks are taller AND thicker so integer landmarks read pre-attentively;
 // mid ticks are "long hairlines" that mark half-unit boundaries without
-// competing with the integers; small ticks are short hairlines for fine feel.
+// competing with the integers; small ticks are short hairlines for fine feel;
+// tiny ticks borrow the small color/thickness but are even shorter so the
+// sub-step grain reads as texture rather than a competing tier.
 constexpr int32_t kBigTickLen         = 26;
 constexpr int32_t kBigTickThickness   = 3;
 constexpr int32_t kMidTickLen         = 18;
 constexpr int32_t kMidTickThickness   = 1;
 constexpr int32_t kSmallTickLen       = 8;
 constexpr int32_t kSmallTickThickness = 1;
+constexpr int32_t kTinyTickLen        = 2;
 // Background rail height — matches the small (0.1) tick so the rail reads as
 // the substrate those ticks sit on; big and mid ticks extend past it.
 constexpr int32_t kBarStripBgHeight   = 14;
@@ -195,6 +199,7 @@ const lv_color_t kColorSubmitDisabled = kColorMuted4;
 const lv_color_t kBigTickColor   = kColorMuted;
 const lv_color_t kMidTickColor   = kColorMuted;
 const lv_color_t kSmallTickColor = kColorMuted2;
+const lv_color_t kTinyTickColor  = kColorMuted2;
 const lv_color_t kBarStripBgColor = COLOR(0x28232F);
 
 // ---------------------------------------------------------------------------
@@ -224,7 +229,9 @@ struct BarSpec {
   int32_t  y_band_bottom;
   int      big_every;             // 1-of-N tick indices is "big"   (integer in grind; 10 s in delta)
   int      mid_every;             // 1-of-N tick indices is "mid"   (half-unit grind; 5 s delta)
-  float    tick_unit;             // value step between adjacent ticks (0.1 grind, 1 s delta)
+  int      small_every;           // 1-of-N tick indices is "small"; the rest are "tiny". 0 disables the
+                                  // tiny tier (delta) so every non-big/non-mid index renders as small.
+  float    tick_unit;             // value step between adjacent ticks (sub-step in grind, 1 s in delta)
 };
 
 struct BarState;
@@ -296,13 +303,14 @@ constexpr BarSpec kGrindSpec = {
   /*min*/                kGrindMin,
   /*max*/                kGrindMax,
   /*step*/               model::kGrindStep,
-  /*visible_half_range*/ 0.75f,
+  /*visible_half_range*/ 0.6f,
   /*y*/                  kBarY,
   /*y_band_top*/         298,
   /*y_band_bottom*/      kScreen,
-  /*big_every*/          10,
-  /*mid_every*/          5,
-  /*tick_unit*/          0.1f,
+  /*big_every*/          20,
+  /*mid_every*/          10,
+  /*small_every*/        2,
+  /*tick_unit*/          0.05f,
 };
 
 // Pixels per grind unit, derived from kGrindSpec so changing the bar density
@@ -320,6 +328,7 @@ constexpr BarSpec kDeltaSpec = {
   /*y_band_bottom*/      kBrewValueCenterY + kBrewValueHalfHeight,
   /*big_every*/          10,
   /*mid_every*/          5,
+  /*small_every*/        0,
   /*tick_unit*/          1.0f,
 };
 
@@ -615,6 +624,11 @@ void draw_bar_event(lv_event_t* e) {
   small_dsc.bg_color = kSmallTickColor;
   small_dsc.bg_opa   = LV_OPA_COVER;
 
+  lv_draw_rect_dsc_t tiny_dsc;
+  lv_draw_rect_dsc_init(&tiny_dsc);
+  tiny_dsc.bg_color = kTinyTickColor;
+  tiny_dsc.bg_opa   = LV_OPA_COVER;
+
   // Half a tick of slack on the value-domain clip so a tick that sits exactly
   // at spec.min / spec.max still draws (floating-point rounding shouldn't
   // erase the floor tick).
@@ -628,11 +642,15 @@ void draw_bar_event(lv_event_t* e) {
     const float x_offset = (v_i - value) * px_per_unit;
     if (std::fabs(x_offset) > static_cast<float>(kBarHalfWidth) + 0.5f) continue;
     const int32_t tick_x = cx + static_cast<int32_t>(std::lround(x_offset));
-    // Tier: big_every (e.g. integers for grind, 10 s for delta) > mid_every
-    // (half-unit grind, 5 s delta) > everything else. Mid + small share
-    // thickness; only length and dsc differ.
-    const bool is_big = (idx % spec.big_every == 0);
-    const bool is_mid = !is_big && (idx % spec.mid_every == 0);
+    // Tier: big_every (integers in grind, 10 s in delta) > mid_every
+    // (half-unit grind, 5 s delta) > small_every (when set; the rest are
+    // tiny). When small_every == 0 (delta), the tiny tier is disabled and
+    // every non-big/non-mid index falls through as small. Tiny shares the
+    // small color + thickness; only length differs.
+    const bool is_big   = (idx % spec.big_every == 0);
+    const bool is_mid   = !is_big && (idx % spec.mid_every == 0);
+    const bool is_small = !is_big && !is_mid &&
+        (spec.small_every == 0 || idx % spec.small_every == 0);
     int32_t half_h, half_w;
     lv_draw_rect_dsc_t* dsc;
     if (is_big) {
@@ -643,10 +661,14 @@ void draw_bar_event(lv_event_t* e) {
       half_h = kMidTickLen / 2;
       half_w = kMidTickThickness / 2;
       dsc    = &mid_dsc;
-    } else {
+    } else if (is_small) {
       half_h = kSmallTickLen / 2;
       half_w = kSmallTickThickness / 2;
       dsc    = &small_dsc;
+    } else {
+      half_h = kTinyTickLen / 2;
+      half_w = kSmallTickThickness / 2;
+      dsc    = &tiny_dsc;
     }
     lv_area_t a = {tick_x - half_w, cy - half_h,
                    tick_x + half_w, cy + half_h};
