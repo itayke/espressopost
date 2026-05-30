@@ -166,6 +166,9 @@ const lv_color_t kColorMuted2 = COLOR(0x505050);
 const lv_color_t kColorMuted3 = COLOR(0x303030);
 const lv_color_t kColorMuted4 = COLOR(0x202020);
 
+// Disabled button color
+const lv_color_t kColorTasteDisabled = kColorMuted;
+
 // Confidence-tier colors for the suggestion arrow + SUGGESTION block. Named
 // for the tier they represent rather than the hue so callers (confidence_color
 // and anything else that surfaces the tier) don't have to know that "low"
@@ -885,11 +888,9 @@ void refresh_stars() {
   }
 }
 
-// Flip the Sour / Bitter pills against s_taste_flags. The border is set
-// to kColorAccent at creation time and never changes, so toggling here
-// flips bg_opa (transparent ↔ accent fill) + text color (accent ↔ bg);
-// the off state reads as the accent outline matches the on state's fill,
-// the on state reads as a solid accent pill with bg-colored text.
+// Flip the Sour / Bitter pills against s_taste_flags. The on state reads
+// as a solid accent pill with bg-colored text; the off state reads as a
+// muted-gray outline + matching text so it sits quietly until tapped.
 void refresh_taste_toggles() {
   struct { lv_obj_t* btn; lv_obj_t* lbl; uint8_t mask; } pills[] = {
       {s_sour_btn,   s_sour_label,   storage::kTasteSour},
@@ -901,9 +902,11 @@ void refresh_taste_toggles() {
     lv_obj_set_style_bg_opa(pill.btn,
                             on ? LV_OPA_COVER : LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_bg_color(pill.btn, kColorAccent, LV_PART_MAIN);
+    lv_obj_set_style_border_color(pill.btn,
+                                  on ? kColorAccent : kColorTasteDisabled, LV_PART_MAIN);
     if (pill.lbl != nullptr) {
       lv_obj_set_style_text_color(pill.lbl,
-                                  on ? kColorBg : kColorAccent, LV_PART_MAIN);
+                                  on ? kColorBg : kColorTasteDisabled, LV_PART_MAIN);
     }
   }
 }
@@ -2530,47 +2533,81 @@ void build_post_group(lv_obj_t* scr) {
   }
 
   // --- Quality section (middle band) ---
-  constexpr int32_t kQualitySeparatorY = 118;
-  constexpr int32_t kQualityCaptionY = kQualitySeparatorY + 16;
-  constexpr int32_t kStarRowY        = 163;
+  // 5 stars on the left, two side-by-side modifier pills (Sour | Bitter)
+  // on the right, captioned by QUALITY and MODIFIERS respectively. Each
+  // pill auto-sizes to its rendered text width plus kPillTextPaddingX of
+  // total horizontal chrome, so "Sour" is narrower than "Bitter". The
+  // whole [stars | gap | pills] group is then screen-centered so the gap
+  // left of star 0 matches the gap right of the last pill.
+  constexpr int32_t kQualityCaptionY = 120;
+  constexpr int32_t kStarRowY        = 150;
   constexpr int32_t kStarGap         = 8;
   constexpr int32_t kStarRowW        =
       kMaxStars * kStarSize + (kMaxStars - 1) * kStarGap;
-  constexpr int32_t kStarRowX0       = kCenter - kStarRowW / 2;
 
-  // Sour / Bitter discs — stacked vertically (S above B) to the right of
-  // the Quality block. Each disc matches the ✕ button's size so the right
-  // column reads as a clean S/B/Submit stack: same width, same outline
-  // chrome, same right-edge inset as Submit. Stack is vertically centered
-  // on the star row's midpoint. The Quality separator (above) and climate
-  // separator (below) clip thin lines through the top of S and bottom of
-  // B respectively — visible but minor, and removing either would lose a
-  // section boundary somewhere else.
-  constexpr int32_t kPillSize       = kPostBtnH;     // 58×58, matches the ✕ disc
-  constexpr int32_t kPillStackGap   = 6;
-  constexpr int32_t kPillStackH     = 2 * kPillSize + kPillStackGap;
-  constexpr int32_t kPillStackMidY  = kStarRowY + kStarSize / 2;
-  constexpr int32_t kPillStackTopY  = kPillStackMidY - kPillStackH / 2;
-  constexpr int32_t kPillStackX     =
-      kScreen - kPrimaryBtnRightInset - kPillSize;   // right-edge aligned with Submit
-  // static_assert(kPillStackTopY + kPillStackH <=
-  //               kCenterLineY - kPostBtnH / 2,
-  //               "pill stack bottom must clear the center line buttons");
+  constexpr int32_t kPillH            = (kPostBtnH * 4) / 5;
+  constexpr int32_t kPillRowGap       = 6;
+  constexpr int32_t kPillTextPaddingX = 27;   // total chrome around pill text (5 each side)
+  constexpr int32_t kPillRowMidY      = 170;
+  constexpr int32_t kPillRowY         = kPillRowMidY - kPillH / 2;
+  constexpr int32_t kStarsToPillsGap  = 30;
 
-  make_separator(s_post_group, kSeparatorInset,
-                 kQualitySeparatorY - kSeparatorThickness / 2,
-                 kScreen - 2 * kSeparatorInset, kSeparatorThickness);
+  struct PillCfg { const char* text; uint8_t mask; lv_obj_t** btn; lv_obj_t** lbl; };
+  PillCfg pills[2] = {
+      {"Sour",   storage::kTasteSour,   &s_sour_btn,   &s_sour_label},
+      {"Bitter", storage::kTasteBitter, &s_bitter_btn, &s_bitter_label},
+  };
 
+  // Measure each pill's text width up front via a scratch Mont 24 label so
+  // we can pin the centered group's x positions before building anything.
+  int32_t pill_w[2];
+  {
+    lv_obj_t* scratch = lv_label_create(s_post_group);
+    lv_obj_set_style_text_font(scratch, &lv_font_montserrat_24, LV_PART_MAIN);
+    for (int i = 0; i < 2; ++i) {
+      lv_label_set_text(scratch, pills[i].text);
+      lv_obj_update_layout(scratch);
+      pill_w[i] = lv_obj_get_width(scratch) + kPillTextPaddingX;
+    }
+    lv_obj_delete(scratch);
+  }
+  const int32_t kPillRowW = pill_w[0] + kPillRowGap + pill_w[1];
+
+  // Center the [stars | gap | pills] group so the screen-edge gaps match.
+  const int32_t kStarRowX0 =
+      (kScreen - kStarRowW - kStarsToPillsGap - kPillRowW) / 2;
+  const int32_t kPillRowX0 =
+      kStarRowX0 + kStarRowW + kStarsToPillsGap;
+
+  // Caption anchors on the kQualityCaptionY baseline. QUALITY centers over
+  // the middle star (index 2); MODIFIERS over the pill-row midpoint.
+  const int32_t kMiddleStarCenterX =
+      kStarRowX0 + 2 * (kStarSize + kStarGap) + kStarSize / 2;
+  const int32_t kPillRowCenterX    = kPillRowX0 + kPillRowW / 2;
+
+  // QUALITY + MODIFIERS captions — both Mont 14 on the same y baseline,
+  // each centered on its content column. Use update_layout + set_pos so
+  // we can horizontally center on a fixed x anchor (LV_ALIGN_TOP_MID
+  // would center on the screen, not on the column).
   s_quality_caption = lv_label_create(s_post_group);
   lv_obj_set_style_text_color(s_quality_caption, kColorLabel, LV_PART_MAIN);
   lv_obj_set_style_text_font(s_quality_caption, &lv_font_montserrat_14,
                              LV_PART_MAIN);
   lv_label_set_text(s_quality_caption, "QUALITY");
   lv_obj_update_layout(s_quality_caption);
-  const int32_t quality_caption_y = kQualityCaptionY;
-  const int32_t quality_caption_x = kCenter - lv_obj_get_width(s_quality_caption) / 2;
-  // kStarRowY + (kStarSize - lv_obj_get_height(s_quality_caption)) / 2;
-  lv_obj_set_pos(s_quality_caption, quality_caption_x, quality_caption_y);
+  lv_obj_set_pos(s_quality_caption,
+                 kMiddleStarCenterX - lv_obj_get_width(s_quality_caption) / 2,
+                 kQualityCaptionY);
+
+  lv_obj_t* modifiers_caption = lv_label_create(s_post_group);
+  lv_obj_set_style_text_color(modifiers_caption, kColorLabel, LV_PART_MAIN);
+  lv_obj_set_style_text_font(modifiers_caption, &lv_font_montserrat_14,
+                             LV_PART_MAIN);
+  lv_label_set_text(modifiers_caption, "MODIFIERS");
+  lv_obj_update_layout(modifiers_caption);
+  lv_obj_set_pos(modifiers_caption,
+                 kPillRowCenterX - lv_obj_get_width(modifiers_caption) / 2,
+                 kQualityCaptionY);
 
   for (uint8_t i = 0; i < kMaxStars; ++i) {
     lv_obj_t* tap = lv_obj_create(s_post_group);
@@ -2587,27 +2624,19 @@ void build_post_group(lv_obj_t* scr) {
     s_star_icons[i] = make_star(tap, &s_star_states[i]);
   }
 
-  // Sour (S) above Bitter (B). Chrome (outline when off, accent fill when
-  // on — see refresh_taste_toggles) and tap handler are unchanged.
-  struct PillCfg { const char* text; uint8_t mask; lv_obj_t** btn; lv_obj_t** lbl; };
-  PillCfg pills[2] = {
-      {"S", storage::kTasteSour,   &s_sour_btn,   &s_sour_label},
-      {"B", storage::kTasteBitter, &s_bitter_btn, &s_bitter_label},
-  };
+  // Sour / Bitter pills, side by side, each sized to fit its own text.
+  // Chrome (border + bg + text colors) is driven by refresh_taste_toggles.
+  int32_t pill_x = kPillRowX0;
   for (int i = 0; i < 2; ++i) {
     lv_obj_t* b = lv_button_create(s_post_group);
-    lv_obj_set_size(b, kPillSize, kPillSize);
-    lv_obj_set_style_radius(b, kPillSize / 2, LV_PART_MAIN);
+    lv_obj_set_size(b, pill_w[i], kPillH);
+    lv_obj_set_style_radius(b, kPillH / 2, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(b, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(b, 0, LV_PART_MAIN);
-    // Border always present at the same color as the "on" fill so toggling
-    // bg_opa is enough to flip outline ↔ filled without touching the
-    // border state. refresh_taste_toggles owns bg_opa + text color.
-    lv_obj_set_style_border_color(b, kColorAccent, LV_PART_MAIN);
     lv_obj_set_style_border_width(b, kPostBtnStroke, LV_PART_MAIN);
     lv_obj_set_style_border_opa(b, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_pos(b, kPillStackX,
-                   kPillStackTopY + i * (kPillSize + kPillStackGap));
+    lv_obj_set_pos(b, pill_x, kPillRowY);
+    pill_x += pill_w[i] + kPillRowGap;
     lv_obj_add_event_cb(b, on_taste_tap, LV_EVENT_CLICKED,
                         reinterpret_cast<void*>(
                             static_cast<uintptr_t>(pills[i].mask)));
