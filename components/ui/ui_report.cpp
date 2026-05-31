@@ -503,7 +503,7 @@ constexpr int32_t kCursorArrowHeight       = 24;
 constexpr int32_t kCursorTipGap            = 15;
 constexpr int32_t kSuggestionArrowHalfBase = 6;
 constexpr int32_t kSuggestionArrowHeight   = 14;
-constexpr int32_t kSuggestionArrowTipGap   = -4;
+constexpr int32_t kSuggestionArrowTipGap   = 0;
 
 ArrowState s_cursor_arrow_state = {0.0f, COLOR(0xE0E0E0),
                                    kCursorArrowHalfBase, kCursorArrowHeight};
