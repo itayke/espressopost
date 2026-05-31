@@ -230,9 +230,9 @@ const lv_color_t kColorLabel        = COLOR(0xB0B0B0);
 // for a tight pull) and falls back to muted gray when the form gates the
 // submission. Defined as their own names so the action buttons aren't
 // coupled to the climate-icon palette in case either needs to drift.
-const lv_color_t kColorCancel         = COLOR(0x5D2F23);
+const lv_color_t kColorCancel         = COLOR(0xE07055);
 const lv_color_t kColorSubmitEnabled  = COLOR(0x60A8E0);
-const lv_color_t kColorSubmitDisabled = kColorMuted4;
+const lv_color_t kColorSubmitDisabled = kColorMuted3;
 
 // Grinder tick colors. Mid + small share a tier so half-unit ticks read as
 // "longer hairlines" rather than a third distinct stratum.
@@ -365,6 +365,11 @@ BrewTimeState s_brew = {};
 
 // Idle group:
 lv_obj_t* s_idle_group          = nullptr;
+// Full-screen transparent sub-container holding ONLY the climate tiles — the
+// part that fades/slides on a mode swap. Its siblings in s_idle_group (vertical
+// dividers, center-line POST/preset buttons) stay put and just show/hide with
+// the mode, so the animation never redraws them.
+lv_obj_t* s_climate_anim        = nullptr;
 lv_obj_t* s_preset_btn          = nullptr;   // tappable preset cycler on the idle center line
 
 // Two-line preset readout: top label = "PRESET N" (MS24), bottom row =
@@ -424,6 +429,14 @@ ClimateTile s_climate_tiles[3] = {};
 
 // Post group:
 lv_obj_t* s_post_group          = nullptr;
+// Full-screen transparent sub-container holding ONLY the animated post content
+// (brew-time block + quality block). The center-line widgets (read-only preset,
+// Cancel, Submit) stay direct children of s_post_group and switch instantly.
+lv_obj_t* s_post_anim           = nullptr;
+// Transparent click-eater, parented to scr and normally hidden. Brought to the
+// foreground and shown only for the length of a mode cross-fade so a stray tap
+// can't land on either group mid-flight (e.g. Submit on the fading post form).
+lv_obj_t* s_swap_block          = nullptr;
 lv_obj_t* s_brew_time_caption   = nullptr;  // "BREW TIME" caption at the top of the post screen
 lv_obj_t* s_brew_time_value     = nullptr;  // big "30s" / "--" readout (Mont 46), centered between the (-)/(+) buttons
 lv_obj_t* s_brew_minus_btn      = nullptr;  // (-) disc, same chrome as the ✕ button
@@ -1032,6 +1045,12 @@ void refresh_suggestion() {
 // arrow + big number + GRIND VALUE caption + SUGGESTION block. apply_mode
 // just swaps the two mode groups; nothing else changes between modes.
 // ---------------------------------------------------------------------------
+// Defined with the other anim helpers below. Sequentially swaps the two modes;
+// apply_mode (instant) is still used for the initial build, enter_* animate.
+void animate_mode_swap(lv_obj_t* out_group, lv_obj_t* out_content,
+                       lv_obj_t* in_group, lv_obj_t* in_content,
+                       bool reset_post_on_done);
+
 void apply_mode() {
   if (s_mode == Mode::Idle) {
     lv_obj_remove_flag(s_idle_group, LV_OBJ_FLAG_HIDDEN);
@@ -1065,17 +1084,28 @@ void reset_post_form() {
 }
 
 void enter_idle() {
+  if (s_mode == Mode::Idle) return;
   s_mode = Mode::Idle;
-  reset_post_form();
-  apply_mode();
+  // Defer reset_post_form to the swap's completion so the post group keeps
+  // showing the user's last stars/brew as it fades out, rather than visibly
+  // clearing to "--"/0 mid-fade. SUGGESTION block is shared across modes, so
+  // refresh it now (apply_mode used to do this).
+  refresh_suggested_label();
+  animate_mode_swap(s_post_group, s_post_anim, s_idle_group, s_climate_anim,
+                    /*reset_post_on_done=*/true);
 }
 
 void enter_post() {
+  if (s_mode == Mode::Post) return;
   s_mode = Mode::Post;
   // Re-seed on entry too — preset may have been cycled in idle since the last
   // post session, and the brew-time pre-seed needs to follow the new target.
+  // Done before the fade so the post group rises in already showing its
+  // freshly seeded values.
   reset_post_form();
-  apply_mode();
+  refresh_suggested_label();
+  animate_mode_swap(s_idle_group, s_climate_anim, s_post_group, s_post_anim,
+                    /*reset_post_on_done=*/false);
 }
 
 // ---------------------------------------------------------------------------
@@ -1981,6 +2011,92 @@ void translate_y_exec(void* var, int32_t v) {
   lv_obj_set_style_translate_y(static_cast<lv_obj_t*>(var), v, LV_PART_MAIN);
 }
 
+// Whole-group opacity — opa on LV_PART_MAIN cascades to the subtree, so one
+// anim fades a mode group and all its children together. The tiles/labels
+// don't overlap, so plain opa (no opa_layered layer buffer) blends cleanly
+// and skips a full-screen render layer per frame on the embedded target.
+void opa_exec(void* var, int32_t v) {
+  lv_obj_set_style_opa(static_cast<lv_obj_t*>(var),
+                       static_cast<lv_opa_t>(v), LV_PART_MAIN);
+}
+
+// ---------------------------------------------------------------------------
+// Mode swap — two sequential phases, fade only (no positioning). Phase A fades
+// the outgoing content out; at the midpoint the mode groups switch (so the
+// static center-line buttons + separators swap in one instant frame, never
+// redrawn mid-anim); phase B fades the incoming content in. Only the content
+// sub-containers (s_climate_anim / s_post_anim) animate — never the center line,
+// the dividers, or the shared bottom band (all outside those sub-containers).
+// One phase animates at a time, so at most one content tree redraws per frame.
+// ---------------------------------------------------------------------------
+constexpr uint32_t kModeSwapFadeMs = 175;  // each of the two phases
+
+// Single in-flight swap at a time (input is blocked for its duration), so one
+// file-static context is enough to carry the phase-boundary state.
+struct ModeSwapCtx {
+  lv_obj_t* out_group;
+  lv_obj_t* out_content;
+  lv_obj_t* in_group;
+  lv_obj_t* in_content;
+  bool      reset_post_on_done;
+};
+ModeSwapCtx s_mode_swap = {};
+
+// Phase B finished — incoming content rests at full opacity / y=0. Drop the
+// input block; the swap is done.
+void mode_swap_phase_b_done(lv_anim_t* /*a*/) {
+  lv_obj_add_flag(s_swap_block, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Midpoint — outgoing content has faded up and away. Hide its whole group so
+// the center-line buttons + dividers swap instantly, clear the content's
+// transient pose for its next entrance, run the deferred post-form reset
+// (leaving post only), then reveal the incoming group and ease its content
+// down into place.
+void mode_swap_phase_a_done(lv_anim_t* /*a*/) {
+  lv_obj_add_flag(s_mode_swap.out_group, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_set_style_opa(s_mode_swap.out_content, LV_OPA_COVER, LV_PART_MAIN);
+  if (s_mode_swap.reset_post_on_done) reset_post_form();
+
+  // Incoming group's center-line + separators appear now (instant); its content
+  // starts transparent, then fades up to full opacity.
+  lv_obj_set_style_opa(s_mode_swap.in_content, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_remove_flag(s_mode_swap.in_group, LV_OBJ_FLAG_HIDDEN);
+
+  lv_anim_t a;
+  lv_anim_init(&a);
+  lv_anim_set_duration(&a, kModeSwapFadeMs);
+  lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
+  lv_anim_set_var(&a, s_mode_swap.in_content);
+  lv_anim_set_exec_cb(&a, opa_exec);
+  lv_anim_set_values(&a, LV_OPA_TRANSP, LV_OPA_COVER);
+  lv_anim_set_ready_cb(&a, mode_swap_phase_b_done);
+  lv_anim_start(&a);
+}
+
+void animate_mode_swap(lv_obj_t* out_group, lv_obj_t* out_content,
+                       lv_obj_t* in_group, lv_obj_t* in_content,
+                       bool reset_post_on_done) {
+  s_mode_swap = {out_group, out_content, in_group, in_content,
+                 reset_post_on_done};
+
+  // Foreground click-eater swallows taps until the swap finalizes.
+  lv_obj_move_foreground(s_swap_block);
+  lv_obj_remove_flag(s_swap_block, LV_OBJ_FLAG_HIDDEN);
+
+  // Phase A: fade the outgoing content out. Its group (center-line + dividers)
+  // stays put until phase A completes, then swaps in one frame.
+  lv_anim_t a;
+  lv_anim_init(&a);
+  lv_anim_set_duration(&a, kModeSwapFadeMs);
+  lv_anim_set_path_cb(&a, lv_anim_path_ease_in);
+  lv_anim_set_var(&a, out_content);
+  lv_anim_set_exec_cb(&a, opa_exec);
+  lv_anim_set_values(&a, LV_OPA_COVER, LV_OPA_TRANSP);
+  lv_anim_set_ready_cb(&a, mode_swap_phase_a_done);
+  lv_anim_start(&a);
+}
+
 void slide_label_in_translate(lv_obj_t* obj, uint32_t delay_ms) {
   if (obj == nullptr) return;
   if (lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN)) return;
@@ -2450,13 +2566,27 @@ void build_idle_group(lv_obj_t* scr) {
   make_separator(s_idle_group, kColLeftEdge2 - kSeparatorThickness / 2, kSeparatorInset,
                  kSeparatorThickness, kClimateSeparatorY - 2 * kSeparatorInset);
 
-  build_climate_tile(s_idle_group, 0, kColLeftEdge0,  kColLeftEdge1,
+  // Transparent sub-container that holds ONLY the tiles, so the mode-swap fade
+  // touches neither the dividers nor the center-line buttons. Sized to just the
+  // climate strip (top edge at 0, bottom at the climate separator) rather than
+  // full-screen, so fading its opa invalidates only the top band — not the
+  // whole 466×466 panel. At (0,0), so tile coords match parenting on the group.
+  s_climate_anim = lv_obj_create(s_idle_group);
+  lv_obj_set_size(s_climate_anim, kScreen, kClimateSeparatorY);
+  lv_obj_set_pos(s_climate_anim, 0, 0);
+  lv_obj_set_style_bg_opa(s_climate_anim, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(s_climate_anim, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(s_climate_anim, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(s_climate_anim, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(s_climate_anim, LV_OBJ_FLAG_CLICKABLE);
+
+  build_climate_tile(s_climate_anim, 0, kColLeftEdge0,  kColLeftEdge1,
                      kIconGauge,  kColorIconPressure, "PRESSURE",
                      on_pressure_tap);
-  build_climate_tile(s_idle_group, 1, kColLeftEdge1,  kColLeftEdge2,
+  build_climate_tile(s_climate_anim, 1, kColLeftEdge1,  kColLeftEdge2,
                      kIconThermo, kColorIconTemp,    "TEMPERATURE",
                      on_temp_tap);
-  build_climate_tile(s_idle_group, 2, kColLeftEdge2,  kColRightEdge2,
+  build_climate_tile(s_climate_anim, 2, kColLeftEdge2,  kColRightEdge2,
                      kIconDrop,   kColorIconHumidity,   "HUMIDITY",
                      on_humidity_tap);
 
@@ -2523,6 +2653,21 @@ void build_post_group(lv_obj_t* scr) {
   lv_obj_clear_flag(s_post_group, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_clear_flag(s_post_group, LV_OBJ_FLAG_CLICKABLE);
 
+  // Transparent sub-container for the animated content only (brew block +
+  // quality block). The center-line widgets built at the end of this function
+  // stay on s_post_group so they switch instantly, not via the fade. Sized to
+  // the top band (all brew + quality content sits above the climate separator),
+  // so fading its opa invalidates only that band, not the full 466×466 panel.
+  // At (0,0), so child coords match parenting on s_post_group.
+  s_post_anim = lv_obj_create(s_post_group);
+  lv_obj_set_size(s_post_anim, kScreen, kClimateSeparatorY);
+  lv_obj_set_pos(s_post_anim, 0, 0);
+  lv_obj_set_style_bg_opa(s_post_anim, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(s_post_anim, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(s_post_anim, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(s_post_anim, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(s_post_anim, LV_OBJ_FLAG_CLICKABLE);
+
   // Post-mode layout (replaces idle's climate strip in the top area; the
   // grind area below kGrinderSeparatorY is shared across modes):
   //
@@ -2548,15 +2693,19 @@ void build_post_group(lv_obj_t* scr) {
   constexpr int32_t kBrewCaptionTopY = 25;
   constexpr int32_t kBrewRowCenterY  = 74;
   constexpr int32_t kBrewBtnDX       = 90;   // (-)/(+) center distance from kCenter
+  // The value + steppers center-align within s_post_anim, whose height is the
+  // top band (kClimateSeparatorY), NOT the full screen — so the y offset is
+  // measured from the band's center, not kCenter.
+  constexpr int32_t kBrewRowAlignDY  = kBrewRowCenterY - kClimateSeparatorY / 2;
 
-  s_brew_time_caption = lv_label_create(s_post_group);
+  s_brew_time_caption = lv_label_create(s_post_anim);
   lv_obj_set_style_text_color(s_brew_time_caption, kColorLabel, LV_PART_MAIN);
   lv_obj_set_style_text_font(s_brew_time_caption, &lv_font_montserrat_14,
                              LV_PART_MAIN);
   lv_label_set_text(s_brew_time_caption, "BREW TIME");
   lv_obj_align(s_brew_time_caption, LV_ALIGN_TOP_MID, 0, kBrewCaptionTopY);
 
-  s_brew_time_value = lv_label_create(s_post_group);
+  s_brew_time_value = lv_label_create(s_post_anim);
   lv_obj_set_style_text_font(s_brew_time_value, &lv_font_montserrat_46,
                              LV_PART_MAIN);
   // Color + text are owned by refresh_brew_time_value (called from
@@ -2565,8 +2714,7 @@ void build_post_group(lv_obj_t* scr) {
   // something to measure.
   lv_label_set_text(s_brew_time_value, "--");
   lv_obj_set_style_text_color(s_brew_time_value, kColorMuted, LV_PART_MAIN);
-  lv_obj_align(s_brew_time_value, LV_ALIGN_CENTER, 0,
-               kBrewRowCenterY - kCenter);
+  lv_obj_align(s_brew_time_value, LV_ALIGN_CENTER, 0, kBrewRowAlignDY);
 
   // (-) and (+) discs. Same chrome as the ✕ button (kPostBtnH × kPostBtnH
   // outline-only disc) but tinted with kColorStepper so the steppers read
@@ -2577,7 +2725,7 @@ void build_post_group(lv_obj_t* scr) {
       {LV_SYMBOL_PLUS,  &s_brew_plus_btn,  on_brew_plus_tap,  +kBrewBtnDX},
   };
   for (auto& s : steppers) {
-    lv_obj_t* b = lv_button_create(s_post_group);
+    lv_obj_t* b = lv_button_create(s_post_anim);
     lv_obj_set_size(b, kPostBtnH, kPostBtnH);
     lv_obj_set_style_radius(b, kPostBtnH / 2, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(b, LV_OPA_TRANSP, LV_PART_MAIN);
@@ -2585,7 +2733,7 @@ void build_post_group(lv_obj_t* scr) {
     lv_obj_set_style_border_color(b, kColorStepper, LV_PART_MAIN);
     lv_obj_set_style_border_width(b, kPostBtnStroke, LV_PART_MAIN);
     lv_obj_set_style_border_opa(b, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_align(b, LV_ALIGN_CENTER, s.dx, kBrewRowCenterY - kCenter);
+    lv_obj_align(b, LV_ALIGN_CENTER, s.dx, kBrewRowAlignDY);
     lv_obj_set_ext_click_area(b, kPostBtnExtClick);
     lv_obj_add_event_cb(b, s.cb, LV_EVENT_CLICKED, nullptr);
     lv_obj_t* lbl = lv_label_create(b);
@@ -2629,7 +2777,7 @@ void build_post_group(lv_obj_t* scr) {
   // we can pin the centered group's x positions before building anything.
   int32_t pill_w[2];
   {
-    lv_obj_t* scratch = lv_label_create(s_post_group);
+    lv_obj_t* scratch = lv_label_create(s_post_anim);
     lv_obj_set_style_text_font(scratch, &lv_font_montserrat_24, LV_PART_MAIN);
     for (int i = 0; i < 2; ++i) {
       lv_label_set_text(scratch, pills[i].text);
@@ -2656,7 +2804,7 @@ void build_post_group(lv_obj_t* scr) {
   // each centered on its content column. Use update_layout + set_pos so
   // we can horizontally center on a fixed x anchor (LV_ALIGN_TOP_MID
   // would center on the screen, not on the column).
-  s_quality_caption = lv_label_create(s_post_group);
+  s_quality_caption = lv_label_create(s_post_anim);
   lv_obj_set_style_text_color(s_quality_caption, kColorLabel, LV_PART_MAIN);
   lv_obj_set_style_text_font(s_quality_caption, &lv_font_montserrat_14,
                              LV_PART_MAIN);
@@ -2666,7 +2814,7 @@ void build_post_group(lv_obj_t* scr) {
                  kMiddleStarCenterX - lv_obj_get_width(s_quality_caption) / 2,
                  kQualityCaptionY);
 
-  lv_obj_t* modifiers_caption = lv_label_create(s_post_group);
+  lv_obj_t* modifiers_caption = lv_label_create(s_post_anim);
   lv_obj_set_style_text_color(modifiers_caption, kColorLabel, LV_PART_MAIN);
   lv_obj_set_style_text_font(modifiers_caption, &lv_font_montserrat_14,
                              LV_PART_MAIN);
@@ -2680,7 +2828,7 @@ void build_post_group(lv_obj_t* scr) {
   // parent). Tap + swipe are owned by a single overlay built next, which
   // dispatches to on_star_swipe based on indev x.
   for (uint8_t i = 0; i < kMaxStars; ++i) {
-    s_star_icons[i] = make_star(s_post_group, &s_star_states[i]);
+    s_star_icons[i] = make_star(s_post_anim, &s_star_states[i]);
     lv_obj_set_pos(s_star_icons[i],
                    kStarRowX0 + i * (kStarSize + kStarGap), kStarRowY);
   }
@@ -2691,7 +2839,7 @@ void build_post_group(lv_obj_t* scr) {
   // PRESSED/PRESSING before the icons see anything. The handler maps the
   // live indev x to a star count via threshold crossings — tap or drag,
   // both work the same way.
-  lv_obj_t* star_swipe = lv_obj_create(s_post_group);
+  lv_obj_t* star_swipe = lv_obj_create(s_post_anim);
   lv_obj_set_size(star_swipe,
                   kStarRowW + 2 * kStarExtClick,
                   kStarSize + 2 * kStarExtClick);
@@ -2711,7 +2859,7 @@ void build_post_group(lv_obj_t* scr) {
   // Chrome (border + bg + text colors) is driven by refresh_taste_toggles.
   int32_t pill_x = kPillRowX0;
   for (int i = 0; i < 2; ++i) {
-    lv_obj_t* b = lv_button_create(s_post_group);
+    lv_obj_t* b = lv_button_create(s_post_anim);
     lv_obj_set_size(b, pill_w[i], kPillH);
     lv_obj_set_style_radius(b, kPillH / 2, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(b, 0, LV_PART_MAIN);
@@ -2804,6 +2952,19 @@ void start_report() {
   lv_obj_set_style_text_font(s_toast_label, &lv_font_montserrat_14, LV_PART_MAIN);
   lv_obj_align(s_toast_label, LV_ALIGN_TOP_MID, 0, 30);
   lv_obj_add_flag(s_toast_label, LV_OBJ_FLAG_HIDDEN);
+
+  // Mode-swap input block — full-screen transparent click-eater, hidden until a
+  // cross-fade brings it to the foreground (see animate_mode_swap). Clickable so
+  // it intercepts taps rather than passing them through to the fading groups.
+  s_swap_block = lv_obj_create(scr);
+  lv_obj_set_size(s_swap_block, kScreen, kScreen);
+  lv_obj_set_pos(s_swap_block, 0, 0);
+  lv_obj_set_style_bg_opa(s_swap_block, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(s_swap_block, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(s_swap_block, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(s_swap_block, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(s_swap_block, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_flag(s_swap_block, LV_OBJ_FLAG_HIDDEN);
 
   // Seed grind value from per-preset NVS; clamp in case older firmware stored
   // something outside the new ring's range.
