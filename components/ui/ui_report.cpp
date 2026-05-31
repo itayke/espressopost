@@ -1,4 +1,6 @@
 #include "ui.hpp"
+#include "ui_bar.hpp"
+#include "ui_theme.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -20,42 +22,11 @@ namespace {
 constexpr const char* kTag = "report";
 
 // ---------------------------------------------------------------------------
-// Geometry — round AMOLED. Grinder area is a flat strip in the lower half
-// (linear tick bar + upward cursor below it).
+// Geometry — the shared layout frame (screen size, the two separators, center
+// line, and the shared center-line button geometry) lives in ui_theme.hpp. The
+// post-only pill widths + insets below derive from that frame and stay here
+// until the post tuning section consolidates them (Phase 2d).
 // ---------------------------------------------------------------------------
-constexpr int32_t kScreen          = 466;
-constexpr int32_t kCenter          = kScreen / 2;
-
-// Horizontal dividers framing the center line — climate area sits above
-// kClimateSeparatorY, grinder area below kGrinderSeparatorY, with the
-// center button row parked midway between them (kCenterLineY). Both
-// dividers are drawn in idle mode only (the climate strip and column
-// separators hide when the top area swaps to the post form; the bottom
-// horizontal divider is parented to scr and stays visible across modes,
-// see build_idle_group). kGrinderSeparatorY is purely visual — per-bar
-// PRESSED hit-test uses BarSpec.y_band_{top,bottom}. Tune these two Y's
-// and the center line + climate area position track them automatically.
-constexpr int32_t kGrinderSeparatorY = 305;
-constexpr int32_t kClimateSeparatorY = 215;
-
-// Vertical midline between the two separators — where the center button
-// row (POST + preset btn in idle, ✕/preset/Submit in post) sits. NOT the
-// screen's geometric center: the grinder area is taller than the climate
-// strip, so a true mid-screen line would land low inside the grinder
-// band. kCenterLineOffsetY is the offset to feed LV_ALIGN_CENTER when
-// placing widgets onto this line.
-constexpr int32_t kCenterLineY       =
-    (kClimateSeparatorY + kGrinderSeparatorY) / 2;
-constexpr int32_t kCenterLineOffsetY = kCenterLineY - kCenter;
-
-// Shared button geometry on the center line. POST (idle), Submit (post),
-// and the ✕ Cancel pill (post) all share kPostBtnW × kPostBtnH so the row
-// keeps the same vertical footprint when the top area swaps modes and the
-// Cancel / Submit pair sits symmetric about the readout. kPostBtnStroke is
-// the outline-only border width used by all the buttons.
-constexpr int32_t kPostBtnW          = 120;
-constexpr int32_t kPostBtnH          =  58;
-constexpr int32_t kPostBtnStroke     =   4;
 // Both post-mode pills carry icon + text (✕ Cancel, Submit ›), so they're
 // wider than the plain kPostBtnW pills. Each grows away from its anchored
 // edge — Cancel rightward from its left inset, Submit leftward from its right
@@ -63,16 +34,6 @@ constexpr int32_t kPostBtnStroke     =   4;
 // consts so the pills can be sized independently even though they match today.
 constexpr int32_t kCancelBtnW        = kPostBtnW + 20;
 constexpr int32_t kSubmitBtnW        = kPostBtnW + 20;
-// Hit-area padding on every side of the action buttons (POST, ✕ Cancel,
-// Submit, (-)/(+) brew steppers). The visual pill stays kPostBtnW × kPostBtnH;
-// the click target grows by this amount on all sides. Overlap between adjacent
-// buttons is fine — LVGL dispatches to the topmost-hit widget.
-constexpr int32_t kPostBtnExtClick   =  10;
-constexpr int32_t kCenterEdgeInset   =  30;
-// Right-edge inset for the primary action pills (idle POST / post Submit).
-// Tighter than kCenterEdgeInset so the armed action sits a touch closer to
-// the screen edge than the general center-line inset.
-constexpr int32_t kPrimaryBtnRightInset = kCenterEdgeInset - 15;
 // Edge insets for the post-mode pills: kCancelButtonX is the ✕ Cancel pill's
 // left inset, kSubmitButtonX the Submit pill's right inset. Decoupled from the
 // primary right inset and from each other so the two columns can drift
@@ -119,37 +80,11 @@ constexpr int32_t kSuggestionBlockX      = kScreen - 44 - kSuggestionBlockW;
 constexpr int32_t kSuggestionCaptionY    = kGrindCaptionY - 8;
 constexpr int32_t kSuggestionValueY      = kSuggestionCaptionY + 18;
 
-// Bar widget — horizontal strip centered on kBarY, total width 2·kBarHalfWidth.
-// Sized to hug the round-display chord at kBarY while keeping small-tick
-// spacing (kBarHalfWidth / 10 px) readable.
+// Grind bar y on screen — the bar's placement (its visual width, tick tiers,
+// and feel tuning live in ui_bar.hpp). Sized to hug the round-display chord at
+// this y. kGrindSpec.y is seeded from here; refresh_suggestion_arrow positions
+// the suggestion triangle relative to it.
 constexpr int32_t kBarY                  = 384;
-constexpr int32_t kBarHalfWidth          = 166;
-constexpr int32_t kBarStripHeight        = 36;
-// Px-per-grind-unit for the suggestion-arrow position math. Derived from
-// kGrindSpec.visible_half_range, so changing the bar density automatically
-// keeps the suggestion arrow tracking the right tick. The bar's tick draw
-// uses spec.visible_half_range directly; this constant exists because
-// refresh_suggestion_arrow runs against grind specifically.
-// (Defined inline below kGrindSpec — kGrindSpec isn't visible yet here.)
-
-// Tick sizes. Big = integer step, mid = half-step, small = the spec's
-// nominal tick_unit, tiny = sub-step (grind only) for ultra-fine grain.
-// Big ticks are taller AND thicker so integer landmarks read pre-attentively;
-// mid ticks are "long hairlines" that mark half-unit boundaries without
-// competing with the integers; small ticks are short hairlines for fine feel;
-// tiny ticks borrow the small color/thickness but are even shorter so the
-// sub-step grain reads as texture rather than a competing tier.
-constexpr int32_t kBigTickLen         = 24;
-constexpr int32_t kBigTickThickness   = 3;
-constexpr int32_t kMidTickLen         = 18;
-constexpr int32_t kMidTickThickness   = 1;
-constexpr int32_t kSmallTickLen       = 8;
-constexpr int32_t kSmallTickThickness = 1;
-constexpr int32_t kTinyTickLen        = 2;
-// Background rail height — matches the small (0.1) tick so the rail reads as
-// the substrate those ticks sit on; big and mid ticks extend past it.
-constexpr int32_t kBarStripBgHeight   = 14;
-// Tick colors are declared after the kColor* palette below.
 
 // Brew time — value is the user's reported actual brew time in seconds,
 // captured in post mode via the (-)/(+) buttons. Range starts at 0 (a
@@ -174,32 +109,18 @@ constexpr int32_t kStarGap      = 8;
 constexpr int32_t kStarExtClick = 10;
 
 // ---------------------------------------------------------------------------
-// AMOLED-friendly muted palette — pure-black background, no max-intensity
-// sub-pixels (saves burn-in). Same logic as the bringup screen.
-//
-// COLOR(0xRRGGBB) is a thin shim over LV_COLOR_MAKE so palette entries read
-// like a CSS hex literal instead of three comma-separated bytes — easier to
-// paste a Figma swatch in unchanged, and easier to eyeball red/green/blue
-// channels at a glance.
+// Accent + mode-specific colors. The base palette (bg, text, muted tiers) and
+// the COLOR() hex shim live in ui_theme.hpp. Each accent below is its own const
+// so it can be tuned in isolation; the mode-specific ones (POST pill, taste /
+// star / stepper, cancel / submit, climate icons) will move into their mode's
+// tuning section (Phase 2d). All seeded to amber, so the per-element split is a
+// no-op until a value is deliberately changed.
 // ---------------------------------------------------------------------------
-#define COLOR(rgb) LV_COLOR_MAKE(((rgb) >> 16) & 0xFF, \
-                                 ((rgb) >> 8)  & 0xFF, \
-                                 (rgb)         & 0xFF)
-
-const lv_color_t kColorBg     = COLOR(0x000000);
-// Per-element amber palette. These were one shared kColorAccent; each surface
-// now carries its own const so it can be tuned in isolation. All seeded to the
-// same amber, so the split is a no-op until a value is deliberately changed.
 const lv_color_t kColorPost    = COLOR(0xC88036);  // idle POST pill (border + label)
 const lv_color_t kColorTaste   = COLOR(0xC88036);  // Sour/Bitter pills (fill + on-border)
 const lv_color_t kColorStar    = COLOR(0xC88036);  // filled rating-star triangles
 const lv_color_t kColorStepper = COLOR(0xC88036);  // brew (-)/(+) discs (border + glyph)
 const lv_color_t kColorToast   = COLOR(0xC88036);  // transient toast label
-const lv_color_t kColorText   = COLOR(0xE0E0E0);
-const lv_color_t kColorMuted  = COLOR(0x707070);
-const lv_color_t kColorMuted2 = COLOR(0x505050);
-const lv_color_t kColorMuted3 = COLOR(0x303030);
-const lv_color_t kColorMuted4 = COLOR(0x202020);
 
 // Disabled button color
 const lv_color_t kColorTasteDisabled = kColorMuted;
@@ -234,84 +155,34 @@ const lv_color_t kColorCancel         = COLOR(0xE07055);
 const lv_color_t kColorSubmitEnabled  = COLOR(0x60A8E0);
 const lv_color_t kColorSubmitDisabled = kColorMuted3;
 
-// Grinder tick colors. Mid + small share a tier so half-unit ticks read as
-// "longer hairlines" rather than a third distinct stratum.
-const lv_color_t kBigTickColor   = kColorBg;
-const lv_color_t kMidTickColor   = kColorBg;
-const lv_color_t kSmallTickColor = kColorBg;
-const lv_color_t kTinyTickColor  = kColorBg;
-const lv_color_t kBarStripBgColor = COLOR(0xAE6923);
-
 // ---------------------------------------------------------------------------
 // UI modes. The grinder bar + cursor + value text stay live across both;
 // only the center widgets swap.
 // ---------------------------------------------------------------------------
 enum class Mode { Idle, Post };
+constexpr int kModeCount = 2;
 Mode s_mode = Mode::Idle;
 
-// ---------------------------------------------------------------------------
-// Bar generalization. Grind and Time-Delta share the same scroll-with-momentum
-// chassis (draw, drag, flick, snap). BarSpec is the value-domain config (range,
-// snap step, tick tiers, screen y); BarState is per-instance runtime (current
-// value, drag/momentum bookkeeping, sticky-touched flag, the lv_obj widget
-// hosting the custom draw, optional hooks for change/settle/touched).
-// ---------------------------------------------------------------------------
-struct BarSpec {
-  float    min;
-  float    max;
-  float    step;                  // snap grid; value rounds here at settle
-  float    visible_half_range;    // value units shown from cursor center to bar edge
-  int32_t  y;                     // screen y of bar centerline
-  // PRESSED hit-test band in screen y. Wider than the visible bar so a
-  // slightly mistargeted swipe still lands. If a second bar is ever added,
-  // its band must NOT overlap this one, or a single press would race both
-  // bars' drag flags.
-  int32_t  y_band_top;
-  int32_t  y_band_bottom;
-  int      big_every;             // 1-of-N tick indices is "big"
-  int      mid_every;             // 1-of-N tick indices is "mid"
-  int      small_every;           // 1-of-N tick indices is "small"; the rest are "tiny".
-                                  // Sentinel 0 disables the tiny tier — every non-big/non-mid
-                                  // index renders as small.
-  float    tick_unit;             // value step between adjacent ticks
+// One row per mode in the swap registry (s_views, populated once the group
+// pointers and per-mode reset hooks further down exist). `group`/`anim` are
+// pointer-to-pointer because the widgets they name are filled in at build time;
+// `on_enter` reseeds the incoming mode before its fade-in; `on_exit_done` is a
+// deferred cleanup run once the outgoing mode is fully hidden. Adding a mode is
+// then: add an enum value, build its group, add a row — switch_mode/apply_mode
+// never change.
+struct ModeView {
+  lv_obj_t** group;
+  lv_obj_t** anim;
+  void (*on_enter)();      // incoming reseed (runs before the swap), or nullptr
+  void (*on_exit_done)();  // deferred outgoing cleanup (post-fade), or nullptr
 };
 
-struct BarState;
-using BarHook = void (*)(BarState*);
-
-struct BarState {
-  const BarSpec* spec;
-  lv_obj_t* widget;        // custom-drawn lv_obj; tick paint goes here
-  float     value;         // free-floating during drag/glide; snapped to spec.step on settle
-  bool      touched;       // sticky — was this bar swiped since the last form reset?
-
-  // Drag bookkeeping. `dragging` is set in PRESSED only when the press lands
-  // inside spec.y_band_{top,bottom}, cleared in RELEASED / PRESS_LOST.
-  // PRESSING is a no-op until `dragging` is true.
-  bool      dragging;
-  int32_t   last_x;
-  uint64_t  last_us;
-
-  // Flick momentum — same kMomentum* cadence/decay shared across both bars.
-  float       velocity;            // value units / sec, signed
-  lv_timer_t* momentum_timer;
-  int         momentum_ticks_left;
-
-  // Hooks. on_change fires whenever value moves (drag step or momentum step or
-  // settle-snap). on_settle fires once when drag/glide ends, after snap.
-  // on_touched fires once per form session when `touched` flips false→true —
-  // the Post form uses it to enable Submit. All nullable.
-  BarHook on_change;
-  BarHook on_settle;
-  BarHook on_touched;
-};
-
-// Momentum cadence + decay are global; per-bar state lives in BarState.
-constexpr uint32_t kMomentumPeriodMs = 30;     // tick cadence
-constexpr int      kMomentumMaxTicks = 17;     // ≈500 ms at 30 ms/tick
-constexpr float    kMomentumDecay    = 0.85f;  // per tick → ~6% left after 17 ticks
-constexpr float    kMomentumMinSpeed = 0.5f;   // value units/sec — below this we stop
-
+// ---------------------------------------------------------------------------
+// Grind dial — the scroll-with-momentum bar engine (BarSpec / BarState, draw,
+// drag, flick, snap) lives in ui_bar.hpp. kGrindSpec below is the grind dial's
+// value-domain instance of it; the grind glue (hooks, overlay forwarder) is
+// further down.
+// ---------------------------------------------------------------------------
 // Grind bar y-band: the bottom area (bar + cursor + big number + captions
 // + SUGGESTION) is identical in idle and post, so a press anywhere over the
 // GRIND VALUE readout still starts a scrub. visible_half_range × 2 is the
@@ -466,7 +337,7 @@ model::Suggestion s_current_suggestion = {std::nanf(""), 0};
 
 uint8_t s_stars_value = 0;
 // Bitfield of kTasteSour | kTasteBitter — toggled by the two Post pills. Reset
-// on enter_idle. Submitted into ShotRecord.taste_flags verbatim.
+// in reset_post_form. Submitted into ShotRecord.taste_flags verbatim.
 uint8_t s_taste_flags = 0;
 
 // ---------------------------------------------------------------------------
@@ -566,134 +437,6 @@ void draw_arrow_event(lv_event_t* e) {
   dsc.p[1] = rot(-hb,  -h * 0.5f);   // base-left
   dsc.p[2] = rot(+hb,  -h * 0.5f);   // base-right
   lv_draw_triangle(layer, &dsc);
-}
-
-// ---------------------------------------------------------------------------
-// Grinder bar — LV_EVENT_DRAW_MAIN handler. The dial value floats freely while
-// dragging (snapping only at release / momentum-end), so the cursor (fixed at
-// bar center) typically sits *between* the 0.1-step ticks. We iterate
-// 0.1-step indices (integers numbered in tenths of a grind unit) and project
-// each one to its x-position on the bar relative to the cursor's current
-// value. The cursor doesn't have to coincide with a tick.
-//
-// Direction convention: standard horizontal scale. LOWER (finer) values
-// sit LEFT of the cursor; HIGHER (coarser) values sit RIGHT. Drag is
-// direct manipulation — the bar follows the finger. Swipe right → ticks
-// scroll RIGHT under the fixed cursor → cursor reads a LOWER value
-// (lower numbers were just off-screen to the LEFT, now rolled in).
-// ---------------------------------------------------------------------------
-// Generic bar tick painter. Pulls BarState* off the widget's user_data, reads
-// the spec's range / tick rules, and emits the bg rail + tick rects centered
-// on the widget's coord box. Out-of-range ticks (below spec.min or above
-// spec.max) are clipped so a bar whose range starts at 0 doesn't bleed
-// ticks below the floor when the cursor sits there.
-void draw_bar_event(lv_event_t* e) {
-  lv_layer_t* layer = lv_event_get_layer(e);
-  if (layer == nullptr) return;
-  auto* obj = static_cast<lv_obj_t*>(lv_event_get_target(e));
-  // BarState lives on the WIDGET (lv_obj_set_user_data in make_bar_widget),
-  // not on the callback registration — same pattern as draw_arrow_event /
-  // draw_climate_icon. lv_event_get_user_data would return the per-callback
-  // pointer (nullptr in our registration).
-  auto* state = static_cast<BarState*>(lv_obj_get_user_data(obj));
-  if (state == nullptr || state->spec == nullptr) return;
-  lv_area_t coords;
-  lv_obj_get_coords(obj, &coords);
-  const int32_t cx = coords.x1 + lv_area_get_width(&coords)  / 2;
-  const int32_t cy = coords.y1 + lv_area_get_height(&coords) / 2;
-
-  const BarSpec& spec = *state->spec;
-  const float    value = state->value;
-  const float    px_per_unit =
-      static_cast<float>(kBarHalfWidth) / spec.visible_half_range;
-  const float    inv_tick = 1.0f / spec.tick_unit;
-
-  // Background rail. Drawn first so the ticks paint on top; sized to the
-  // small-tick height so the big and mid ticks still stick proud of the rail.
-  // Pill ends — LV_RADIUS_CIRCLE rounds both caps to half-height without
-  // touching the straight middle section.
-  {
-    lv_draw_rect_dsc_t bg_dsc;
-    lv_draw_rect_dsc_init(&bg_dsc);
-    bg_dsc.bg_color = kBarStripBgColor;
-    bg_dsc.bg_opa   = LV_OPA_COVER;
-    bg_dsc.radius   = LV_RADIUS_CIRCLE;
-    lv_area_t bg_a = {cx - kBarHalfWidth, cy - kBarStripBgHeight / 2,
-                      cx + kBarHalfWidth, cy + kBarStripBgHeight / 2};
-    lv_draw_rect(layer, &bg_dsc, &bg_a);
-  }
-
-  // Visible range of values across the bar, plus one tick of over-scan so a
-  // tick doesn't pop in/out at the very edge as the value scrolls.
-  const int32_t idx_min = static_cast<int32_t>(
-      std::floor((value - spec.visible_half_range) * inv_tick)) - 1;
-  const int32_t idx_max = static_cast<int32_t>(
-      std::ceil((value + spec.visible_half_range) * inv_tick)) + 1;
-
-  lv_draw_rect_dsc_t big_dsc;
-  lv_draw_rect_dsc_init(&big_dsc);
-  big_dsc.bg_color = kBigTickColor;
-  big_dsc.bg_opa   = LV_OPA_COVER;
-
-  lv_draw_rect_dsc_t mid_dsc;
-  lv_draw_rect_dsc_init(&mid_dsc);
-  mid_dsc.bg_color = kMidTickColor;
-  mid_dsc.bg_opa   = LV_OPA_COVER;
-
-  lv_draw_rect_dsc_t small_dsc;
-  lv_draw_rect_dsc_init(&small_dsc);
-  small_dsc.bg_color = kSmallTickColor;
-  small_dsc.bg_opa   = LV_OPA_COVER;
-
-  lv_draw_rect_dsc_t tiny_dsc;
-  lv_draw_rect_dsc_init(&tiny_dsc);
-  tiny_dsc.bg_color = kTinyTickColor;
-  tiny_dsc.bg_opa   = LV_OPA_COVER;
-
-  // Half a tick of slack on the value-domain clip so a tick that sits exactly
-  // at spec.min / spec.max still draws (floating-point rounding shouldn't
-  // erase the floor tick).
-  const float clip_slack = spec.tick_unit * 0.5f;
-
-  for (int32_t idx = idx_min; idx <= idx_max; ++idx) {
-    const float v_i = idx * spec.tick_unit;
-    if (v_i < spec.min - clip_slack) continue;
-    if (v_i > spec.max + clip_slack) continue;
-    // Standard slider direction: HIGHER value sits RIGHT of cursor.
-    const float x_offset = (v_i - value) * px_per_unit;
-    if (std::fabs(x_offset) > static_cast<float>(kBarHalfWidth) + 0.5f) continue;
-    const int32_t tick_x = cx + static_cast<int32_t>(std::lround(x_offset));
-    // Tier: big_every > mid_every > small_every (when set; the rest are
-    // tiny). When small_every == 0 the tiny tier is disabled and every
-    // non-big/non-mid index falls through as small. Tiny shares the
-    // small color + thickness; only length differs.
-    const bool is_big   = (idx % spec.big_every == 0);
-    const bool is_mid   = !is_big && (idx % spec.mid_every == 0);
-    const bool is_small = !is_big && !is_mid &&
-        (spec.small_every == 0 || idx % spec.small_every == 0);
-    int32_t half_h, half_w;
-    lv_draw_rect_dsc_t* dsc;
-    if (is_big) {
-      half_h = kBigTickLen / 2;
-      half_w = kBigTickThickness / 2;
-      dsc    = &big_dsc;
-    } else if (is_mid) {
-      half_h = kMidTickLen / 2;
-      half_w = kMidTickThickness / 2;
-      dsc    = &mid_dsc;
-    } else if (is_small) {
-      half_h = kSmallTickLen / 2;
-      half_w = kSmallTickThickness / 2;
-      dsc    = &small_dsc;
-    } else {
-      half_h = kTinyTickLen / 2;
-      half_w = kSmallTickThickness / 2;
-      dsc    = &tiny_dsc;
-    }
-    lv_area_t a = {tick_x - half_w, cy - half_h,
-                   tick_x + half_w, cy + half_h};
-    lv_draw_rect(layer, dsc, &a);
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1045,29 +788,17 @@ void refresh_suggestion() {
 // arrow + big number + GRIND VALUE caption + SUGGESTION block. apply_mode
 // just swaps the two mode groups; nothing else changes between modes.
 // ---------------------------------------------------------------------------
-// Defined with the other anim helpers below. Sequentially swaps the two modes;
-// apply_mode (instant) is still used for the initial build, enter_* animate.
+// Defined with the other anim helpers below. Sequentially swaps two mode groups;
+// apply_mode (instant) is used for the initial build, switch_mode animates.
 void animate_mode_swap(lv_obj_t* out_group, lv_obj_t* out_content,
                        lv_obj_t* in_group, lv_obj_t* in_content,
-                       bool reset_post_on_done);
+                       void (*on_out_done)());
 
-void apply_mode() {
-  if (s_mode == Mode::Idle) {
-    lv_obj_remove_flag(s_idle_group, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(s_post_group, LV_OBJ_FLAG_HIDDEN);
-  } else {
-    lv_obj_add_flag(s_idle_group, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_remove_flag(s_post_group, LV_OBJ_FLAG_HIDDEN);
-  }
-  // SUGGESTION block is shown in both modes now; let refresh_suggested_label
-  // recompute its visibility based on suggestion availability alone.
-  refresh_suggested_label();
-}
-
-// Reset post-form state to the preset's defaults. Pulled out of enter_idle so
-// enter_post can share the same reseed (e.g. preset target time → brew time
-// seed) without duplicating the logic. Grind survives — the user already
-// dialed it for this shot and the bar/cursor are still showing that.
+// Reset post-form state to the preset's defaults. Shared by the Post view's
+// on_enter (reseed before the fade-in) and on_exit_done (deferred clear once
+// the post group is fully hidden, so it doesn't visibly blank mid-fade out).
+// Grind survives — the user already dialed it for this shot and the bar/cursor
+// are still showing that.
 void reset_post_form() {
   s_stars_value   = 0;
   s_taste_flags   = 0;
@@ -1083,29 +814,39 @@ void reset_post_form() {
   refresh_submit_enabled();
 }
 
-void enter_idle() {
-  if (s_mode == Mode::Idle) return;
-  s_mode = Mode::Idle;
-  // Defer reset_post_form to the swap's completion so the post group keeps
-  // showing the user's last stars/brew as it fades out, rather than visibly
-  // clearing to "--"/0 mid-fade. SUGGESTION block is shared across modes, so
-  // refresh it now (apply_mode used to do this).
+// Swap registry — indexed by Mode. Post carries reset_post_form as both its
+// incoming reseed and its deferred outgoing clear; Idle needs neither.
+const ModeView s_views[kModeCount] = {
+    /*Idle*/ {&s_idle_group, &s_climate_anim, nullptr,          nullptr},
+    /*Post*/ {&s_post_group, &s_post_anim,    reset_post_form,  reset_post_form},
+};
+
+// Instant mode apply — used for the initial build (no animation). Shows the
+// active mode's group, hides the rest.
+void apply_mode() {
+  for (int i = 0; i < kModeCount; ++i) {
+    lv_obj_t* g = *s_views[i].group;
+    if (i == static_cast<int>(s_mode)) lv_obj_remove_flag(g, LV_OBJ_FLAG_HIDDEN);
+    else                               lv_obj_add_flag(g, LV_OBJ_FLAG_HIDDEN);
+  }
+  // SUGGESTION block is shown in every mode; let refresh_suggested_label
+  // recompute its visibility based on suggestion availability alone.
   refresh_suggested_label();
-  animate_mode_swap(s_post_group, s_post_anim, s_idle_group, s_climate_anim,
-                    /*reset_post_on_done=*/true);
 }
 
-void enter_post() {
-  if (s_mode == Mode::Post) return;
-  s_mode = Mode::Post;
-  // Re-seed on entry too — preset may have been cycled in idle since the last
-  // post session, and the brew-time pre-seed needs to follow the new target.
-  // Done before the fade so the post group rises in already showing its
-  // freshly seeded values.
-  reset_post_form();
+// Animated transition to `target`. Reseeds the incoming mode (on_enter) before
+// the fade, then hands the outgoing mode's deferred clear (on_exit_done) to the
+// swap engine to run once that group is fully hidden.
+void switch_mode(Mode target) {
+  if (s_mode == target) return;
+  const ModeView& from = s_views[static_cast<int>(s_mode)];
+  const ModeView& to   = s_views[static_cast<int>(target)];
+  s_mode = target;
+  if (to.on_enter) to.on_enter();
+  // SUGGESTION block is shared across modes, so refresh it now.
   refresh_suggested_label();
-  animate_mode_swap(s_idle_group, s_climate_anim, s_post_group, s_post_anim,
-                    /*reset_post_on_done=*/false);
+  animate_mode_swap(*from.group, *from.anim, *to.group, *to.anim,
+                    from.on_exit_done);
 }
 
 // ---------------------------------------------------------------------------
@@ -1138,11 +879,11 @@ void on_preset_tap(lv_event_t*) {
 }
 
 void on_post_tap(lv_event_t*) {
-  enter_post();
+  switch_mode(Mode::Post);
 }
 
 void on_cancel_tap(lv_event_t*) {
-  enter_idle();
+  switch_mode(Mode::Idle);
 }
 
 // Hit-area-enter swipe handler for the star row. Maps the indev's current
@@ -1253,7 +994,7 @@ void on_submit(lv_event_t*) {
   std::snprintf(buf, sizeof(buf), "Saved #%u",
                 static_cast<unsigned>(storage::shot_count()));
   show_toast(buf);
-  enter_idle();
+  switch_mode(Mode::Idle);
   // New data point — refit and refresh so the arrow reflects what we just
   // learned the next climate tick (cheap on our data volumes; inline keeps
   // UI deterministic vs deferring to a background task).
@@ -1263,145 +1004,10 @@ void on_submit(lv_event_t*) {
 }
 
 // ---------------------------------------------------------------------------
-// Generic bar mechanics. The grind bar is the only consumer now (the brew
-// time bar was replaced with the post-mode (-)/(+) button row), but the
-// chassis stays generic so a future second bar can drop in without
-// duplicating the drag/momentum bookkeeping. on_grind_bar_event is a thin
-// forwarder the swipe overlay registers; everything below it is shared.
+// Grind bar glue — wires the generic bar engine (ui_bar.hpp) to grind: the
+// overlay forwarder feeds touches to bar_dispatch_event, and the hooks persist
+// + refresh on change/settle.
 // ---------------------------------------------------------------------------
-void bar_cancel_momentum(BarState* s) {
-  if (s->momentum_timer != nullptr) {
-    lv_timer_delete(s->momentum_timer);
-    s->momentum_timer = nullptr;
-  }
-  s->velocity = 0.0f;
-  s->momentum_ticks_left = 0;
-}
-
-void bar_snap_and_settle(BarState* s) {
-  const float snapped = std::round(s->value / s->spec->step) * s->spec->step;
-  if (snapped != s->value) {
-    s->value = snapped;
-    if (s->on_change) s->on_change(s);
-  }
-  s->velocity = 0.0f;
-  if (s->on_settle) s->on_settle(s);
-}
-
-void bar_momentum_tick(lv_timer_t* t) {
-  auto* s = static_cast<BarState*>(lv_timer_get_user_data(t));
-  if (s == nullptr || s->spec == nullptr) return;
-  const BarSpec& spec = *s->spec;
-  const float dt_s = static_cast<float>(kMomentumPeriodMs) / 1000.0f;
-  const float new_value =
-      std::clamp(s->value + s->velocity * dt_s, spec.min, spec.max);
-  if (new_value != s->value) {
-    s->value = new_value;
-    if (s->on_change) s->on_change(s);
-  }
-  s->velocity *= kMomentumDecay;
-  --s->momentum_ticks_left;
-
-  // Stop on any of: out of ticks, decayed below noise floor, or pinned to a
-  // range edge. Snap + persist before the timer self-destructs.
-  const bool at_edge = (s->value <= spec.min + 1e-4f) ||
-                       (s->value >= spec.max - 1e-4f);
-  if (s->momentum_ticks_left <= 0 ||
-      std::fabs(s->velocity) < kMomentumMinSpeed ||
-      at_edge) {
-    bar_snap_and_settle(s);
-    s->momentum_timer = nullptr;
-    lv_timer_delete(t);
-  }
-}
-
-void bar_dispatch_event(lv_event_t* e, BarState* s) {
-  if (s == nullptr || s->spec == nullptr) return;
-  const BarSpec& spec = *s->spec;
-  const auto code = lv_event_get_code(e);
-  lv_indev_t* indev = lv_indev_active();
-  if (indev == nullptr) return;
-  lv_point_t p;
-  lv_indev_get_point(indev, &p);
-
-  switch (code) {
-    case LV_EVENT_PRESSED: {
-      // Only react when the press lands in THIS bar's y-band. Outside the
-      // band the bar stays asleep so the other bar (or no bar at all) can
-      // claim the press.
-      if (p.y < spec.y_band_top || p.y > spec.y_band_bottom) {
-        s->dragging = false;
-        return;
-      }
-      // Grabbing again mid-glide stops the flywheel — the new touch should
-      // own the motion, not fight a tail from the last release.
-      bar_cancel_momentum(s);
-      s->dragging = true;
-      s->last_x   = p.x;
-      s->last_us  = esp_timer_get_time();
-      // First touch in this form session — fire the hook so the Post form can
-      // enable Submit. Subsequent touches don't re-fire (touched is sticky).
-      if (!s->touched) {
-        s->touched = true;
-        if (s->on_touched) s->on_touched(s);
-      }
-      break;
-    }
-    case LV_EVENT_PRESSING: {
-      if (!s->dragging) return;
-      const int32_t dx_px = p.x - s->last_x;
-      s->last_x = p.x;
-      // Direct manipulation: the bar follows the finger. Finger right
-      // (positive dx) scrolls ticks RIGHT under the fixed center cursor,
-      // which reads a LOWER value — hence the sign flip on dv.
-      //
-      // Sub-step motion is fine; readout labels round for display in their
-      // own refresh. Snap happens at release / momentum-end.
-      const float px_per_unit =
-          static_cast<float>(kBarHalfWidth) / spec.visible_half_range;
-      const float dv = -static_cast<float>(dx_px) / px_per_unit;
-      const float new_value =
-          std::clamp(s->value + dv, spec.min, spec.max);
-      if (new_value != s->value) {
-        s->value = new_value;
-        if (s->on_change) s->on_change(s);
-      }
-      // Track velocity for the post-release flick. EMA with α=0.5 smooths
-      // single-frame jitter while still responding within ~2-3 frames.
-      const uint64_t now_us = esp_timer_get_time();
-      if (s->last_us != 0) {
-        const float dt_s = static_cast<float>(now_us - s->last_us) / 1e6f;
-        if (dt_s > 1e-4f) {
-          const float instant = dv / dt_s;
-          s->velocity = 0.5f * s->velocity + 0.5f * instant;
-        }
-      }
-      s->last_us = now_us;
-      break;
-    }
-    case LV_EVENT_RELEASED:
-    case LV_EVENT_PRESS_LOST: {
-      if (!s->dragging) break;
-      s->dragging = false;
-      s->last_us  = 0;
-      // If the finger lifted with non-trivial speed, hand off to the momentum
-      // timer; it'll snap + settle when it dies. Otherwise settle now.
-      if (std::fabs(s->velocity) >= kMomentumMinSpeed) {
-        s->momentum_ticks_left = kMomentumMaxTicks;
-        if (s->momentum_timer == nullptr) {
-          s->momentum_timer =
-              lv_timer_create(bar_momentum_tick, kMomentumPeriodMs, s);
-        }
-      } else {
-        bar_snap_and_settle(s);
-      }
-      break;
-    }
-    default:
-      break;
-  }
-}
-
 // Overlay forwarder. Only the grind bar uses the swipe overlay now — the
 // brew time captured by the post-mode (-)/(+) buttons doesn't touch this
 // path.
@@ -2038,7 +1644,7 @@ struct ModeSwapCtx {
   lv_obj_t* out_content;
   lv_obj_t* in_group;
   lv_obj_t* in_content;
-  bool      reset_post_on_done;
+  void (*on_out_done)();  // deferred cleanup once the outgoing group is hidden
 };
 ModeSwapCtx s_mode_swap = {};
 
@@ -2056,7 +1662,7 @@ void mode_swap_phase_b_done(lv_anim_t* /*a*/) {
 void mode_swap_phase_a_done(lv_anim_t* /*a*/) {
   lv_obj_add_flag(s_mode_swap.out_group, LV_OBJ_FLAG_HIDDEN);
   lv_obj_set_style_opa(s_mode_swap.out_content, LV_OPA_COVER, LV_PART_MAIN);
-  if (s_mode_swap.reset_post_on_done) reset_post_form();
+  if (s_mode_swap.on_out_done) s_mode_swap.on_out_done();
 
   // Incoming group's center-line + separators appear now (instant); its content
   // starts transparent, then fades up to full opacity.
@@ -2076,9 +1682,8 @@ void mode_swap_phase_a_done(lv_anim_t* /*a*/) {
 
 void animate_mode_swap(lv_obj_t* out_group, lv_obj_t* out_content,
                        lv_obj_t* in_group, lv_obj_t* in_content,
-                       bool reset_post_on_done) {
-  s_mode_swap = {out_group, out_content, in_group, in_content,
-                 reset_post_on_done};
+                       void (*on_out_done)()) {
+  s_mode_swap = {out_group, out_content, in_group, in_content, on_out_done};
 
   // Foreground click-eater swallows taps until the swap finalizes.
   lv_obj_move_foreground(s_swap_block);
@@ -2333,27 +1938,6 @@ lv_obj_t* make_star(lv_obj_t* parent, StarState* state) {
 // ---------------------------------------------------------------------------
 // Group builders.
 // ---------------------------------------------------------------------------
-// Make one bar's tick-strip widget. Parent decides visibility — the grind
-// bar goes on the screen (visible in both modes). The BarState's
-// spec/widget/hooks must be wired by the caller before lv_obj_invalidate
-// triggers a paint.
-lv_obj_t* make_bar_widget(lv_obj_t* parent, BarState* state) {
-  lv_obj_t* w = lv_obj_create(parent);
-  lv_obj_set_size(w, 2 * kBarHalfWidth, kBarStripHeight);
-  lv_obj_set_pos(w, kCenter - kBarHalfWidth,
-                 state->spec->y - kBarStripHeight / 2);
-  lv_obj_set_style_bg_opa(w, LV_OPA_TRANSP, LV_PART_MAIN);
-  lv_obj_set_style_border_width(w, 0, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(w, 0, LV_PART_MAIN);
-  lv_obj_clear_flag(w, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_clear_flag(w, LV_OBJ_FLAG_CLICKABLE);
-  // user_data carries the BarState* so draw_bar_event can pull the value /
-  // spec without globals.
-  lv_obj_set_user_data(w, state);
-  lv_obj_add_event_cb(w, draw_bar_event, LV_EVENT_DRAW_MAIN, nullptr);
-  return w;
-}
-
 void build_grinder(lv_obj_t* scr) {
   // Wire the grind bar state. Spec is constexpr; widget+value+hooks attach
   // here. Brew time has no bar in post mode anymore — it's captured by the
@@ -2709,7 +2293,7 @@ void build_post_group(lv_obj_t* scr) {
   lv_obj_set_style_text_font(s_brew_time_value, &lv_font_montserrat_46,
                              LV_PART_MAIN);
   // Color + text are owned by refresh_brew_time_value (called from
-  // reset_post_form on enter_post / enter_idle and from the (-)/(+)
+  // reset_post_form on each mode switch and from the (-)/(+)
   // handlers per tap). Seed a placeholder so the first layout pass has
   // something to measure.
   lv_label_set_text(s_brew_time_value, "--");

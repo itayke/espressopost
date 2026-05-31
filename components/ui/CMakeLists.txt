@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "ui_report.cpp"
+        "ui_bar.cpp"
     INCLUDE_DIRS
         "include"
     REQUIRES
