@@ -340,6 +340,12 @@ uint8_t s_stars_value = 0;
 // in reset_post_form. Submitted into ShotRecord.taste_flags verbatim.
 uint8_t s_taste_flags = 0;
 
+// Climate snapshot taken when the user enters Post mode (in reset_post_form).
+// The shot is logged against the conditions at the moment they started rating,
+// not whatever the BME280 reads seconds later at Submit — the strip keeps
+// ticking live behind the form, but the record should reflect the brew.
+climate::Reading s_post_climate = {};
+
 // ---------------------------------------------------------------------------
 // Math helpers.
 // ---------------------------------------------------------------------------
@@ -803,6 +809,10 @@ void reset_post_form() {
   s_stars_value   = 0;
   s_taste_flags   = 0;
   s_brew.touched  = false;
+  // Freeze the climate reading for this shot. on_submit logs this snapshot
+  // rather than re-reading climate::latest(), so the record matches what the
+  // strip showed when rating began.
+  s_post_climate  = climate::latest();
   // Pre-seed the brew time at the preset's target so the first (-)/(+) tap
   // can promote it straight to the user's normal target value without an
   // intervening jump. The "--" display stays until `touched` flips.
@@ -957,7 +967,7 @@ void on_brew_plus_tap(lv_event_t*) {
 void on_submit(lv_event_t*) {
   if (!(s_stars_value > 0 && s_brew.touched)) return;  // belt-and-suspenders
 
-  const climate::Reading r = climate::latest();
+  const climate::Reading& r = s_post_climate;
   storage::ShotRecord rec = {};
   rec.preset_id       = presets::selected_id();
   rec.actual_time_s   = s_brew.value_s;
