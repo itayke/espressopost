@@ -48,29 +48,31 @@ constexpr int32_t kCenterLineY       =
     (kClimateSeparatorY + kGrinderSeparatorY) / 2;
 constexpr int32_t kCenterLineOffsetY = kCenterLineY - kCenter;
 
-// Shared button geometry on the center line. POST (idle) and Submit (post)
-// share kPostBtnH so the row keeps the same vertical footprint when the
-// top area swaps modes; the ✕ cancel button is a kPostBtnH × kPostBtnH
-// disc so all three sit on the same baseline. kPostBtnStroke is the
-// outline-only border width used by all three buttons.
+// Shared button geometry on the center line. POST (idle), Submit (post),
+// and the ✕ Cancel pill (post) all share kPostBtnW × kPostBtnH so the row
+// keeps the same vertical footprint when the top area swaps modes and the
+// Cancel / Submit pair sits symmetric about the readout. kPostBtnStroke is
+// the outline-only border width used by all the buttons.
 constexpr int32_t kPostBtnW          = 120;
 constexpr int32_t kPostBtnH          =  58;
 constexpr int32_t kPostBtnStroke     =   4;
-// Hit-area padding on every side of the action buttons (POST, ✕, Submit,
-// (-)/(+) brew steppers). The visual disc stays kPostBtnH; the click
-// target grows by this amount on all sides. Overlap between adjacent
+// The ✕ Cancel pill carries icon + text, so it's wider than the plain
+// kPostBtnW pills. It grows rightward from the same left inset, so the
+// extra width doesn't disturb the shared left edge.
+constexpr int32_t kCancelBtnW        = kPostBtnW + 20;
+// Hit-area padding on every side of the action buttons (POST, ✕ Cancel,
+// Submit, (-)/(+) brew steppers). The visual pill stays kPostBtnW × kPostBtnH;
+// the click target grows by this amount on all sides. Overlap between adjacent
 // buttons is fine — LVGL dispatches to the topmost-hit widget.
 constexpr int32_t kPostBtnExtClick   =  10;
 constexpr int32_t kCenterEdgeInset   =  30;
-// X inset for the ✕ cancel disc in post mode. Decoupled from
-// kCenterEdgeInset so the cancel column can drift independently from the
-// general "center-line edge inset" rule.
-constexpr int32_t kCancelButtonX     =  50;
-// Right-edge inset used only by the primary action buttons (idle POST,
-// post Submit). Tighter than kCenterEdgeInset so the action button sits
-// closer to the screen edge than the ✕ cancel on the left — pulls the
-// armed action toward the thumb without disturbing the cancel column.
+// Right-edge inset for the primary action pills (idle POST / post Submit).
+// Tighter than kCenterEdgeInset so the armed action sits a touch closer to
+// the screen edge than the general center-line inset.
 constexpr int32_t kPrimaryBtnRightInset = kCenterEdgeInset - 15;
+// Left-edge inset for the post ✕ Cancel pill. Decoupled from the primary
+// right inset so the cancel column can drift independently.
+constexpr int32_t kCancelButtonX        = kPrimaryBtnRightInset - 10;
 
 // ---------------------------------------------------------------------------
 // Grind dial — kGrindMin..kGrindMax in 0.1 steps. Linear horizontal tick bar
@@ -2728,7 +2730,7 @@ void build_post_group(lv_obj_t* scr) {
   lv_obj_align(s_post_preset.root, LV_ALIGN_CENTER, 0, kCenterLineOffsetY);
 
   s_cancel_btn = lv_button_create(s_post_group);
-  lv_obj_set_size(s_cancel_btn, kPostBtnH, kPostBtnH);
+  lv_obj_set_size(s_cancel_btn, kCancelBtnW, kPostBtnH);
   lv_obj_set_style_radius(s_cancel_btn, kPostBtnH / 2, LV_PART_MAIN);
   lv_obj_set_style_bg_opa(s_cancel_btn, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_shadow_width(s_cancel_btn, 0, LV_PART_MAIN);
@@ -2742,7 +2744,7 @@ void build_post_group(lv_obj_t* scr) {
   lv_obj_t* cancel_lbl = lv_label_create(s_cancel_btn);
   lv_obj_set_style_text_color(cancel_lbl, kColorCancel, LV_PART_MAIN);
   lv_obj_set_style_text_font(cancel_lbl, &lv_font_montserrat_24, LV_PART_MAIN);
-  lv_label_set_text(cancel_lbl, LV_SYMBOL_CLOSE);
+  lv_label_set_text(cancel_lbl, LV_SYMBOL_CLOSE " Cancel");
   lv_obj_center(cancel_lbl);
 
   s_submit_btn = lv_button_create(s_post_group);
