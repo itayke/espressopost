@@ -308,8 +308,6 @@ If any of these fail, the most likely culprits in order:
   `α + β·grind + γ·grind² + climate + interactions`) and cross-preset
   pooling of climate slopes are deferred until the per-preset model is
   observed to overfit / underfit on real data.
-- The idle screen (Report is the only screen for now) and any
-  read-back / history UI.
 
 Each is its own step in the brief's build order. See the project's
 memory notes for design decisions already locked in.
@@ -340,6 +338,10 @@ memory notes for design decisions already locked in.
     │   ├── model.cpp              IDF glue: mutex, storage, climate, logging
     │   └── model_math.cpp         pure math: standardization, ridge prior, Σ
     └── ui/                     Report screen (preset / brew time / grind / suggestion / stars / Submit)
+        ├── include/ui.hpp         public API (start_report)
+        ├── ui_report.cpp          screen build + mode registry (switch_mode) + refreshers + handlers
+        ├── ui_bar.{hpp,cpp}       generic scroll/momentum bar engine (grind dial is the only consumer)
+        └── ui_theme.hpp           shared layout frame + base palette (mode-specific tuning stays in ui_report)
 
 tests/
 └── host/                          host-side unit tests for model_math (no IDF)
