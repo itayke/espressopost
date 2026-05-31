@@ -139,7 +139,7 @@ constexpr int32_t kBarStripHeight        = 36;
 // competing with the integers; small ticks are short hairlines for fine feel;
 // tiny ticks borrow the small color/thickness but are even shorter so the
 // sub-step grain reads as texture rather than a competing tier.
-constexpr int32_t kBigTickLen         = 26;
+constexpr int32_t kBigTickLen         = 24;
 constexpr int32_t kBigTickThickness   = 3;
 constexpr int32_t kMidTickLen         = 18;
 constexpr int32_t kMidTickThickness   = 1;
@@ -187,7 +187,14 @@ constexpr int32_t kStarExtClick = 10;
                                  (rgb)         & 0xFF)
 
 const lv_color_t kColorBg     = COLOR(0x000000);
-const lv_color_t kColorAccent = COLOR(0xC88036);
+// Per-element amber palette. These were one shared kColorAccent; each surface
+// now carries its own const so it can be tuned in isolation. All seeded to the
+// same amber, so the split is a no-op until a value is deliberately changed.
+const lv_color_t kColorPost    = COLOR(0xC88036);  // idle POST pill (border + label)
+const lv_color_t kColorTaste   = COLOR(0xC88036);  // Sour/Bitter pills (fill + on-border)
+const lv_color_t kColorStar    = COLOR(0xC88036);  // filled rating-star triangles
+const lv_color_t kColorStepper = COLOR(0xC88036);  // brew (-)/(+) discs (border + glyph)
+const lv_color_t kColorToast   = COLOR(0xC88036);  // transient toast label
 const lv_color_t kColorText   = COLOR(0xE0E0E0);
 const lv_color_t kColorMuted  = COLOR(0x707070);
 const lv_color_t kColorMuted2 = COLOR(0x505050);
@@ -223,17 +230,17 @@ const lv_color_t kColorLabel        = COLOR(0xB0B0B0);
 // for a tight pull) and falls back to muted gray when the form gates the
 // submission. Defined as their own names so the action buttons aren't
 // coupled to the climate-icon palette in case either needs to drift.
-const lv_color_t kColorCancel         = COLOR(0xE07055);
+const lv_color_t kColorCancel         = COLOR(0x5D2F23);
 const lv_color_t kColorSubmitEnabled  = COLOR(0x60A8E0);
 const lv_color_t kColorSubmitDisabled = kColorMuted4;
 
 // Grinder tick colors. Mid + small share a tier so half-unit ticks read as
 // "longer hairlines" rather than a third distinct stratum.
-const lv_color_t kBigTickColor   = kColorMuted;
-const lv_color_t kMidTickColor   = kColorMuted;
-const lv_color_t kSmallTickColor = kColorMuted2;
-const lv_color_t kTinyTickColor  = kColorMuted2;
-const lv_color_t kBarStripBgColor = COLOR(0x28232F);
+const lv_color_t kBigTickColor   = kColorBg;
+const lv_color_t kMidTickColor   = kColorBg;
+const lv_color_t kSmallTickColor = kColorBg;
+const lv_color_t kTinyTickColor  = kColorBg;
+const lv_color_t kBarStripBgColor = COLOR(0xAE6923);
 
 // ---------------------------------------------------------------------------
 // UI modes. The grinder bar + cursor + value text stay live across both;
@@ -930,9 +937,9 @@ void refresh_taste_toggles() {
     const bool on = (s_taste_flags & pill.mask) != 0;
     lv_obj_set_style_bg_opa(pill.btn,
                             on ? LV_OPA_COVER : LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(pill.btn, kColorAccent, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(pill.btn, kColorTaste, LV_PART_MAIN);
     lv_obj_set_style_border_color(pill.btn,
-                                  on ? kColorAccent : kColorTasteDisabled, LV_PART_MAIN);
+                                  on ? kColorTaste : kColorTasteDisabled, LV_PART_MAIN);
     if (pill.lbl != nullptr) {
       lv_obj_set_style_text_color(pill.lbl,
                                   on ? kColorBg : kColorTasteDisabled, LV_PART_MAIN);
@@ -2156,7 +2163,7 @@ void draw_star_event(lv_event_t* e) {
 
     lv_draw_triangle_dsc_t tri;
     lv_draw_triangle_dsc_init(&tri);
-    tri.color = kColorAccent;
+    tri.color = kColorStar;
     tri.opa   = LV_OPA_COVER;
     for (const auto& src : raw_tris) {
       const lv_value_precise_t cx = (src[0].x + src[1].x + src[2].x) / 3.0f;
@@ -2464,7 +2471,7 @@ void build_idle_group(lv_obj_t* scr) {
   lv_obj_set_style_radius(s_post_btn, kPostBtnH / 2, LV_PART_MAIN);
   lv_obj_set_style_bg_opa(s_post_btn, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_shadow_width(s_post_btn, 0, LV_PART_MAIN);
-  lv_obj_set_style_border_color(s_post_btn, kColorAccent, LV_PART_MAIN);
+  lv_obj_set_style_border_color(s_post_btn, kColorPost, LV_PART_MAIN);
   lv_obj_set_style_border_width(s_post_btn, kPostBtnStroke, LV_PART_MAIN);
   lv_obj_set_style_border_opa(s_post_btn, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_align(s_post_btn, LV_ALIGN_RIGHT_MID, -kPrimaryBtnRightInset,
@@ -2472,7 +2479,7 @@ void build_idle_group(lv_obj_t* scr) {
   lv_obj_set_ext_click_area(s_post_btn, kPostBtnExtClick);
   lv_obj_add_event_cb(s_post_btn, on_post_tap, LV_EVENT_CLICKED, nullptr);
   lv_obj_t* post_lbl = lv_label_create(s_post_btn);
-  lv_obj_set_style_text_color(post_lbl, kColorAccent, LV_PART_MAIN);
+  lv_obj_set_style_text_color(post_lbl, kColorPost, LV_PART_MAIN);
   lv_obj_set_style_text_font(post_lbl, &lv_font_montserrat_24, LV_PART_MAIN);
   lv_label_set_text(post_lbl, "Post");
   lv_obj_center(post_lbl);
@@ -2562,7 +2569,7 @@ void build_post_group(lv_obj_t* scr) {
                kBrewRowCenterY - kCenter);
 
   // (-) and (+) discs. Same chrome as the ✕ button (kPostBtnH × kPostBtnH
-  // outline-only disc) but tinted with kColorAccent so the steppers read
+  // outline-only disc) but tinted with kColorStepper so the steppers read
   // as a neutral action rather than a destructive one.
   struct BrewStepCfg { const char* glyph; lv_obj_t** btn; lv_event_cb_t cb; int32_t dx; };
   BrewStepCfg steppers[2] = {
@@ -2575,14 +2582,14 @@ void build_post_group(lv_obj_t* scr) {
     lv_obj_set_style_radius(b, kPostBtnH / 2, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(b, LV_OPA_TRANSP, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(b, 0, LV_PART_MAIN);
-    lv_obj_set_style_border_color(b, kColorAccent, LV_PART_MAIN);
+    lv_obj_set_style_border_color(b, kColorStepper, LV_PART_MAIN);
     lv_obj_set_style_border_width(b, kPostBtnStroke, LV_PART_MAIN);
     lv_obj_set_style_border_opa(b, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_align(b, LV_ALIGN_CENTER, s.dx, kBrewRowCenterY - kCenter);
     lv_obj_set_ext_click_area(b, kPostBtnExtClick);
     lv_obj_add_event_cb(b, s.cb, LV_EVENT_CLICKED, nullptr);
     lv_obj_t* lbl = lv_label_create(b);
-    lv_obj_set_style_text_color(lbl, kColorAccent, LV_PART_MAIN);
+    lv_obj_set_style_text_color(lbl, kColorStepper, LV_PART_MAIN);
     lv_obj_set_style_text_font(lbl, &lv_font_montserrat_24, LV_PART_MAIN);
     lv_label_set_text(lbl, s.glyph);
     lv_obj_center(lbl);
@@ -2793,7 +2800,7 @@ void start_report() {
   build_post_group(scr);
 
   s_toast_label = lv_label_create(scr);
-  lv_obj_set_style_text_color(s_toast_label, kColorAccent, LV_PART_MAIN);
+  lv_obj_set_style_text_color(s_toast_label, kColorToast, LV_PART_MAIN);
   lv_obj_set_style_text_font(s_toast_label, &lv_font_montserrat_14, LV_PART_MAIN);
   lv_obj_align(s_toast_label, LV_ALIGN_TOP_MID, 0, 30);
   lv_obj_add_flag(s_toast_label, LV_OBJ_FLAG_HIDDEN);
