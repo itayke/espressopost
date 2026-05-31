@@ -62,6 +62,10 @@ constexpr int32_t kPostBtnStroke     =   4;
 // buttons is fine — LVGL dispatches to the topmost-hit widget.
 constexpr int32_t kPostBtnExtClick   =  10;
 constexpr int32_t kCenterEdgeInset   =  30;
+// X inset for the ✕ cancel disc in post mode. Decoupled from
+// kCenterEdgeInset so the cancel column can drift independently from the
+// general "center-line edge inset" rule.
+constexpr int32_t kCancelButtonX     =  50;
 // Right-edge inset used only by the primary action buttons (idle POST,
 // post Submit). Tighter than kCenterEdgeInset so the action button sits
 // closer to the screen edge than the ✕ cancel on the left — pulls the
@@ -149,6 +153,16 @@ constexpr uint8_t kBrewMinS = 0;
 constexpr uint8_t kBrewMaxS = 99;
 
 constexpr uint8_t kMaxStars = 5;
+// Star-row geometry — hoisted to file scope so on_star_swipe (defined
+// before build_post_group) can map indev x → star count via threshold
+// crossings. Tuning lives here; visual + tap behavior is in build_star_*
+// and the swipe overlay in build_post_group.
+constexpr int32_t kStarSize     = 38;
+constexpr int32_t kStarGap      = 8;
+// Hit-area padding on every side of the star row's swipe overlay.
+// Adjacent stars overlap in their notional hit zones — that's fine since
+// the swipe handler resolves the single active star from the finger x.
+constexpr int32_t kStarExtClick = 10;
 
 // ---------------------------------------------------------------------------
 // AMOLED-friendly muted palette — pure-black background, no max-intensity
@@ -398,8 +412,7 @@ lv_obj_t* s_brew_time_caption   = nullptr;  // "BREW TIME" caption at the top of
 lv_obj_t* s_brew_time_value     = nullptr;  // big "30s" / "--" readout (Mont 46), centered between the (-)/(+) buttons
 lv_obj_t* s_brew_minus_btn      = nullptr;  // (-) disc, same chrome as the ✕ button
 lv_obj_t* s_brew_plus_btn       = nullptr;  // (+) disc, same chrome as the ✕ button
-lv_obj_t* s_star_btns [kMaxStars] = {};      // transparent tap targets sized to each star
-lv_obj_t* s_star_icons[kMaxStars] = {};      // custom-drawn star widgets (outline when unlit, filled fan when lit)
+lv_obj_t* s_star_icons[kMaxStars] = {};      // custom-drawn star widgets (outline when unlit, filled fan when lit); tap+swipe handled by a shared overlay (see build_post_group)
 // Per-star lit/unlit flag read by draw_star_event each paint. Declared as a
 // forward-friendly POD struct so refresh_stars (which lives earlier in the
 // file) can flip flags without needing the full draw helper visible yet.
@@ -1086,10 +1099,34 @@ void on_cancel_tap(lv_event_t*) {
   enter_idle();
 }
 
-void on_star_tap(lv_event_t* e) {
-  const auto idx = reinterpret_cast<uintptr_t>(lv_event_get_user_data(e));
-  if (s_stars_value == idx + 1) s_stars_value = static_cast<uint8_t>(idx);
-  else                          s_stars_value = static_cast<uint8_t>(idx + 1);
+// Hit-area-enter swipe handler for the star row. Maps the indev's current
+// x to a star count via threshold crossings — one threshold at each star's
+// hit-area left edge (visible left edge minus kStarExtClick). Triggered
+// on both PRESSED and PRESSING so a quick tap and a drag both work; once
+// pressed, LVGL keeps dispatching PRESSING events with the live indev
+// point even when the finger leaves the overlay's bounds, so swiping past
+// star 0's left edge clears the rating to 0. The prior toggle-on-re-tap
+// behavior is intentionally gone — to clear, swipe left of the row.
+void on_star_swipe(lv_event_t* e) {
+  auto* overlay = static_cast<lv_obj_t*>(lv_event_get_target(e));
+  lv_indev_t* indev = lv_indev_active();
+  if (indev == nullptr) return;
+  lv_point_t p;
+  lv_indev_get_point(indev, &p);
+
+  lv_area_t coords;
+  lv_obj_get_coords(overlay, &coords);
+  // overlay.x1 sits kStarExtClick px before star 0's visible left edge.
+  const int32_t row_left = coords.x1 + kStarExtClick;
+
+  uint8_t new_value = 0;
+  for (uint8_t i = 0; i < kMaxStars; ++i) {
+    const int32_t ext_left =
+        row_left + i * (kStarSize + kStarGap) - kStarExtClick;
+    if (p.x >= ext_left) ++new_value;
+  }
+  if (new_value == s_stars_value) return;
+  s_stars_value = new_value;
   refresh_stars();
   refresh_submit_enabled();
 }
@@ -2033,10 +2070,9 @@ lv_obj_t* make_arrow(lv_obj_t* parent, ArrowState* state, int32_t widget_size) {
 // polyline lives in a single static array that every star widget
 // references; the draw handler translates it to layer coords per paint, so
 // the array can be widget-relative and shared across positions.
-constexpr int32_t kStarSize        = 38;
-// Hit-area padding on every side of each star's tap target. Overlap
-// between adjacent stars is fine — LVGL picks the topmost-hit widget.
-constexpr int32_t kStarExtClick    = 10;
+// kStarSize / kStarExtClick live at file scope above (near kMaxStars) so
+// on_star_swipe can use them. kStarInnerRatio stays here because it's
+// only touched by build_star_polyline.
 constexpr float   kStarInnerRatio  = 0.5f;
 // Sub-pixel outward push applied to each triangle vertex (from the
 // triangle's own centroid) so adjacent triangles overlap slightly along
@@ -2553,7 +2589,6 @@ void build_post_group(lv_obj_t* scr) {
   // left of star 0 matches the gap right of the last pill.
   constexpr int32_t kQualityCaptionY = 125;
   constexpr int32_t kStarRowY        = 155;
-  constexpr int32_t kStarGap         = 8;
   constexpr int32_t kStarRowW        =
       kMaxStars * kStarSize + (kMaxStars - 1) * kStarGap;
 
@@ -2566,6 +2601,7 @@ void build_post_group(lv_obj_t* scr) {
   constexpr int32_t kPillRowMidY      = 175;
   constexpr int32_t kPillRowY         = kPillRowMidY - kPillH / 2;
   constexpr int32_t kStarsToPillsGap  = 30;
+  constexpr int32_t kPillButtonStroke = 2;
 
   struct PillCfg { const char* text; uint8_t mask; lv_obj_t** btn; lv_obj_t** lbl; };
   PillCfg pills[2] = {
@@ -2618,26 +2654,41 @@ void build_post_group(lv_obj_t* scr) {
   lv_obj_set_style_text_color(modifiers_caption, kColorLabel, LV_PART_MAIN);
   lv_obj_set_style_text_font(modifiers_caption, &lv_font_montserrat_14,
                              LV_PART_MAIN);
-  lv_label_set_text(modifiers_caption, "MODIFIERS");
+  lv_label_set_text(modifiers_caption, "TASTE");
   lv_obj_update_layout(modifiers_caption);
   lv_obj_set_pos(modifiers_caption,
                  kPillRowCenterX - lv_obj_get_width(modifiers_caption) / 2,
                  kQualityCaptionY);
 
+  // Place each star icon directly on the post group (no per-star tap
+  // parent). Tap + swipe are owned by a single overlay built next, which
+  // dispatches to on_star_swipe based on indev x.
   for (uint8_t i = 0; i < kMaxStars; ++i) {
-    lv_obj_t* tap = lv_obj_create(s_post_group);
-    lv_obj_set_size(tap, kStarSize, kStarSize);
-    lv_obj_set_pos(tap, kStarRowX0 + i * (kStarSize + kStarGap), kStarRowY);
-    lv_obj_set_style_bg_opa(tap, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_border_width(tap, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(tap, 0, LV_PART_MAIN);
-    lv_obj_clear_flag(tap, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_flag(tap, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_ext_click_area(tap, kStarExtClick);
-    lv_obj_add_event_cb(tap, on_star_tap, LV_EVENT_CLICKED,
-                        reinterpret_cast<void*>(static_cast<uintptr_t>(i)));
-    s_star_btns[i]  = tap;
-    s_star_icons[i] = make_star(tap, &s_star_states[i]);
+    s_star_icons[i] = make_star(s_post_group, &s_star_states[i]);
+    lv_obj_set_pos(s_star_icons[i],
+                   kStarRowX0 + i * (kStarSize + kStarGap), kStarRowY);
+  }
+
+  // Star swipe overlay — transparent rect covering the row's full hit-area
+  // extent (visible row + kStarExtClick on every side). Sits ABOVE the
+  // star icons in z-order (created after them) so it captures
+  // PRESSED/PRESSING before the icons see anything. The handler maps the
+  // live indev x to a star count via threshold crossings — tap or drag,
+  // both work the same way.
+  lv_obj_t* star_swipe = lv_obj_create(s_post_group);
+  lv_obj_set_size(star_swipe,
+                  kStarRowW + 2 * kStarExtClick,
+                  kStarSize + 2 * kStarExtClick);
+  lv_obj_set_pos(star_swipe,
+                 kStarRowX0 - kStarExtClick,
+                 kStarRowY - kStarExtClick);
+  lv_obj_set_style_bg_opa(star_swipe, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(star_swipe, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(star_swipe, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(star_swipe, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(star_swipe, LV_OBJ_FLAG_CLICKABLE);
+  for (auto code : {LV_EVENT_PRESSED, LV_EVENT_PRESSING}) {
+    lv_obj_add_event_cb(star_swipe, on_star_swipe, code, nullptr);
   }
 
   // Sour / Bitter pills, side by side, each sized to fit its own text.
@@ -2649,7 +2700,7 @@ void build_post_group(lv_obj_t* scr) {
     lv_obj_set_style_radius(b, kPillH / 2, LV_PART_MAIN);
     lv_obj_set_style_shadow_width(b, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(b, 0, LV_PART_MAIN);
-    lv_obj_set_style_border_width(b, kPostBtnStroke, LV_PART_MAIN);
+    lv_obj_set_style_border_width(b, kPillButtonStroke, LV_PART_MAIN);
     lv_obj_set_style_border_opa(b, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_pos(b, pill_x, kPillRowY);
     pill_x += pill_w[i] + kPillRowGap;
@@ -2684,7 +2735,7 @@ void build_post_group(lv_obj_t* scr) {
   lv_obj_set_style_border_color(s_cancel_btn, kColorCancel, LV_PART_MAIN);
   lv_obj_set_style_border_width(s_cancel_btn, kPostBtnStroke, LV_PART_MAIN);
   lv_obj_set_style_border_opa(s_cancel_btn, LV_OPA_COVER, LV_PART_MAIN);
-  lv_obj_align(s_cancel_btn, LV_ALIGN_LEFT_MID, kCenterEdgeInset,
+  lv_obj_align(s_cancel_btn, LV_ALIGN_LEFT_MID, kCancelButtonX,
                kCenterLineOffsetY);
   lv_obj_set_ext_click_area(s_cancel_btn, kPostBtnExtClick);
   lv_obj_add_event_cb(s_cancel_btn, on_cancel_tap, LV_EVENT_CLICKED, nullptr);
