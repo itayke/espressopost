@@ -56,10 +56,13 @@ constexpr int32_t kCenterLineOffsetY = kCenterLineY - kCenter;
 constexpr int32_t kPostBtnW          = 120;
 constexpr int32_t kPostBtnH          =  58;
 constexpr int32_t kPostBtnStroke     =   4;
-// The ✕ Cancel pill carries icon + text, so it's wider than the plain
-// kPostBtnW pills. It grows rightward from the same left inset, so the
-// extra width doesn't disturb the shared left edge.
+// Both post-mode pills carry icon + text (✕ Cancel, Submit ›), so they're
+// wider than the plain kPostBtnW pills. Each grows away from its anchored
+// edge — Cancel rightward from its left inset, Submit leftward from its right
+// inset — so the extra width doesn't disturb the anchored edge. Kept as two
+// consts so the pills can be sized independently even though they match today.
 constexpr int32_t kCancelBtnW        = kPostBtnW + 20;
+constexpr int32_t kSubmitBtnW        = kPostBtnW + 20;
 // Hit-area padding on every side of the action buttons (POST, ✕ Cancel,
 // Submit, (-)/(+) brew steppers). The visual pill stays kPostBtnW × kPostBtnH;
 // the click target grows by this amount on all sides. Overlap between adjacent
@@ -70,9 +73,13 @@ constexpr int32_t kCenterEdgeInset   =  30;
 // Tighter than kCenterEdgeInset so the armed action sits a touch closer to
 // the screen edge than the general center-line inset.
 constexpr int32_t kPrimaryBtnRightInset = kCenterEdgeInset - 15;
-// Left-edge inset for the post ✕ Cancel pill. Decoupled from the primary
-// right inset so the cancel column can drift independently.
+// Edge insets for the post-mode pills: kCancelButtonX is the ✕ Cancel pill's
+// left inset, kSubmitButtonX the Submit pill's right inset. Decoupled from the
+// primary right inset and from each other so the two columns can drift
+// independently; seeded to one value so the pair sits symmetric about the
+// readout.
 constexpr int32_t kCancelButtonX        = kPrimaryBtnRightInset - 10;
+constexpr int32_t kSubmitButtonX        = kPrimaryBtnRightInset - 10;
 
 // ---------------------------------------------------------------------------
 // Grind dial — kGrindMin..kGrindMax in 0.1 steps. Linear horizontal tick bar
@@ -2748,21 +2755,21 @@ void build_post_group(lv_obj_t* scr) {
   lv_obj_center(cancel_lbl);
 
   s_submit_btn = lv_button_create(s_post_group);
-  lv_obj_set_size(s_submit_btn, kPostBtnW, kPostBtnH);
+  lv_obj_set_size(s_submit_btn, kSubmitBtnW, kPostBtnH);
   lv_obj_set_style_radius(s_submit_btn, kPostBtnH / 2, LV_PART_MAIN);
   lv_obj_set_style_bg_opa(s_submit_btn, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_shadow_width(s_submit_btn, 0, LV_PART_MAIN);
   lv_obj_set_style_border_color(s_submit_btn, kColorSubmitDisabled, LV_PART_MAIN);
   lv_obj_set_style_border_width(s_submit_btn, kPostBtnStroke, LV_PART_MAIN);
   lv_obj_set_style_border_opa(s_submit_btn, LV_OPA_COVER, LV_PART_MAIN);
-  lv_obj_align(s_submit_btn, LV_ALIGN_RIGHT_MID, -kPrimaryBtnRightInset,
+  lv_obj_align(s_submit_btn, LV_ALIGN_RIGHT_MID, -kSubmitButtonX,
                kCenterLineOffsetY);
   lv_obj_set_ext_click_area(s_submit_btn, kPostBtnExtClick);
   s_submit_label = lv_label_create(s_submit_btn);
   lv_obj_set_style_text_color(s_submit_label, kColorSubmitDisabled, LV_PART_MAIN);
   lv_obj_set_style_text_font(s_submit_label, &lv_font_montserrat_24,
                              LV_PART_MAIN);
-  lv_label_set_text(s_submit_label, "Submit");
+  lv_label_set_text(s_submit_label, "Submit " LV_SYMBOL_RIGHT);
   lv_obj_center(s_submit_label);
   lv_obj_add_event_cb(s_submit_btn, on_submit, LV_EVENT_CLICKED, nullptr);
 }
