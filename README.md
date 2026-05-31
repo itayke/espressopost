@@ -340,6 +340,10 @@ memory notes for design decisions already locked in.
     │   ├── model.cpp              IDF glue: mutex, storage, climate, logging
     │   └── model_math.cpp         pure math: standardization, ridge prior, Σ
     └── ui/                     Report screen (preset / brew time / grind / suggestion / stars / Submit)
+        ├── include/ui.hpp         public API (start_report)
+        ├── ui_report.cpp          screen build + mode registry (switch_mode) + refreshers + handlers
+        ├── ui_bar.{hpp,cpp}       generic scroll/momentum bar engine (grind dial is the only consumer)
+        └── ui_theme.hpp           shared layout frame + base palette (mode-specific tuning stays in ui_report)
 
 tests/
 └── host/                          host-side unit tests for model_math (no IDF)
