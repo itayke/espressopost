@@ -162,8 +162,21 @@ PresetReadout build_preset_readout_grid(lv_obj_t* parent) {
 // `slot` is the 0-based id (rendered 1-based as "PRESET N"), `p` its data. The
 // color tints every label plus both arrow strokes so the whole readout reads in
 // the preset's hue.
+// Show every child of the readout root except `keep` (the top label). Used to
+// flip a grid slot between the full readout and the "PRESET N"-only empty state.
+void set_value_rows_hidden(PresetReadout& r, bool hidden) {
+  const uint32_t n = lv_obj_get_child_count(r.root);
+  for (uint32_t i = 0; i < n; ++i) {
+    lv_obj_t* child = lv_obj_get_child(r.root, i);
+    if (child == r.top) continue;
+    if (hidden) lv_obj_add_flag(child, LV_OBJ_FLAG_HIDDEN);
+    else        lv_obj_remove_flag(child, LV_OBJ_FLAG_HIDDEN);
+  }
+}
+
 void apply_readout(PresetReadout& r, const presets::Preset& p, uint8_t slot) {
   if (r.root == nullptr) return;
+  set_value_rows_hidden(r, false);  // restore rows in case the slot was empty
   char top_buf[16], dose_buf[8], yield_buf[8], time_buf[8];
   std::snprintf(top_buf,   sizeof(top_buf),   "PRESET %u",
                 static_cast<unsigned>(slot + 1));
@@ -189,6 +202,16 @@ void apply_readout(PresetReadout& r, const presets::Preset& p, uint8_t slot) {
       lv_obj_set_style_line_color(lv_obj_get_child(r.arrow, i), c, LV_PART_MAIN);
     }
   }
+}
+
+void apply_readout_empty(PresetReadout& r, uint8_t slot, lv_color_t color) {
+  if (r.root == nullptr) return;
+  char top_buf[16];
+  std::snprintf(top_buf, sizeof(top_buf), "PRESET %u",
+                static_cast<unsigned>(slot + 1));
+  lv_label_set_text(r.top, top_buf);
+  lv_obj_set_style_text_color(r.top, color, LV_PART_MAIN);
+  set_value_rows_hidden(r, true);  // only "PRESET N" shows for an empty slot
 }
 
 }  // namespace espressopost::ui

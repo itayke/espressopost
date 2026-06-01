@@ -14,9 +14,11 @@ namespace espressopost::ui::presets_screen {
 // ui_report; its glyph comes from build_menu_glyph below.
 extern const lv_color_t kColorMenu;
 
-// Build the screen under `scr`; the Back pill's CLICKED is wired to `on_back`.
+// Build the screen under `scr`; the Back pill's CLICKED is wired to `on_back`,
+// and each slot's CLICKED to `on_slot` (the slot's 0-based id is stored in the
+// slot widget's user_data, so the handler can read which one was tapped).
 // Returns the group handle so ui_report can show/hide it across the mode swap.
-lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_back);
+lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_back, lv_event_cb_t on_slot);
 
 // Repopulate the grid from current preset data (active slots show a colored
 // readout, empty slots a bare outline). Call just before the screen fades in.

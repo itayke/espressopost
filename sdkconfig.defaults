@@ -42,6 +42,14 @@ CONFIG_FREERTOS_HZ=1000
 CONFIG_LV_FONT_MONTSERRAT_24=y
 CONFIG_LV_FONT_MONTSERRAT_46=y
 
+# --- LVGL memory pool ---
+# LVGL allocates every widget, style, and the glyph cache from its own fixed
+# pool. The default 64 KB is too tight once all the screens coexist (idle +
+# post + the 3×3 Presets grid of readouts + the preset editor's bars / swatches
+# / pills): exhausting the pool corrupts allocations and hangs the draw (a bad
+# glyph blits forever). 128 KB leaves comfortable headroom for more screens.
+CONFIG_LV_MEM_SIZE_KILOBYTES=128
+
 # --- LVGL extra modules ---
 # Snapshot bakes the rotated-number ring into a single 466×466 RGB565 sprite
 # at boot, so dialing the grind ring is one lv_image_set_rotation call per

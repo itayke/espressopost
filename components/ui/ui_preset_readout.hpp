@@ -34,4 +34,9 @@ PresetReadout build_preset_readout_grid(lv_obj_t* parent);
 // 0-based id (rendered 1-based as "PRESET N").
 void apply_readout(PresetReadout& r, const presets::Preset& p, uint8_t slot);
 
+// Empty-slot variant: show only the "PRESET N" label tinted `color` (the slot's
+// frame color) and hide the value rows. Used by the Presets grid so an unused
+// slot still reads "PRESET N" in the muted frame hue.
+void apply_readout_empty(PresetReadout& r, uint8_t slot, lv_color_t color);
+
 }  // namespace espressopost::ui

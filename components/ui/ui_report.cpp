@@ -1,8 +1,10 @@
 #include "ui.hpp"
 #include "ui_bar.hpp"
+#include "ui_preset_edit.hpp"
 #include "ui_preset_readout.hpp"
 #include "ui_presets.hpp"
 #include "ui_theme.hpp"
+#include "ui_time_stepper.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -121,7 +123,6 @@ constexpr int32_t kStarExtClick = 10;
 const lv_color_t kColorPost    = COLOR(0xC88036);  // idle POST pill (border + label)
 const lv_color_t kColorTaste   = COLOR(0xC88036);  // Sour/Bitter pills (fill + on-border)
 const lv_color_t kColorStar    = COLOR(0xC88036);  // filled rating-star triangles
-const lv_color_t kColorStepper = COLOR(0xC88036);  // brew (-)/(+) discs (border + glyph)
 const lv_color_t kColorToast   = COLOR(0xC88036);  // transient toast label
 
 // Disabled button color
@@ -166,8 +167,8 @@ const lv_color_t kColorSubmitDisabled = kColorMuted3;
 // only the center widgets swap. Presets is a full-panel mode (everything hides)
 // reached from Idle via the Menu button — see the section-swap engine below.
 // ---------------------------------------------------------------------------
-enum class Mode { Idle, Post, Presets };
-constexpr int kModeCount = 3;
+enum class Mode { Idle, Post, Presets, Edit };
+constexpr int kModeCount = 4;
 Mode s_mode = Mode::Idle;
 
 // One row per mode in the swap registry (s_views, populated once the group
@@ -201,6 +202,8 @@ constexpr BarSpec kGrindSpec = {
   /*max*/                kGrindMax,
   /*step*/               model::kGrindStep,
   /*visible_half_range*/ 0.6f,
+  /*half_width*/         kBarHalfWidth,
+  /*center_x*/           kCenter,
   /*y*/                  kBarY,
   /*y_band_top*/         298,
   /*y_band_bottom*/      kScreen,
@@ -236,15 +239,12 @@ lv_obj_t* s_suggested_label   = nullptr;  // "x.xx (xx%)" value line under SUGGE
 // Shown in both modes.
 BarState s_grind = {};
 
-// Brew time captured by the post-mode (-)/(+) buttons. `touched` flips
-// false→true on the first tap (so the value displays as "--" until then
-// and Submit stays gated), `value_s` carries the current seconds within
-// [kBrewMinS, kBrewMaxS].
-struct BrewTimeState {
-  uint8_t value_s;
-  bool    touched;
-};
-BrewTimeState s_brew = {};
+// Brew time captured by the post-mode stepper (the shared ui_time_stepper
+// instance). `touched` flips false→true on the first tap (so the value shows
+// "--" until then and Submit stays gated); `value_s` carries the current
+// seconds within [kBrewMinS, kBrewMaxS]. min/max/on_change/value_lbl are wired
+// when the stepper is built.
+TimeStepperState s_brew = {};
 
 // Idle group:
 lv_obj_t* s_idle_group          = nullptr;
@@ -314,9 +314,8 @@ lv_obj_t* s_post_anim           = nullptr;
 // can't land on either group mid-flight (e.g. Submit on the fading post form).
 lv_obj_t* s_swap_block          = nullptr;
 lv_obj_t* s_brew_time_caption   = nullptr;  // "BREW TIME" caption at the top of the post screen
-lv_obj_t* s_brew_time_value     = nullptr;  // big "30s" / "--" readout (Mont 46), centered between the (-)/(+) buttons
-lv_obj_t* s_brew_minus_btn      = nullptr;  // (-) disc, same chrome as the ✕ button
-lv_obj_t* s_brew_plus_btn       = nullptr;  // (+) disc, same chrome as the ✕ button
+// The brew "--"/value readout + (-)/(+) discs are owned by the shared
+// ui_time_stepper instance (s_brew), not tracked here.
 lv_obj_t* s_star_icons[kMaxStars] = {};      // custom-drawn star widgets (outline when unlit, filled fan when lit); tap+swipe handled by a shared overlay (see build_post_group)
 // Per-star lit/unlit flag read by draw_star_event each paint. Declared as a
 // forward-friendly POD struct so refresh_stars (which lives earlier in the
@@ -340,14 +339,28 @@ lv_timer_t* s_toast_timer       = nullptr;
 // from presets_screen::build) to show/hide it across the mode swap.
 lv_obj_t* s_presets_group = nullptr;
 
-// Section-swap fade sets — every widget that fades on the full-panel Idle↔Presets
-// transition. The idle set is populated in start_report from local handles; the
-// presets set is owned by ui_presets and pointed at via fade_widgets(). The
-// engine just iterates them (skipping any HIDDEN widget).
+// Preset editor (Mode::Edit) — the view lives in ui_preset_edit.cpp; ui_report
+// keeps the group handle and the slot id currently being edited (set when a grid
+// slot is tapped, consumed by preset_edit::load at the swap midpoint).
+lv_obj_t* s_edit_group = nullptr;
+uint8_t   s_edit_slot  = 0;
+
+// Records which panels an in-flight section swap is moving between, so the shared
+// midpoint hook (panel_swap_mid) knows what to hide / reveal. One swap at a time
+// (input is blocked during it), so a single pair is enough.
+Mode s_swap_from = Mode::Idle;
+Mode s_swap_to   = Mode::Idle;
+
+// Section-swap fade sets — every widget that fades on a full-panel transition
+// (Idle↔Presets, Presets↔Edit). The idle set is populated in start_report from
+// local handles; the presets / edit sets are owned by their views and pointed at
+// via fade_widgets(). The engine just iterates them (skipping any HIDDEN widget).
 lv_obj_t* s_idle_fade[16]      = {};
 int       s_idle_fade_n        = 0;
 lv_obj_t* const* s_presets_fade = nullptr;
 int       s_presets_fade_n     = 0;
+lv_obj_t* const* s_edit_fade    = nullptr;
+int       s_edit_fade_n        = 0;
 // No-op anim target: drives the swap's two-phase timing independently of which
 // section widgets are visible, so the phase callbacks fire after exactly one
 // kModeSwapFadeMs regardless of how many widgets actually faded.
@@ -570,22 +583,6 @@ void refresh_preset_label() {
   apply_readout(s_post_preset, p, slot);
 }
 
-// BREW TIME big readout — "Ns" once the user has tapped (-) or (+),
-// muted "--" before that. Called from on_brew_minus_tap / on_brew_plus_tap
-// on each step and from reset_post_form on form reset.
-void refresh_brew_time_value() {
-  if (s_brew_time_value == nullptr) return;
-  if (!s_brew.touched) {
-    lv_label_set_text(s_brew_time_value, "--");
-    lv_obj_set_style_text_color(s_brew_time_value, kColorMuted, LV_PART_MAIN);
-    return;
-  }
-  char buf[8];
-  std::snprintf(buf, sizeof(buf), "%us", static_cast<unsigned>(s_brew.value_s));
-  lv_label_set_text(s_brew_time_value, buf);
-  lv_obj_set_style_text_color(s_brew_time_value, kColorText, LV_PART_MAIN);
-}
-
 // Flip each star's lit flag against s_stars_value and invalidate so the
 // custom draw handler repaints. Lit → filled accent fan; unlit → muted
 // outline. Tap targets stay transparent; only the star icon repaints.
@@ -712,14 +709,13 @@ void animate_mode_swap(lv_obj_t* out_group, lv_obj_t* out_content,
                        lv_obj_t* in_group, lv_obj_t* in_content,
                        void (*on_out_done)());
 
-// Full-panel Idle↔Presets transition (every section fades; defined with the
-// other anim helpers below). enter/exit_presets_mid run the group hide/show
-// bookkeeping at the swap midpoint; the grid is repopulated via
-// presets_screen::refresh().
+// Full-panel transition engine (every section fades; defined with the other anim
+// helpers below). Used for Idle↔Presets and Presets↔Edit. panel_swap_mid runs the
+// group hide/show bookkeeping at the swap midpoint (for whichever from→to panels
+// the in-flight swap recorded).
 void animate_section_swap(lv_obj_t* const* out, int out_n,
                           lv_obj_t* const* in, int in_n, void (*on_mid)());
-void enter_presets_mid();
-void exit_presets_mid();
+void panel_swap_mid();
 
 // Reset post-form state to the preset's defaults. Shared by the Post view's
 // on_enter (reseed before the fade-in) and on_exit_done (deferred clear once
@@ -741,7 +737,7 @@ void reset_post_form() {
   s_brew.value_s = std::clamp<uint8_t>(p.target_time_s, kBrewMinS, kBrewMaxS);
   refresh_stars();
   refresh_taste_toggles();
-  refresh_brew_time_value();
+  time_stepper_refresh(&s_brew);
   refresh_submit_enabled();
 }
 
@@ -750,11 +746,27 @@ void reset_post_form() {
 const ModeView s_views[kModeCount] = {
     /*Idle*/    {&s_idle_group,    &s_climate_anim,  nullptr,         nullptr},
     /*Post*/    {&s_post_group,    &s_post_anim,     reset_post_form, reset_post_form},
-    // Presets uses the section-swap engine, not animate_mode_swap — only its
-    // `group` is consumed (by apply_mode, to hide it at boot). `anim`/hooks are
-    // never read for this row, so `anim` just mirrors `group`.
+    // Presets / Edit use the section-swap engine, not animate_mode_swap — only
+    // their `group` is consumed (by apply_mode, to hide it at boot). `anim`/hooks
+    // are never read for these rows, so `anim` just mirrors `group`.
     /*Presets*/ {&s_presets_group, &s_presets_group, nullptr,         nullptr},
+    /*Edit*/    {&s_edit_group,    &s_edit_group,    nullptr,         nullptr},
 };
+
+// Full-panel modes drive the per-section fade engine (vs the Idle↔Post climate
+// swap). Their fade set + group bookkeeping are addressed by mode below.
+bool is_panel_mode(Mode m) { return m == Mode::Presets || m == Mode::Edit; }
+
+// The section-fade set for a mode (Idle participates as the Presets edge's other
+// side). Post never section-swaps, so it returns empty.
+lv_obj_t* const* mode_fade(Mode m, int* n) {
+  switch (m) {
+    case Mode::Idle:    *n = s_idle_fade_n;    return s_idle_fade;
+    case Mode::Presets: *n = s_presets_fade_n; return s_presets_fade;
+    case Mode::Edit:    *n = s_edit_fade_n;    return s_edit_fade;
+    default:            *n = 0;                return nullptr;
+  }
+}
 
 // Instant mode apply — used for the initial build (no animation). Shows the
 // active mode's group, hides the rest.
@@ -777,20 +789,18 @@ void switch_mode(Mode target) {
   const Mode prev = s_mode;
   s_mode = target;
 
-  // Presets is a full-panel swap (no shared chrome — every section fades), so it
-  // runs the per-section engine instead of the climate-band animate_mode_swap.
-  // Menu only exists in Idle and Back only returns to Idle, so the only Presets
-  // edges are Idle↔Presets; enter/exit_presets_mid do the group bookkeeping and
-  // populate the grid at the swap midpoint.
-  if (target == Mode::Presets) {
-    animate_section_swap(s_idle_fade, s_idle_fade_n,
-                         s_presets_fade, s_presets_fade_n, enter_presets_mid);
-    return;
-  }
-  if (prev == Mode::Presets) {
-    refresh_suggested_label();  // re-assert the shared SUGGESTION block on return
-    animate_section_swap(s_presets_fade, s_presets_fade_n,
-                         s_idle_fade, s_idle_fade_n, exit_presets_mid);
+  // A transition touching a full-panel mode (Presets / Edit) runs the per-section
+  // fade engine instead of the climate-band animate_mode_swap. The edges in play
+  // are Idle↔Presets and Presets↔Edit; panel_swap_mid hides the outgoing panel
+  // and reveals + reseeds the incoming one (grid refresh / editor load) at the
+  // midpoint, for whichever from→to this swap records.
+  if (is_panel_mode(prev) || is_panel_mode(target)) {
+    s_swap_from = prev;
+    s_swap_to   = target;
+    int out_n = 0, in_n = 0;
+    lv_obj_t* const* out = mode_fade(prev, &out_n);
+    lv_obj_t* const* in  = mode_fade(target, &in_n);
+    animate_section_swap(out, out_n, in, in_n, panel_swap_mid);
     return;
   }
 
@@ -850,6 +860,33 @@ void on_back_tap(lv_event_t*) {
   switch_mode(Mode::Idle);
 }
 
+// Tapping a Presets grid slot opens its editor. The slot's 0-based id rides in
+// the tapped widget's user_data (stored by ui_presets); stash it for
+// preset_edit::load (run at the swap midpoint) and switch to the Edit panel.
+void on_slot_tap(lv_event_t* e) {
+  if (s_mode != Mode::Presets) return;
+  s_edit_slot = static_cast<uint8_t>(reinterpret_cast<intptr_t>(
+      lv_obj_get_user_data(static_cast<lv_obj_t*>(lv_event_get_target(e)))));
+  switch_mode(Mode::Edit);
+}
+
+// Editor Cancel — back to the grid, no write.
+void on_edit_cancel_tap(lv_event_t*) {
+  switch_mode(Mode::Presets);
+}
+
+// Editor Save — compose the edited preset and persist it (creating the slot if
+// it was empty), then return to the grid. gather() returns false if the form
+// isn't complete, but Save is gated to only fire when it is, so that's a no-op
+// guard.
+void on_edit_save_tap(lv_event_t*) {
+  presets::Preset p;
+  if (preset_edit::gather(&p)) {
+    presets::set(s_edit_slot, p);
+  }
+  switch_mode(Mode::Presets);
+}
+
 // Hit-area-enter swipe handler for the star row. Maps the indev's current
 // x to a star count via threshold crossings — one threshold at each star's
 // hit-area left edge (visible left edge minus kStarExtClick). Triggered
@@ -893,41 +930,9 @@ void on_taste_tap(lv_event_t* e) {
   // gate Submit.
 }
 
-// Brew time (-) / (+) tap handlers. The first tap of EITHER button just
-// flips `touched` so the readout transitions from "--" to the pre-seeded
-// preset target (set in reset_post_form); subsequent taps step the value
-// by 1 second in the tapped direction, clamped to [kBrewMinS, kBrewMaxS].
-// This matches "first click jumps to preset, then +/- adjusts from there".
-void on_brew_minus_tap(lv_event_t*) {
-  if (!s_brew.touched) {
-    s_brew.touched = true;
-  } else if (s_brew.value_s > kBrewMinS) {
-    --s_brew.value_s;
-  }
-  refresh_brew_time_value();
-  refresh_submit_enabled();
-}
-
-void on_brew_plus_tap(lv_event_t*) {
-  if (!s_brew.touched) {
-    s_brew.touched = true;
-  } else if (s_brew.value_s < kBrewMaxS) {
-    ++s_brew.value_s;
-  }
-  refresh_brew_time_value();
-  refresh_submit_enabled();
-}
-
-// The "--"/value readout doubles as a button: while still untouched, tapping
-// it commits the pre-seeded preset target (same first-tap reveal as the
-// steppers), which also clears Submit's brew-time gate. Once a value is set
-// it's display-only — the (-)/(+) discs own adjustment from there.
-void on_brew_value_tap(lv_event_t*) {
-  if (s_brew.touched) return;
-  s_brew.touched = true;
-  refresh_brew_time_value();
-  refresh_submit_enabled();
-}
+// The brew-time (-)/(+)/value-tap handlers now live in ui_time_stepper; the
+// stepper fires s_brew.on_change (wired to refresh_submit_enabled) after each
+// tap, so Submit re-gates without any post-local handler.
 
 void on_submit(lv_event_t*) {
   if (!(s_stars_value > 0 && s_brew.touched)) return;  // belt-and-suspenders
@@ -1766,27 +1771,52 @@ void animate_section_swap(lv_obj_t* const* out, int out_n,
   start_swap_driver(section_swap_phase_a_done);
 }
 
-// Midpoint bookkeeping for Idle→Presets: the idle sections have faded out — hide
-// their two groups in one frame (and restore the faded children to full opacity
-// while hidden, ready for the next show), repopulate the grid, reveal Presets.
-void enter_presets_mid() {
-  lv_obj_add_flag(s_idle_group, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_add_flag(s_grinder_group, LV_OBJ_FLAG_HIDDEN);
-  set_section_opa(s_idle_fade, s_idle_fade_n, LV_OPA_COVER);
-  presets_screen::refresh();
-  lv_obj_remove_flag(s_presets_group, LV_OBJ_FLAG_HIDDEN);
+// Hide a panel at the swap midpoint: drop its group(s) in one frame and restore
+// its faded children to full opacity while hidden, ready for the next show. Idle
+// owns two groups (idle chrome + the always-on grinder band).
+void hide_panel(Mode m) {
+  int n = 0;
+  lv_obj_t* const* f = mode_fade(m, &n);
+  set_section_opa(f, n, LV_OPA_COVER);
+  switch (m) {
+    case Mode::Idle:
+      lv_obj_add_flag(s_idle_group, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_add_flag(s_grinder_group, LV_OBJ_FLAG_HIDDEN);
+      break;
+    case Mode::Presets: lv_obj_add_flag(s_presets_group, LV_OBJ_FLAG_HIDDEN); break;
+    case Mode::Edit:    lv_obj_add_flag(s_edit_group, LV_OBJ_FLAG_HIDDEN); break;
+    default: break;
+  }
 }
 
-// Midpoint bookkeeping for Presets→Idle: the grid has faded out — hide Presets
-// (restoring slot opacity while hidden) and reveal the idle + grinder groups.
-// fade_section then fades the idle sections back up in phase B; their per-widget
-// HIDDEN flags (e.g. a hidden suggestion arrow) are untouched, so they reappear
-// only if they were showing before.
-void exit_presets_mid() {
-  lv_obj_add_flag(s_presets_group, LV_OBJ_FLAG_HIDDEN);
-  set_section_opa(s_presets_fade, s_presets_fade_n, LV_OPA_COVER);
-  lv_obj_remove_flag(s_idle_group, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_remove_flag(s_grinder_group, LV_OBJ_FLAG_HIDDEN);
+// Reveal a panel at the swap midpoint: reseed it (grid refresh / editor load /
+// SUGGESTION re-assert for idle) then unhide its group(s). Per-widget HIDDEN
+// flags inside the panel are untouched, so e.g. a hidden suggestion arrow stays
+// hidden when idle reappears.
+void show_panel(Mode m) {
+  switch (m) {
+    case Mode::Idle:
+      refresh_suggested_label();
+      lv_obj_remove_flag(s_idle_group, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_remove_flag(s_grinder_group, LV_OBJ_FLAG_HIDDEN);
+      break;
+    case Mode::Presets:
+      presets_screen::refresh();
+      lv_obj_remove_flag(s_presets_group, LV_OBJ_FLAG_HIDDEN);
+      break;
+    case Mode::Edit:
+      preset_edit::load(s_edit_slot);
+      lv_obj_remove_flag(s_edit_group, LV_OBJ_FLAG_HIDDEN);
+      break;
+    default: break;
+  }
+}
+
+// Shared midpoint hook: the outgoing panel has faded out — hide it and reveal the
+// incoming one, for whichever from→to switch_mode recorded on this swap.
+void panel_swap_mid() {
+  hide_panel(s_swap_from);
+  show_panel(s_swap_to);
 }
 
 
@@ -2444,51 +2474,15 @@ void build_post_group(lv_obj_t* scr) {
   lv_label_set_text(s_brew_time_caption, "BREW TIME");
   lv_obj_align(s_brew_time_caption, LV_ALIGN_TOP_MID, 0, kBrewCaptionTopY);
 
-  s_brew_time_value = lv_label_create(s_post_anim);
-  lv_obj_set_style_text_font(s_brew_time_value, &lv_font_montserrat_46,
-                             LV_PART_MAIN);
-  // Color + text are owned by refresh_brew_time_value (called from
-  // reset_post_form on each mode switch and from the (-)/(+)
-  // handlers per tap). Seed a placeholder so the first layout pass has
-  // something to measure.
-  lv_label_set_text(s_brew_time_value, "--");
-  lv_obj_set_style_text_color(s_brew_time_value, kColorMuted, LV_PART_MAIN);
-  lv_obj_align(s_brew_time_value, LV_ALIGN_CENTER, 0, kBrewRowAlignDY);
-  // The readout itself is tappable: while "--", a tap commits the preset
-  // target (on_brew_value_tap). Labels aren't clickable by default — opt in
-  // and pad the hit area so the small glyphs are easy to land on.
-  lv_obj_add_flag(s_brew_time_value, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_set_ext_click_area(s_brew_time_value, kPostBtnExtClick);
-  lv_obj_add_event_cb(s_brew_time_value, on_brew_value_tap, LV_EVENT_CLICKED,
-                      nullptr);
-
-  // (-) and (+) discs. Same chrome as the ✕ button (kPostBtnH × kPostBtnH
-  // outline-only disc) but tinted with kColorStepper so the steppers read
-  // as a neutral action rather than a destructive one.
-  struct BrewStepCfg { const char* glyph; lv_obj_t** btn; lv_event_cb_t cb; int32_t dx; };
-  BrewStepCfg steppers[2] = {
-      {LV_SYMBOL_MINUS, &s_brew_minus_btn, on_brew_minus_tap, -kBrewBtnDX},
-      {LV_SYMBOL_PLUS,  &s_brew_plus_btn,  on_brew_plus_tap,  +kBrewBtnDX},
-  };
-  for (auto& s : steppers) {
-    lv_obj_t* b = lv_button_create(s_post_anim);
-    lv_obj_set_size(b, kPostBtnH, kPostBtnH);
-    lv_obj_set_style_radius(b, kPostBtnH / 2, LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(b, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_shadow_width(b, 0, LV_PART_MAIN);
-    lv_obj_set_style_border_color(b, kColorStepper, LV_PART_MAIN);
-    lv_obj_set_style_border_width(b, kPostBtnStroke, LV_PART_MAIN);
-    lv_obj_set_style_border_opa(b, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_align(b, LV_ALIGN_CENTER, s.dx, kBrewRowAlignDY);
-    lv_obj_set_ext_click_area(b, kPostBtnExtClick);
-    lv_obj_add_event_cb(b, s.cb, LV_EVENT_CLICKED, nullptr);
-    lv_obj_t* lbl = lv_label_create(b);
-    lv_obj_set_style_text_color(lbl, kColorStepper, LV_PART_MAIN);
-    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_24, LV_PART_MAIN);
-    lv_label_set_text(lbl, s.glyph);
-    lv_obj_center(lbl);
-    *s.btn = b;
-  }
+  // [ (-) value (+) ] row — the shared ui_time_stepper instance (MS46 value,
+  // kPostBtnH discs at ±kBrewBtnDX). reset_post_form wires s_brew's min/max +
+  // on_change and seeds value/touched; the stepper owns the readout + handlers.
+  s_brew.min_s     = kBrewMinS;
+  s_brew.max_s     = kBrewMaxS;
+  s_brew.on_change = refresh_submit_enabled;
+  const TimeStepperCfg brew_cfg = {&lv_font_montserrat_46, kBrewBtnDX, kPostBtnH};
+  lv_obj_t* brew_row = build_time_stepper(s_post_anim, &s_brew, brew_cfg);
+  lv_obj_align(brew_row, LV_ALIGN_CENTER, 0, kBrewRowAlignDY);
 
   // --- Quality section (middle band) ---
   // 5 stars on the left, two side-by-side modifier pills (Sour | Bitter)
@@ -2698,8 +2692,12 @@ void start_report() {
   build_post_group(scr);
   // Presets group sits above the idle/post groups in z-order but stays hidden
   // until the Menu button opens it; built after them so it overlays cleanly. Its
-  // Back pill is wired to on_back_tap (returns to Idle).
-  s_presets_group = presets_screen::build(scr, on_back_tap);
+  // Back pill is wired to on_back_tap (returns to Idle); each slot to on_slot_tap
+  // (opens the editor).
+  s_presets_group = presets_screen::build(scr, on_back_tap, on_slot_tap);
+  // Edit group overlays the Presets grid (reached by tapping a slot); Cancel →
+  // back to the grid, Save → persist + back to the grid.
+  s_edit_group = preset_edit::build(scr, on_edit_cancel_tap, on_edit_save_tap);
 
   s_toast_label = lv_label_create(scr);
   lv_obj_set_style_text_color(s_toast_label, kColorToast, LV_PART_MAIN);
@@ -2762,8 +2760,21 @@ void start_report() {
     s_idle_fade[s_idle_fade_n++] = w;
   }
   s_presets_fade = presets_screen::fade_widgets(&s_presets_fade_n);
+  s_edit_fade    = preset_edit::fade_widgets(&s_edit_fade_n);
 
-  apply_mode();  // s_mode starts Idle; hides post + presets groups
+  apply_mode();  // s_mode starts Idle; hides post + presets + edit groups
+
+  // LVGL allocates every widget + style + the glyph cache from one fixed pool
+  // (CONFIG_LV_MEM_SIZE_KILOBYTES). All screens are now built, so this is the
+  // high-water mark — watch `used_pct` / `free_biggest` as more screens land; an
+  // exhausted pool corrupts allocations and hangs the draw.
+  lv_mem_monitor_t mon;
+  lv_mem_monitor(&mon);
+  ESP_LOGI(kTag, "lv_mem: used %u / %u B (%u%%), free_biggest %u B, frag %u%%",
+           static_cast<unsigned>(mon.total_size - mon.free_size),
+           static_cast<unsigned>(mon.total_size), static_cast<unsigned>(mon.used_pct),
+           static_cast<unsigned>(mon.free_biggest_size),
+           static_cast<unsigned>(mon.frag_pct));
 
   lv_timer_create(update_climate_strip, 1000, nullptr);
 

@@ -124,7 +124,7 @@ lv_obj_t* build_menu_glyph(lv_obj_t* parent) {
   return glyph;
 }
 
-lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_back) {
+lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_back, lv_event_cb_t on_slot) {
   lv_obj_t* group = lv_obj_create(scr);
   lv_obj_set_size(group, kScreen, kScreen);
   lv_obj_set_pos(group, 0, 0);
@@ -159,7 +159,12 @@ lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_back) {
     lv_obj_set_style_border_opa(slot, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_pad_all(slot, kSlotPad, LV_PART_MAIN);
     lv_obj_clear_flag(slot, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_clear_flag(slot, LV_OBJ_FLAG_CLICKABLE);
+    // Tapping a slot opens its editor. The 0-based id rides in user_data so the
+    // injected handler knows which slot was hit. Active and empty slots are both
+    // tappable — editing an empty slot creates a preset.
+    lv_obj_add_flag(slot, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_user_data(slot, reinterpret_cast<void*>(static_cast<intptr_t>(i)));
+    lv_obj_add_event_cb(slot, on_slot, LV_EVENT_CLICKED, nullptr);
     s_slot[i] = slot;
     s_grid[i] = build_preset_readout_grid(slot);
     lv_obj_center(s_grid[i].root);
@@ -217,11 +222,12 @@ void refresh() {
     if (presets::is_active(i)) {
       const auto p = presets::get(i);
       apply_readout(s_grid[i], p, i);
-      lv_obj_remove_flag(s_grid[i].root, LV_OBJ_FLAG_HIDDEN);
       lv_obj_set_style_border_color(s_slot[i], lv_color_hex(p.color),
                                     LV_PART_MAIN);
     } else {
-      lv_obj_add_flag(s_grid[i].root, LV_OBJ_FLAG_HIDDEN);
+      // Empty slot: still show "PRESET N", but only the label, tinted to match
+      // the muted frame so it reads as an open slot rather than a set preset.
+      apply_readout_empty(s_grid[i], i, kColorSlotEmpty);
       lv_obj_set_style_border_color(s_slot[i], kColorSlotEmpty, LV_PART_MAIN);
     }
   }

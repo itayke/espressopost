@@ -4,7 +4,6 @@
 #include <cmath>
 
 #include "esp_timer.h"
-#include "ui_theme.hpp"
 
 namespace espressopost::ui {
 namespace {
@@ -31,7 +30,7 @@ void draw_bar_event(lv_event_t* e) {
   const BarSpec& spec = *state->spec;
   const float    value = state->value;
   const float    px_per_unit =
-      static_cast<float>(kBarHalfWidth) / spec.visible_half_range;
+      static_cast<float>(spec.half_width) / spec.visible_half_range;
   const float    inv_tick = 1.0f / spec.tick_unit;
 
   // Background rail. Drawn first so the ticks paint on top; sized to the
@@ -44,8 +43,8 @@ void draw_bar_event(lv_event_t* e) {
     bg_dsc.bg_color = kBarStripBgColor;
     bg_dsc.bg_opa   = LV_OPA_COVER;
     bg_dsc.radius   = LV_RADIUS_CIRCLE;
-    lv_area_t bg_a = {cx - kBarHalfWidth, cy - kBarStripBgHeight / 2,
-                      cx + kBarHalfWidth, cy + kBarStripBgHeight / 2};
+    lv_area_t bg_a = {cx - spec.half_width, cy - kBarStripBgHeight / 2,
+                      cx + spec.half_width, cy + kBarStripBgHeight / 2};
     lv_draw_rect(layer, &bg_dsc, &bg_a);
   }
 
@@ -87,7 +86,7 @@ void draw_bar_event(lv_event_t* e) {
     if (v_i > spec.max + clip_slack) continue;
     // Standard slider direction: HIGHER value sits RIGHT of cursor.
     const float x_offset = (v_i - value) * px_per_unit;
-    if (std::fabs(x_offset) > static_cast<float>(kBarHalfWidth) + 0.5f) continue;
+    if (std::fabs(x_offset) > static_cast<float>(spec.half_width) + 0.5f) continue;
     const int32_t tick_x = cx + static_cast<int32_t>(std::lround(x_offset));
     // Tier: big_every > mid_every > small_every (when set; the rest are tiny).
     // When small_every == 0 the tiny tier is disabled and every non-big/non-mid
@@ -175,8 +174,8 @@ void bar_momentum_tick(lv_timer_t* t) {
 // must be wired by the caller before lv_obj_invalidate triggers a paint.
 lv_obj_t* make_bar_widget(lv_obj_t* parent, BarState* state) {
   lv_obj_t* w = lv_obj_create(parent);
-  lv_obj_set_size(w, 2 * kBarHalfWidth, kBarStripHeight);
-  lv_obj_set_pos(w, kCenter - kBarHalfWidth,
+  lv_obj_set_size(w, 2 * state->spec->half_width, kBarStripHeight);
+  lv_obj_set_pos(w, state->spec->center_x - state->spec->half_width,
                  state->spec->y - kBarStripHeight / 2);
   lv_obj_set_style_bg_opa(w, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_border_width(w, 0, LV_PART_MAIN);
@@ -233,7 +232,7 @@ void bar_dispatch_event(lv_event_t* e, BarState* s) {
       // Sub-step motion is fine; readout labels round for display in their own
       // refresh. Snap happens at release / momentum-end.
       const float px_per_unit =
-          static_cast<float>(kBarHalfWidth) / spec.visible_half_range;
+          static_cast<float>(spec.half_width) / spec.visible_half_range;
       const float dv = -static_cast<float>(dx_px) / px_per_unit;
       const float new_value =
           std::clamp(s->value + dv, spec.min, spec.max);

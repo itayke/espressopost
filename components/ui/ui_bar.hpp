@@ -52,6 +52,8 @@ struct BarSpec {
   float    max;
   float    step;                  // snap grid; value rounds here at settle
   float    visible_half_range;    // value units shown from cursor center to bar edge
+  int32_t  half_width;            // px from center cursor to bar edge (strip half-width)
+  int32_t  center_x;              // screen x of the bar center / cursor
   int32_t  y;                     // screen y of bar centerline
   // PRESSED hit-test band in screen y. Wider than the visible bar so a slightly
   // mistargeted swipe still lands. A second bar's band must NOT overlap this

@@ -4,6 +4,8 @@ idf_component_register(
         "ui_bar.cpp"
         "ui_preset_readout.cpp"
         "ui_presets.cpp"
+        "ui_preset_edit.cpp"
+        "ui_time_stepper.cpp"
     INCLUDE_DIRS
         "include"
     REQUIRES
