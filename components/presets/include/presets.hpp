@@ -13,7 +13,7 @@ namespace espressopost::presets {
 // calling clear() — there is no add/remove; the slot itself is permanent
 // and only the data inside it appears/disappears. Selection (tap-to-cycle)
 // skips inactive slots without collapsing the numbering.
-constexpr uint8_t kMaxPresets = 10;
+constexpr uint8_t kMaxPresets = 9;    // 3×3 preset grid on the Presets screen
 constexpr uint8_t kNameLen    = 16;   // including NUL terminator
 
 // One brew preset. Persisted as a packed blob under NVS key `pN` so the
@@ -25,7 +25,9 @@ constexpr uint8_t kNameLen    = 16;   // including NUL terminator
 // transparently rewritten. v3 keeps the v2 24-byte layout unchanged and only
 // repurposes the former `_pad` byte as `yield_g`; the v2→v3 migration uses
 // the `version` byte (not size) as the disambiguator and backfills yield
-// from dose at the classic espresso ratio.
+// from dose at the classic espresso ratio. v4 appends a `color` word, growing
+// the blob to 28 B — the v3→v4 migration is detected by the old 24-byte size
+// and backfills `color` with the default light-grey.
 //
 // `grind_anchor` is the model's per-preset baseline grind setting, in the
 // same absolute units the user dials on their grinder. Used as a starting
@@ -39,16 +41,20 @@ constexpr uint8_t kNameLen    = 16;   // including NUL terminator
 //
 // `name` is retained for wire-format stability but is no longer surfaced
 // in the UI — slots are addressed by their 1-based index ("PRESET N").
-// A future v4 schema bump may drop the field outright.
+//
+// `color` is the per-preset accent (0x00RRGGBB; top byte unused) used to tint
+// the preset readout text and the Presets-screen grid slot. Defaults to a light
+// grey; the Presets screen will later let the user customize it per slot.
 struct __attribute__((packed)) Preset {
-  uint8_t version;          // 3 (current)
-  uint8_t target_time_s;
-  uint8_t dose_g;
-  uint8_t yield_g;
-  char    name[kNameLen];
-  float   grind_anchor;
+  uint8_t  version;          // 4 (current)
+  uint8_t  target_time_s;
+  uint8_t  dose_g;
+  uint8_t  yield_g;
+  char     name[kNameLen];
+  float    grind_anchor;
+  uint32_t color;
 };
-static_assert(sizeof(Preset) == 24, "Preset NVS blob size must be stable");
+static_assert(sizeof(Preset) == 28, "Preset NVS blob size must be stable");
 
 // Open the NVS namespace, seed the default preset table on first boot, and
 // load the current selection. Safe to call once. Returns ESP_ERR_INVALID_STATE

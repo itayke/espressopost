@@ -18,7 +18,7 @@ bool    s_inited   = false;
 uint8_t s_selected = 0;
 Preset  s_table[kMaxPresets] = {};
 
-constexpr uint8_t kPresetVersion = 3;
+constexpr uint8_t kPresetVersion = 4;
 
 // Default starting grind for seeded presets. Picked to match the historical
 // state the user has been grinding at on this device; future builds with
@@ -26,20 +26,26 @@ constexpr uint8_t kPresetVersion = 3;
 // is immediately useful.
 constexpr float kDefaultGrindAnchor = 5.2f;
 
+// Default per-preset accent — light grey, matching the UI's base text tier so
+// seeded/migrated presets read the same as before color existed. Kept off
+// max-intensity white on purpose (AMOLED burn-in). The Presets screen will let
+// the user override this per slot later.
+constexpr uint32_t kDefaultPresetColor = 0xE0E0E0u;
+
 // Default presets seeded on first boot — picked to cover the common single-
 // basket pulls. The user can curate this list once the Preset editor screen
 // lands; until then these are good enough for daily use. Yields are seeded
 // at the same classic espresso ratio used for the v2→v3 backfill below.
 constexpr Preset kDefaults[] = {
-    {kPresetVersion, 30, 17, 34, "PRESET 1", kDefaultGrindAnchor},
-    {kPresetVersion, 40, 18, 36, "PRESET 2", kDefaultGrindAnchor},
-    {kPresetVersion, 22, 18, 36, "PRESET 3", kDefaultGrindAnchor},
+    {kPresetVersion, 30, 17, 34, "PRESET 1", kDefaultGrindAnchor, kDefaultPresetColor},
+    {kPresetVersion, 40, 18, 36, "PRESET 2", kDefaultGrindAnchor, kDefaultPresetColor},
+    {kPresetVersion, 22, 18, 36, "PRESET 3", kDefaultGrindAnchor, kDefaultPresetColor},
 };
 constexpr uint8_t kDefaultCount = sizeof(kDefaults) / sizeof(kDefaults[0]);
 static_assert(kDefaultCount <= kMaxPresets, "default table exceeds cap");
 
 // v1 on-disk layout, retained only for the one-shot migration in load_table().
-// Production code reads/writes the current `Preset` (v2) from the header.
+// Production code reads/writes the current `Preset` from the header.
 struct __attribute__((packed)) PresetV1 {
   char    name[kNameLen];
   uint8_t target_time_s;
@@ -49,8 +55,21 @@ struct __attribute__((packed)) PresetV1 {
 };
 static_assert(sizeof(PresetV1) == 20, "v1 preset size must match the schema we migrated away from");
 
+// Pre-color (v2/v3) on-disk layout — the 24-byte blob before `color` was
+// appended. Retained only for the one-shot v3→v4 migration in load_one_preset.
+// Same field order as the current Preset, minus the trailing color word.
+struct __attribute__((packed)) PresetV3 {
+  uint8_t version;
+  uint8_t target_time_s;
+  uint8_t dose_g;
+  uint8_t yield_g;
+  char    name[kNameLen];
+  float   grind_anchor;
+};
+static_assert(sizeof(PresetV3) == 24, "pre-color preset size must match the schema we migrated away from");
+
 // NVS keys are limited to 15 chars. `pN` (2 chars) leaves plenty of headroom
-// even at kMaxPresets = 8.
+// even at kMaxPresets = 9.
 void preset_key(uint8_t i, char out[4]) {
   out[0] = 'p';
   out[1] = static_cast<char>('0' + i);
@@ -88,36 +107,53 @@ esp_err_t seed_defaults(nvs_handle_t h) {
   return nvs_commit(h);
 }
 
-// Read one preset blob and bring it up to the current schema in place. Two
-// migration paths are supported: v1 (20 B) → current (a full rewrite), and
-// v2 → v3 (same 24 B size, differentiated by the version byte, backfills
-// yield_g from dose_g at the classic espresso ratio). On any migration the
-// rewritten blob is written straight back to NVS so the next boot is a
-// fast current-version read.
+// Read one preset blob and bring it up to the current schema in place. Three
+// migration paths are supported, all keyed off the on-disk blob size: v1 (20 B)
+// → current (full rewrite), and v2/v3 (24 B, pre-color) → v4 (appends `color`).
+// The 24-byte path also still backfills yield_g from dose_g for any blob that
+// predates v3 (version byte < 3). On any migration the rewritten blob is
+// written straight back to NVS so the next boot is a fast current-version read.
 esp_err_t load_one_preset(nvs_handle_t h, uint8_t i, bool* out_migrated) {
   char key[4];
   preset_key(i, key);
 
-  // Ask NVS the actual blob size first — handles both layouts without a
+  // Ask NVS the actual blob size first — handles every layout without a
   // guess-and-retry dance.
   size_t sz = 0;
   esp_err_t err = nvs_get_blob(h, key, nullptr, &sz);
   if (err != ESP_OK) return err;
 
   if (sz == sizeof(Preset)) {
+    // Current 28-byte v4 layout — straight read, no migration.
     err = nvs_get_blob(h, key, &s_table[i], &sz);
     if (err != ESP_OK) return err;
-    // v2 used the same 24-byte layout but had `yield_g` as `_pad` (always
-    // zero on write). Detect by the version byte and backfill yield from
-    // the recorded dose at the default espresso ratio.
-    Preset& cur = s_table[i];
-    if (cur.version < kPresetVersion) {
-      cur.version = kPresetVersion;
-      cur.yield_g = static_cast<uint8_t>(cur.dose_g * 2u);
-      err = nvs_set_blob(h, key, &cur, sizeof(cur));
-      if (err != ESP_OK) return err;
-      if (out_migrated) *out_migrated = true;
-    }
+    return ESP_OK;
+  }
+
+  if (sz == sizeof(PresetV3)) {
+    // Pre-color 24-byte blob (v2 or v3). Lift the carried fields, backfill
+    // yield for anything older than v3, and seed the new `color` word.
+    PresetV3 old_blob = {};
+    err = nvs_get_blob(h, key, &old_blob, &sz);
+    if (err != ESP_OK) return err;
+
+    Preset& dst = s_table[i];
+    dst = {};
+    dst.version       = kPresetVersion;
+    dst.target_time_s = old_blob.target_time_s;
+    dst.dose_g        = old_blob.dose_g;
+    // v2 stored `yield_g` as `_pad` (always zero) — backfill from dose at the
+    // default espresso ratio; v3 already carries a real yield.
+    dst.yield_g       = old_blob.version < 3
+                            ? static_cast<uint8_t>(old_blob.dose_g * 2u)
+                            : old_blob.yield_g;
+    std::memcpy(dst.name, old_blob.name, kNameLen);
+    dst.grind_anchor  = old_blob.grind_anchor;
+    dst.color         = kDefaultPresetColor;
+
+    err = nvs_set_blob(h, key, &dst, sizeof(dst));
+    if (err != ESP_OK) return err;
+    if (out_migrated) *out_migrated = true;
     return ESP_OK;
   }
 
@@ -132,13 +168,14 @@ esp_err_t load_one_preset(nvs_handle_t h, uint8_t i, bool* out_migrated) {
     std::memcpy(dst.name, old_blob.name, kNameLen);
     dst.target_time_s = old_blob.target_time_s;
     dst.dose_g        = old_blob.dose_g;
-    // Same backfill rule the v2→v3 path uses — yield from dose at the
+    // Same backfill rule the pre-color path uses — yield from dose at the
     // default espresso ratio.
     dst.yield_g       = static_cast<uint8_t>(old_blob.dose_g * 2u);
     // v1 click_anchor was always 0 in the seeded defaults (no UI to edit
     // it), so the user's confirmed grind setting is the only useful seed
     // for the new float field.
     dst.grind_anchor  = kDefaultGrindAnchor;
+    dst.color         = kDefaultPresetColor;
 
     err = nvs_set_blob(h, key, &dst, sizeof(dst));
     if (err != ESP_OK) return err;
@@ -146,9 +183,10 @@ esp_err_t load_one_preset(nvs_handle_t h, uint8_t i, bool* out_migrated) {
     return ESP_OK;
   }
 
-  ESP_LOGW(kTag, "preset %u has unexpected blob size %u (expected %u or %u) — reseeding",
+  ESP_LOGW(kTag, "preset %u has unexpected blob size %u (expected %u, %u, or %u) — reseeding",
            i, static_cast<unsigned>(sz),
            static_cast<unsigned>(sizeof(Preset)),
+           static_cast<unsigned>(sizeof(PresetV3)),
            static_cast<unsigned>(sizeof(PresetV1)));
   return ESP_ERR_NVS_NOT_FOUND;
 }
@@ -183,7 +221,7 @@ esp_err_t load_table(nvs_handle_t h) {
   if (any_migrated) {
     err = nvs_commit(h);
     if (err != ESP_OK) return err;
-    ESP_LOGW(kTag, "migrated preset table to v%u (yield_g backfilled from dose_g)",
+    ESP_LOGW(kTag, "migrated preset table to v%u (color seeded, yield_g backfilled where needed)",
              static_cast<unsigned>(kPresetVersion));
   }
   uint8_t sel = 0;

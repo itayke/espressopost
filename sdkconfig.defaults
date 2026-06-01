@@ -35,12 +35,11 @@ CONFIG_FREERTOS_HZ=1000
 # --- LVGL fonts ---
 # Only Montserrat 14 is enabled by default; everything else used on the
 # Report screen has to be requested here so the linker can find it.
-#   24 pt — Post / Submit buttons and the ✕ cancel glyph
-#   36 pt — the big "30s" BREW TIME value in post mode
-#   46 pt — the centered grind value (idle + post) and the climate-tile
-#           value readouts (TEMP / HUMIDITY / PRESSURE)
+#   24 pt — Post / Menu / Submit / Back buttons and the ✕ cancel glyph
+#   46 pt — the big "30s" BREW TIME value, the centered grind value (idle +
+#           post) and the climate-tile value readouts (TEMP / HUMIDITY /
+#           PRESSURE)
 CONFIG_LV_FONT_MONTSERRAT_24=y
-CONFIG_LV_FONT_MONTSERRAT_36=y
 CONFIG_LV_FONT_MONTSERRAT_46=y
 
 # --- LVGL extra modules ---

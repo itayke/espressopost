@@ -155,12 +155,22 @@ const lv_color_t kColorCancel         = COLOR(0xE07055);
 const lv_color_t kColorSubmitEnabled  = COLOR(0x60A8E0);
 const lv_color_t kColorSubmitDisabled = kColorMuted3;
 
+// Presets-screen palette. kColorMenu is the idle Menu pill (border + hamburger)
+// — same amber as POST today but its own const so the two can drift. kColorBack
+// tints the Back pill (chevron + label); kColorSlotEmpty outlines a grid slot
+// with no preset in it (active slots are outlined in their own preset color).
+const lv_color_t kColorMenu          = COLOR(0xC88036);
+const lv_color_t kColorBack          = kColorText;
+const lv_color_t kColorSlotEmpty     = kColorMuted3;
+const lv_color_t kColorPresetsTitle  = kColorText;   // "PRESETS" screen header
+
 // ---------------------------------------------------------------------------
-// UI modes. The grinder bar + cursor + value text stay live across both;
-// only the center widgets swap.
+// UI modes. The grinder bar + cursor + value text stay live across Idle↔Post;
+// only the center widgets swap. Presets is a full-panel mode (everything hides)
+// reached from Idle via the Menu button — see the section-swap engine below.
 // ---------------------------------------------------------------------------
-enum class Mode { Idle, Post };
-constexpr int kModeCount = 2;
+enum class Mode { Idle, Post, Presets };
+constexpr int kModeCount = 3;
 Mode s_mode = Mode::Idle;
 
 // One row per mode in the swap registry (s_views, populated once the group
@@ -212,6 +222,11 @@ constexpr float kBarPxPerUnit =
 // Widget handles. Grouped by visual role; null until start_report() builds them.
 // ---------------------------------------------------------------------------
 // Grinder-area extras (always visible across Idle + Post):
+// s_grinder_group wraps every always-on grinder widget + the two horizontal
+// separators so the whole bottom chrome can hide as one unit when the Presets
+// screen takes over the full panel. It stays shown across Idle↔Post (only its
+// children's opacity is touched there, and only by the per-section fade).
+lv_obj_t* s_grinder_group     = nullptr;
 lv_obj_t* s_grinder_overlay   = nullptr;  // transparent full-screen swipe catcher; dispatches to both bars
 lv_obj_t* s_static_cursor     = nullptr;  // upward-pointing triangle just below the grind bar
 lv_obj_t* s_suggestion_arrow  = nullptr;  // confidence-tinted suggestion triangle over the cursor
@@ -242,6 +257,7 @@ lv_obj_t* s_idle_group          = nullptr;
 // the mode, so the animation never redraws them.
 lv_obj_t* s_climate_anim        = nullptr;
 lv_obj_t* s_preset_btn          = nullptr;   // tappable preset cycler on the idle center line
+lv_obj_t* s_menu_btn            = nullptr;   // idle center-line Menu pill (left), mirrors Post; opens Presets
 
 // Two-line preset readout: top label = "PRESET N" (MS24), bottom row =
 // [dose label | arrow | yield label | time label] in MS14. The same
@@ -255,6 +271,7 @@ struct PresetReadout {
   lv_obj_t* dose;   // "Xg" label
   lv_obj_t* yield;  // "Xg" label
   lv_obj_t* time;   // " Ys" label (leading space — visually separates the brew ratio from the time)
+  lv_obj_t* arrow;  // dose→yield arrow container (two lv_line strokes), recolored per preset
 };
 lv_obj_t* s_post_btn            = nullptr;
 
@@ -329,6 +346,29 @@ lv_obj_t* s_cancel_btn     = nullptr;
 // Toast (transient):
 lv_obj_t* s_toast_label         = nullptr;
 lv_timer_t* s_toast_timer       = nullptr;
+
+// Presets screen (Mode::Presets): a 3×3 grid of slot rects + a Back pill. Each
+// active slot draws the same data as the center-line readout (PRESET N / dose →
+// yield / time) in the preset's color; empty slots are bare outlined rects. The
+// grid is display-only for now — slot interactions land in a later change.
+lv_obj_t*     s_presets_group   = nullptr;
+lv_obj_t*     s_presets_title   = nullptr;   // "PRESETS" header above the grid
+lv_obj_t*     s_back_btn        = nullptr;
+lv_obj_t*     s_grid_slot[presets::kMaxPresets] = {};   // the 9 bordered slot rects
+PresetReadout s_grid[presets::kMaxPresets]      = {};   // each slot's readout (inside its rect)
+
+// Section-swap fade sets — every widget that fades on the full-panel Idle↔Presets
+// transition. Populated once in start_report from the built handles; the engine
+// just iterates them (skipping any HIDDEN widget). Sized with headroom over the
+// 11 idle / 10 presets widgets actually used.
+lv_obj_t* s_idle_fade[16]    = {};
+int       s_idle_fade_n      = 0;
+lv_obj_t* s_presets_fade[16] = {};
+int       s_presets_fade_n   = 0;
+// No-op anim target: drives the swap's two-phase timing independently of which
+// section widgets are visible, so the phase callbacks fire after exactly one
+// kModeSwapFadeMs regardless of how many widgets actually faded.
+int32_t s_swap_driver = 0;
 
 // ---------------------------------------------------------------------------
 // Form / model state.
@@ -628,17 +668,129 @@ PresetReadout build_preset_readout(lv_obj_t* parent) {
     lv_obj_set_style_text_font(l, &lv_font_montserrat_14, LV_PART_MAIN);
     return l;
   };
-  r.dose = small_label();
-  build_preset_arrow(row, kColorText);
+  r.dose  = small_label();
+  r.arrow = build_preset_arrow(row, kColorText);
   r.yield = small_label();
   r.time  = small_label();
   return r;
 }
 
-// Push the current preset's values into both readouts.
-void refresh_preset_label() {
-  const uint8_t slot = presets::selected_id();
-  const auto    p    = presets::get(slot);
+// Compact readout for a Presets-screen grid slot. Same data + same PresetReadout
+// fields as the center-line readout (so apply_readout drives both), but laid out
+// to fit a small square cell: everything at MS14 and the time pushed to its own
+// third line ("PRESET N" / "Xg → Yg" / "Ys") instead of the single wide row the
+// center line uses. All labels seed to kColorText; apply_readout owns color.
+PresetReadout build_preset_readout_grid(lv_obj_t* parent) {
+  PresetReadout r = {};
+
+  r.root = lv_obj_create(parent);
+  lv_obj_set_size(r.root, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(r.root, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(r.root, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(r.root, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_row(r.root, 2, LV_PART_MAIN);
+  lv_obj_set_layout(r.root, LV_LAYOUT_FLEX);
+  lv_obj_set_flex_flow(r.root, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(r.root, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_clear_flag(r.root, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(r.root, LV_OBJ_FLAG_SCROLLABLE);
+
+  auto label = [&](lv_obj_t* p) {
+    lv_obj_t* l = lv_label_create(p);
+    lv_obj_set_style_text_color(l, kColorText, LV_PART_MAIN);
+    lv_obj_set_style_text_font(l, &lv_font_montserrat_14, LV_PART_MAIN);
+    lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    return l;
+  };
+
+  r.top = label(r.root);
+
+  lv_obj_t* row = lv_obj_create(r.root);
+  lv_obj_set_size(row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(row, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(row, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_column(row, 4, LV_PART_MAIN);
+  lv_obj_set_layout(row, LV_LAYOUT_FLEX);
+  lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_clear_flag(row, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+  r.dose  = label(row);
+  r.arrow = build_preset_arrow(row, kColorText);
+  r.yield = label(row);
+  r.time  = label(r.root);
+  return r;
+}
+
+// ===== MENU / BACK GLYPHS ===================================================
+// Custom-drawn (house style — matches the star / arrow / climate-icon painters)
+// so they tint + scale exactly. Hamburger = three stacked rounded bars in
+// kColorMenu; back chevron = a left-pointing "<" polyline.
+constexpr int32_t kHamburgerW    = 26;   // bar length
+constexpr int32_t kHamburgerH    = 18;   // glyph box height
+constexpr int32_t kHamburgerBarH = 3;    // each bar thickness
+constexpr int32_t kHamburgerGap  = 6;    // center-to-center spacing of the bars
+
+void draw_hamburger_event(lv_event_t* e) {
+  lv_layer_t* layer = lv_event_get_layer(e);
+  if (layer == nullptr) return;
+  auto* obj = static_cast<lv_obj_t*>(lv_event_get_target(e));
+  lv_area_t coords;
+  lv_obj_get_coords(obj, &coords);
+  const int32_t cx = coords.x1 + lv_area_get_width(&coords)  / 2;
+  const int32_t cy = coords.y1 + lv_area_get_height(&coords) / 2;
+
+  lv_draw_rect_dsc_t d;
+  lv_draw_rect_dsc_init(&d);
+  d.bg_color = kColorMenu;
+  d.bg_opa   = LV_OPA_COVER;
+  d.radius   = kHamburgerBarH / 2;
+
+  const int32_t half_w = kHamburgerW / 2;
+  const int32_t half_h = kHamburgerBarH / 2;
+  for (int row = -1; row <= 1; ++row) {
+    const int32_t yc = cy + row * kHamburgerGap;
+    lv_area_t a = {cx - half_w, yc - half_h, cx + half_w, yc + half_h};
+    lv_draw_rect(layer, &d, &a);
+  }
+}
+
+// Left chevron "<" for the Back pill — a single rounded polyline.
+lv_obj_t* build_back_chevron(lv_obj_t* parent, lv_color_t color) {
+  constexpr int32_t kW = 11, kH = 18, kStroke = 3;
+  static lv_point_precise_t pts[] = {
+      {kW - 1, 1},
+      {1,      kH / 2.0f},
+      {kW - 1, kH - 1},
+  };
+  lv_obj_t* c = lv_obj_create(parent);
+  lv_obj_set_size(c, kW, kH);
+  lv_obj_set_style_bg_opa(c, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(c, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(c, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(c, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(c, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t* line = lv_line_create(c);
+  lv_line_set_points(line, pts, 3);
+  lv_obj_set_style_line_color(line, color, LV_PART_MAIN);
+  lv_obj_set_style_line_width(line, kStroke, LV_PART_MAIN);
+  lv_obj_set_style_line_rounded(line, true, LV_PART_MAIN);
+  return c;
+}
+// ===========================================================================
+
+// Push one preset's values AND its accent color into a single readout. Shared
+// by the idle/post selected-preset readouts and the Presets-screen grid slots —
+// `slot` is the 0-based id (rendered 1-based as "PRESET N"), `p` its data. The
+// color tints every label plus both arrow strokes so the whole readout reads in
+// the preset's hue.
+void apply_readout(PresetReadout& r, const presets::Preset& p, uint8_t slot) {
+  if (r.root == nullptr) return;
   char top_buf[16], dose_buf[8], yield_buf[8], time_buf[8];
   std::snprintf(top_buf,   sizeof(top_buf),   "PRESET %u",
                 static_cast<unsigned>(slot + 1));
@@ -648,14 +800,30 @@ void refresh_preset_label() {
                 static_cast<unsigned>(p.yield_g));
   std::snprintf(time_buf,  sizeof(time_buf),  " %us",
                 static_cast<unsigned>(p.target_time_s));
+  lv_label_set_text(r.top,   top_buf);
+  lv_label_set_text(r.dose,  dose_buf);
+  lv_label_set_text(r.yield, yield_buf);
+  lv_label_set_text(r.time,  time_buf);
 
-  for (PresetReadout* r : {&s_idle_preset, &s_post_preset}) {
-    if (r->root == nullptr) continue;
-    lv_label_set_text(r->top,   top_buf);
-    lv_label_set_text(r->dose,  dose_buf);
-    lv_label_set_text(r->yield, yield_buf);
-    lv_label_set_text(r->time,  time_buf);
+  const lv_color_t c = lv_color_hex(p.color);
+  for (lv_obj_t* lbl : {r.top, r.dose, r.yield, r.time}) {
+    lv_obj_set_style_text_color(lbl, c, LV_PART_MAIN);
   }
+  // The arrow is a container of lv_line strokes — tint each child.
+  if (r.arrow != nullptr) {
+    const uint32_t n = lv_obj_get_child_count(r.arrow);
+    for (uint32_t i = 0; i < n; ++i) {
+      lv_obj_set_style_line_color(lv_obj_get_child(r.arrow, i), c, LV_PART_MAIN);
+    }
+  }
+}
+
+// Push the current preset into both selected-preset readouts (idle + post).
+void refresh_preset_label() {
+  const uint8_t slot = presets::selected_id();
+  const auto    p    = presets::get(slot);
+  apply_readout(s_idle_preset, p, slot);
+  apply_readout(s_post_preset, p, slot);
 }
 
 // BREW TIME big readout — "Ns" once the user has tapped (-) or (+),
@@ -800,6 +968,15 @@ void animate_mode_swap(lv_obj_t* out_group, lv_obj_t* out_content,
                        lv_obj_t* in_group, lv_obj_t* in_content,
                        void (*on_out_done)());
 
+// Full-panel Idle↔Presets transition (every section fades; defined with the
+// other anim helpers below). enter/exit_presets_mid run the group hide/show
+// bookkeeping at the swap midpoint; on_enter_presets repopulates the grid.
+void animate_section_swap(lv_obj_t* const* out, int out_n,
+                          lv_obj_t* const* in, int in_n, void (*on_mid)());
+void enter_presets_mid();
+void exit_presets_mid();
+void on_enter_presets();
+
 // Reset post-form state to the preset's defaults. Shared by the Post view's
 // on_enter (reseed before the fade-in) and on_exit_done (deferred clear once
 // the post group is fully hidden, so it doesn't visibly blank mid-fade out).
@@ -827,8 +1004,12 @@ void reset_post_form() {
 // Swap registry — indexed by Mode. Post carries reset_post_form as both its
 // incoming reseed and its deferred outgoing clear; Idle needs neither.
 const ModeView s_views[kModeCount] = {
-    /*Idle*/ {&s_idle_group, &s_climate_anim, nullptr,          nullptr},
-    /*Post*/ {&s_post_group, &s_post_anim,    reset_post_form,  reset_post_form},
+    /*Idle*/    {&s_idle_group,    &s_climate_anim,  nullptr,         nullptr},
+    /*Post*/    {&s_post_group,    &s_post_anim,     reset_post_form, reset_post_form},
+    // Presets uses the section-swap engine, not animate_mode_swap — only its
+    // `group` is consumed (by apply_mode, to hide it at boot). `anim`/hooks are
+    // never read for this row, so `anim` just mirrors `group`.
+    /*Presets*/ {&s_presets_group, &s_presets_group, nullptr,         nullptr},
 };
 
 // Instant mode apply — used for the initial build (no animation). Shows the
@@ -849,9 +1030,29 @@ void apply_mode() {
 // swap engine to run once that group is fully hidden.
 void switch_mode(Mode target) {
   if (s_mode == target) return;
-  const ModeView& from = s_views[static_cast<int>(s_mode)];
-  const ModeView& to   = s_views[static_cast<int>(target)];
+  const Mode prev = s_mode;
   s_mode = target;
+
+  // Presets is a full-panel swap (no shared chrome — every section fades), so it
+  // runs the per-section engine instead of the climate-band animate_mode_swap.
+  // Menu only exists in Idle and Back only returns to Idle, so the only Presets
+  // edges are Idle↔Presets; enter/exit_presets_mid do the group bookkeeping and
+  // populate the grid at the swap midpoint.
+  if (target == Mode::Presets) {
+    animate_section_swap(s_idle_fade, s_idle_fade_n,
+                         s_presets_fade, s_presets_fade_n, enter_presets_mid);
+    return;
+  }
+  if (prev == Mode::Presets) {
+    refresh_suggested_label();  // re-assert the shared SUGGESTION block on return
+    animate_section_swap(s_presets_fade, s_presets_fade_n,
+                         s_idle_fade, s_idle_fade_n, exit_presets_mid);
+    return;
+  }
+
+  // Idle↔Post — climate-band swap (unchanged).
+  const ModeView& from = s_views[static_cast<int>(prev)];
+  const ModeView& to   = s_views[static_cast<int>(target)];
   if (to.on_enter) to.on_enter();
   // SUGGESTION block is shared across modes, so refresh it now.
   refresh_suggested_label();
@@ -893,6 +1094,15 @@ void on_post_tap(lv_event_t*) {
 }
 
 void on_cancel_tap(lv_event_t*) {
+  switch_mode(Mode::Idle);
+}
+
+void on_menu_tap(lv_event_t*) {
+  if (s_mode != Mode::Idle) return;  // Menu only lives on the idle center line
+  switch_mode(Mode::Presets);
+}
+
+void on_back_tap(lv_event_t*) {
   switch_mode(Mode::Idle);
 }
 
@@ -1712,6 +1922,138 @@ void animate_mode_swap(lv_obj_t* out_group, lv_obj_t* out_content,
   lv_anim_start(&a);
 }
 
+// ---------------------------------------------------------------------------
+// Section swap — the full-panel Idle↔Presets transition. Unlike animate_mode_
+// swap (which fades ONE content container and keeps the shared chrome), Presets
+// replaces the whole screen, so every visible section fades. To keep each frame's
+// redraw confined to the widgets themselves and never the empty gaps between
+// them, each section is its own opa anim rather than one full-screen container.
+// Same two-phase shape as the mode swap: fade the outgoing set out, do the
+// group hide/show at the midpoint, fade the incoming set in. A no-op "driver"
+// anim owns the phase timing so completion doesn't depend on any one widget.
+// ---------------------------------------------------------------------------
+
+// Set a uniform opacity on a section set, skipping HIDDEN widgets so their
+// (possibly-off) visibility + opacity are left untouched.
+void set_section_opa(lv_obj_t* const* widgets, int n, int32_t opa) {
+  for (int i = 0; i < n; ++i) {
+    lv_obj_t* w = widgets[i];
+    if (w == nullptr || lv_obj_has_flag(w, LV_OBJ_FLAG_HIDDEN)) continue;
+    lv_obj_set_style_opa(w, opa, LV_PART_MAIN);
+  }
+}
+
+// Fade a section set from→to in parallel, one confined opa anim per non-HIDDEN
+// widget. No ready_cb here — the driver anim (below) owns phase timing.
+void fade_section(lv_obj_t* const* widgets, int n, int32_t from_opa,
+                  int32_t to_opa, lv_anim_path_cb_t path) {
+  for (int i = 0; i < n; ++i) {
+    lv_obj_t* w = widgets[i];
+    if (w == nullptr || lv_obj_has_flag(w, LV_OBJ_FLAG_HIDDEN)) continue;
+    lv_obj_set_style_opa(w, from_opa, LV_PART_MAIN);
+    lv_anim_t a;
+    lv_anim_init(&a);
+    lv_anim_set_duration(&a, kModeSwapFadeMs);
+    lv_anim_set_path_cb(&a, path);
+    lv_anim_set_var(&a, w);
+    lv_anim_set_exec_cb(&a, opa_exec);
+    lv_anim_set_values(&a, from_opa, to_opa);
+    lv_anim_start(&a);
+  }
+}
+
+void swap_driver_exec(void* var, int32_t v) {
+  *static_cast<int32_t*>(var) = v;  // no visible effect; just advances the clock
+}
+
+void start_swap_driver(lv_anim_ready_cb_t ready) {
+  lv_anim_t a;
+  lv_anim_init(&a);
+  lv_anim_set_duration(&a, kModeSwapFadeMs);
+  lv_anim_set_var(&a, &s_swap_driver);
+  lv_anim_set_exec_cb(&a, swap_driver_exec);
+  lv_anim_set_values(&a, 0, 1);
+  lv_anim_set_ready_cb(&a, ready);
+  lv_anim_start(&a);
+}
+
+// In-flight section swap: which set fades in at phase B, and the midpoint hook.
+// Single swap at a time (input blocked), so one static ctx is enough.
+struct SectionSwapCtx {
+  lv_obj_t* const* in;
+  int              in_n;
+  void (*on_mid)();
+};
+SectionSwapCtx s_sec_swap = {};
+
+void section_swap_phase_b_done(lv_anim_t* /*a*/) {
+  lv_obj_add_flag(s_swap_block, LV_OBJ_FLAG_HIDDEN);
+}
+
+void section_swap_phase_a_done(lv_anim_t* /*a*/) {
+  // Outgoing set has faded away. Hide its groups / reveal the incoming group
+  // (on_mid), then fade the incoming set up.
+  if (s_sec_swap.on_mid) s_sec_swap.on_mid();
+  fade_section(s_sec_swap.in, s_sec_swap.in_n, LV_OPA_TRANSP, LV_OPA_COVER,
+               lv_anim_path_ease_out);
+  start_swap_driver(section_swap_phase_b_done);
+}
+
+void animate_section_swap(lv_obj_t* const* out, int out_n,
+                          lv_obj_t* const* in, int in_n, void (*on_mid)()) {
+  s_sec_swap = {in, in_n, on_mid};
+
+  // Foreground click-eater swallows taps for the swap's duration.
+  lv_obj_move_foreground(s_swap_block);
+  lv_obj_remove_flag(s_swap_block, LV_OBJ_FLAG_HIDDEN);
+
+  fade_section(out, out_n, LV_OPA_COVER, LV_OPA_TRANSP, lv_anim_path_ease_in);
+  start_swap_driver(section_swap_phase_a_done);
+}
+
+// Midpoint bookkeeping for Idle→Presets: the idle sections have faded out — hide
+// their two groups in one frame (and restore the faded children to full opacity
+// while hidden, ready for the next show), repopulate the grid, reveal Presets.
+void enter_presets_mid() {
+  lv_obj_add_flag(s_idle_group, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(s_grinder_group, LV_OBJ_FLAG_HIDDEN);
+  set_section_opa(s_idle_fade, s_idle_fade_n, LV_OPA_COVER);
+  on_enter_presets();
+  lv_obj_remove_flag(s_presets_group, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Midpoint bookkeeping for Presets→Idle: the grid has faded out — hide Presets
+// (restoring slot opacity while hidden) and reveal the idle + grinder groups.
+// fade_section then fades the idle sections back up in phase B; their per-widget
+// HIDDEN flags (e.g. a hidden suggestion arrow) are untouched, so they reappear
+// only if they were showing before.
+void exit_presets_mid() {
+  lv_obj_add_flag(s_presets_group, LV_OBJ_FLAG_HIDDEN);
+  set_section_opa(s_presets_fade, s_presets_fade_n, LV_OPA_COVER);
+  lv_obj_remove_flag(s_idle_group, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_remove_flag(s_grinder_group, LV_OBJ_FLAG_HIDDEN);
+}
+
+// Repopulate the grid from current preset data — active slots show their readout
+// (text + color) and an outline in the preset color; empty slots hide the
+// readout and outline in the muted empty color. Run at the swap midpoint so the
+// grid is correct before it fades in.
+void on_enter_presets() {
+  for (uint8_t i = 0; i < presets::kMaxPresets; ++i) {
+    if (presets::is_active(i)) {
+      const auto p = presets::get(i);
+      apply_readout(s_grid[i], p, i);
+      lv_obj_remove_flag(s_grid[i].root, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_set_style_border_color(s_grid_slot[i], lv_color_hex(p.color),
+                                    LV_PART_MAIN);
+    } else {
+      lv_obj_add_flag(s_grid[i].root, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_set_style_border_color(s_grid_slot[i], kColorSlotEmpty,
+                                    LV_PART_MAIN);
+    }
+  }
+}
+
 void slide_label_in_translate(lv_obj_t* obj, uint32_t delay_ms) {
   if (obj == nullptr) return;
   if (lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN)) return;
@@ -1787,6 +2129,10 @@ void on_humidity_tap(lv_event_t*) {
 // 1 Hz tick: refresh climate readouts + nudge the model so the arrow tracks
 // ambient drift without the user touching anything.
 void update_climate_strip(lv_timer_t*) {
+  // The climate strip + suggestion live under the idle/grinder groups, both
+  // hidden while the Presets screen owns the panel — skip the refresh (and its
+  // redraws) until we're back on a mode that shows them.
+  if (s_mode == Mode::Presets) return;
   refresh_climate_tiles();
   refresh_suggestion();
 }
@@ -1958,12 +2304,26 @@ void build_grinder(lv_obj_t* scr) {
   s_grind.on_settle = grind_on_settle;
   s_grind.on_touched = nullptr;  // grind doesn't gate any UI on "touched"
 
+  // Full-screen transparent container holding the whole grinder chrome (swipe
+  // overlay, bar, cursor, suggestion arrow, value/captions) + the two horizontal
+  // separators (parented in build_idle_group). Created before s_idle_group so it
+  // paints underneath the climate tiles + buttons; hidden as a unit when the
+  // Presets screen owns the full panel.
+  s_grinder_group = lv_obj_create(scr);
+  lv_obj_set_size(s_grinder_group, kScreen, kScreen);
+  lv_obj_set_pos(s_grinder_group, 0, 0);
+  lv_obj_set_style_bg_opa(s_grinder_group, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(s_grinder_group, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(s_grinder_group, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(s_grinder_group, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(s_grinder_group, LV_OBJ_FLAG_CLICKABLE);
+
   // Transparent full-screen overlay catches horizontal swipes for the grind
   // bar. on_grind_bar_event hit-tests against kGrindSpec's y_band and
   // ignores events that don't land inside it. Sits BEHIND the climate tiles
   // + Post button + Post-mode buttons so those widgets take their own taps
   // first.
-  s_grinder_overlay = lv_obj_create(scr);
+  s_grinder_overlay = lv_obj_create(s_grinder_group);
   lv_obj_set_size(s_grinder_overlay, kScreen, kScreen);
   lv_obj_set_pos(s_grinder_overlay, 0, 0);
   lv_obj_set_style_bg_opa(s_grinder_overlay, LV_OPA_TRANSP, LV_PART_MAIN);
@@ -1978,14 +2338,14 @@ void build_grinder(lv_obj_t* scr) {
 
   // Tick bar — custom-drawn widget centered on (kCenter, kBarY). On every
   // drag, LVGL invalidates only this widget's bounds.
-  s_grind.widget = make_bar_widget(scr, &s_grind);
+  s_grind.widget = make_bar_widget(s_grinder_group, &s_grind);
 
   // Upward cursor — fixed at bar center, tip points UP at the bar from the
   // row below. Widget bounds (kCursorWidget) are larger than the triangle,
   // so we offset by half that slack to land the tip kCursorTipGap below the
   // big-tick extent of the bar.
   s_cursor_arrow_state.color = kColorText;
-  s_static_cursor = make_arrow(scr, &s_cursor_arrow_state, kCursorWidget);
+  s_static_cursor = make_arrow(s_grinder_group, &s_cursor_arrow_state, kCursorWidget);
   const int32_t cursor_tip_y      = kBarY + kBigTickLen / 2 + kCursorTipGap;
   const int32_t cursor_tip_inset  = (kCursorWidget - kCursorArrowHeight) / 2;
   lv_obj_set_pos(s_static_cursor,
@@ -1997,12 +2357,12 @@ void build_grinder(lv_obj_t* scr) {
   // peeks out underneath. Created AFTER the cursor so LVGL paints it on top.
   // Position + color updated each refresh_suggestion_arrow() call; hidden
   // initially until the first refresh decides there's something to show.
-  s_suggestion_arrow = make_arrow(scr, &s_suggestion_arrow_state, kCursorWidget);
+  s_suggestion_arrow = make_arrow(s_grinder_group, &s_suggestion_arrow_state, kCursorWidget);
   lv_obj_add_flag(s_suggestion_arrow, LV_OBJ_FLAG_HIDDEN);
 
   // Current value as big text above the bar, visible in BOTH modes. Suggested
   // line tucks between this and the bar (further down).
-  s_grind_value_label = lv_label_create(scr);
+  s_grind_value_label = lv_label_create(s_grinder_group);
   lv_obj_set_style_text_color(s_grind_value_label, kColorText, LV_PART_MAIN);
   lv_obj_set_style_text_font(s_grind_value_label, &lv_font_montserrat_46,
                              LV_PART_MAIN);
@@ -2013,7 +2373,7 @@ void build_grinder(lv_obj_t* scr) {
   // Static caption to the left of the value, same muted-gray + Montserrat 14
   // treatment as the climate section captions so the eye reads it as a header
   // for the big number rather than another live readout.
-  s_grind_caption = lv_label_create(scr);
+  s_grind_caption = lv_label_create(s_grinder_group);
   lv_obj_set_style_text_color(s_grind_caption, kColorLabel, LV_PART_MAIN);
   lv_obj_set_style_text_font(s_grind_caption, &lv_font_montserrat_14, LV_PART_MAIN);
   lv_label_set_text(s_grind_caption, "GRIND VALUE");
@@ -2026,7 +2386,7 @@ void build_grinder(lv_obj_t* scr) {
   // to the caption regardless of digit count. Both hidden until the model
   // produces a usable suggestion; refresh_suggested_label toggles them as a
   // pair so the caption never floats over an empty value row.
-  s_suggestion_caption = lv_label_create(scr);
+  s_suggestion_caption = lv_label_create(s_grinder_group);
   lv_obj_set_style_text_color(s_suggestion_caption, kColorLabel, LV_PART_MAIN);
   lv_obj_set_style_text_font(s_suggestion_caption, &lv_font_montserrat_14,
                              LV_PART_MAIN);
@@ -2037,7 +2397,7 @@ void build_grinder(lv_obj_t* scr) {
                               LV_PART_MAIN);
   lv_obj_add_flag(s_suggestion_caption, LV_OBJ_FLAG_HIDDEN);
 
-  s_suggested_label = lv_label_create(scr);
+  s_suggested_label = lv_label_create(s_grinder_group);
   lv_obj_set_style_text_color(s_suggested_label, kColorMuted, LV_PART_MAIN);
   lv_obj_set_style_text_font(s_suggested_label, &lv_font_montserrat_14,
                              LV_PART_MAIN);
@@ -2190,15 +2550,18 @@ void build_idle_group(lv_obj_t* scr) {
   // Post button — opens the post-mode form. Lives in s_idle_group so it hides
   // when entering post (post mode replaces the center line with ✕ / preset /
   // Submit).
+  // Width + inset mirror the post-mode Submit pill (text centered for now; an
+  // icon will join it later) so Post and Submit share the same right-edge
+  // footprint across the mode swap.
   s_post_btn = lv_button_create(s_idle_group);
-  lv_obj_set_size(s_post_btn, kPostBtnW, kPostBtnH);
+  lv_obj_set_size(s_post_btn, kSubmitBtnW, kPostBtnH);
   lv_obj_set_style_radius(s_post_btn, kPostBtnH / 2, LV_PART_MAIN);
   lv_obj_set_style_bg_opa(s_post_btn, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_shadow_width(s_post_btn, 0, LV_PART_MAIN);
   lv_obj_set_style_border_color(s_post_btn, kColorPost, LV_PART_MAIN);
   lv_obj_set_style_border_width(s_post_btn, kPostBtnStroke, LV_PART_MAIN);
   lv_obj_set_style_border_opa(s_post_btn, LV_OPA_COVER, LV_PART_MAIN);
-  lv_obj_align(s_post_btn, LV_ALIGN_RIGHT_MID, -kPrimaryBtnRightInset,
+  lv_obj_align(s_post_btn, LV_ALIGN_RIGHT_MID, -kSubmitButtonX,
                kCenterLineOffsetY);
   lv_obj_set_ext_click_area(s_post_btn, kPostBtnExtClick);
   lv_obj_add_event_cb(s_post_btn, on_post_tap, LV_EVENT_CLICKED, nullptr);
@@ -2209,14 +2572,14 @@ void build_idle_group(lv_obj_t* scr) {
   lv_obj_center(post_lbl);
 
   // Horizontal separators capping the climate strip (top) and the grinder
-  // area (bottom). Parented to `scr` so they stay visible across both
-  // modes — the climate cap doubles as the Quality-section top boundary
-  // in post mode, and the grinder cap frames the bottom area (identical
-  // in idle and post).
-  make_separator(scr, kSeparatorInset,
+  // area (bottom). Parented to s_grinder_group so they stay visible across
+  // Idle↔Post (the climate cap doubles as the Quality-section top boundary
+  // in post mode, the grinder cap frames the bottom area) but hide as a unit
+  // with the rest of the bottom chrome when the Presets screen takes over.
+  make_separator(s_grinder_group, kSeparatorInset,
                  kClimateSeparatorY - kSeparatorThickness / 2,
                  kScreen - 2 * kSeparatorInset, kSeparatorThickness);
-  make_separator(scr, kSeparatorInset,
+  make_separator(s_grinder_group, kSeparatorInset,
                  kGrinderSeparatorY - kSeparatorThickness / 2,
                  kScreen - 2 * kSeparatorInset, kSeparatorThickness);
 
@@ -2235,6 +2598,57 @@ void build_idle_group(lv_obj_t* scr) {
   lv_obj_add_event_cb(s_preset_btn, on_preset_tap, LV_EVENT_CLICKED, nullptr);
   s_idle_preset = build_preset_readout(s_preset_btn);
   lv_obj_center(s_idle_preset.root);
+
+  // Menu button — mirror of the Post pill on the opposite (left) end of the
+  // center line. Same outlined-capsule chrome (kPostBtnW × kPostBtnH) in its own
+  // kColorMenu, with a custom hamburger glyph centered inside. Lives in
+  // s_idle_group so it hides in post mode; opens the Presets screen.
+  // Width + inset mirror the post-mode ✕ Cancel pill so the Menu pill sits in
+  // exactly the same footprint Cancel occupies when the center line swaps modes.
+  s_menu_btn = lv_button_create(s_idle_group);
+  lv_obj_set_size(s_menu_btn, kCancelBtnW, kPostBtnH);
+  lv_obj_set_style_radius(s_menu_btn, kPostBtnH / 2, LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(s_menu_btn, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_shadow_width(s_menu_btn, 0, LV_PART_MAIN);
+  lv_obj_set_style_border_color(s_menu_btn, kColorMenu, LV_PART_MAIN);
+  lv_obj_set_style_border_width(s_menu_btn, kPostBtnStroke, LV_PART_MAIN);
+  lv_obj_set_style_border_opa(s_menu_btn, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_align(s_menu_btn, LV_ALIGN_LEFT_MID, kCancelButtonX,
+               kCenterLineOffsetY);
+  lv_obj_set_ext_click_area(s_menu_btn, kPostBtnExtClick);
+  lv_obj_add_event_cb(s_menu_btn, on_menu_tap, LV_EVENT_CLICKED, nullptr);
+
+  // Hamburger glyph + "Menu" label in a centered row — mirrors the Back pill's
+  // "chevron + Back" layout on the opposite end of the screen.
+  lv_obj_t* menu_row = lv_obj_create(s_menu_btn);
+  lv_obj_set_size(menu_row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(menu_row, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(menu_row, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(menu_row, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_column(menu_row, 8, LV_PART_MAIN);
+  lv_obj_set_layout(menu_row, LV_LAYOUT_FLEX);
+  lv_obj_set_flex_flow(menu_row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(menu_row, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_clear_flag(menu_row, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(menu_row, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t* menu_glyph = lv_obj_create(menu_row);
+  lv_obj_set_size(menu_glyph, kHamburgerW, kHamburgerH);
+  lv_obj_set_style_bg_opa(menu_glyph, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(menu_glyph, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(menu_glyph, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(menu_glyph, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(menu_glyph, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_event_cb(menu_glyph, draw_hamburger_event, LV_EVENT_DRAW_MAIN,
+                      nullptr);
+
+  lv_obj_t* menu_lbl = lv_label_create(menu_row);
+  lv_obj_set_style_text_color(menu_lbl, kColorMenu, LV_PART_MAIN);
+  lv_obj_set_style_text_font(menu_lbl, &lv_font_montserrat_24, LV_PART_MAIN);
+  lv_label_set_text(menu_lbl, "Menu");
+
+  lv_obj_center(menu_row);
 }
 
 void build_post_group(lv_obj_t* scr) {
@@ -2523,6 +2937,106 @@ void build_post_group(lv_obj_t* scr) {
   lv_obj_add_event_cb(s_submit_btn, on_submit, LV_EVENT_CLICKED, nullptr);
 }
 
+// ===== PRESETS TUNING =======================================================
+// Presets screen — a 3×3 slot grid + a Back pill, all inside the round panel.
+// The grid bounding box is sized so its outer corners stay within the circle:
+// at kGridCell=92 / kGridGap=12 the 300×300 box's corners sit ~212 px from
+// center (< the 233 radius). kGridTopY pushes the grid a touch above center to
+// open room for the Back pill on the bottom arc. Retune cell/gap/top together
+// if the grid grows.
+constexpr int32_t kPresetsTitleTopY = 30;   // "PRESETS" header top inset
+
+constexpr int32_t kGridCols   = 3;
+constexpr int32_t kGridCell   = 92;
+constexpr int32_t kGridGap    = 12;
+constexpr int32_t kGridTopY   = 78;
+constexpr int32_t kGridLeftX  =
+    (kScreen - (kGridCols * kGridCell + (kGridCols - 1) * kGridGap)) / 2;
+constexpr int32_t kSlotRadius = 14;
+constexpr int32_t kSlotBorder = 2;
+constexpr int32_t kSlotPad    = 4;
+
+constexpr int32_t kBackBtnW           = 132;
+constexpr int32_t kBackBtnH           = 56;
+constexpr int32_t kBackBtnBottomInset = 16;
+// ===========================================================================
+
+void build_presets_group(lv_obj_t* scr) {
+  s_presets_group = lv_obj_create(scr);
+  lv_obj_set_size(s_presets_group, kScreen, kScreen);
+  lv_obj_set_pos(s_presets_group, 0, 0);
+  lv_obj_set_style_bg_opa(s_presets_group, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(s_presets_group, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(s_presets_group, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(s_presets_group, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(s_presets_group, LV_OBJ_FLAG_CLICKABLE);
+
+  // Screen title, centered above the grid.
+  s_presets_title = lv_label_create(s_presets_group);
+  lv_obj_set_style_text_color(s_presets_title, kColorPresetsTitle, LV_PART_MAIN);
+  lv_obj_set_style_text_font(s_presets_title, &lv_font_montserrat_24,
+                             LV_PART_MAIN);
+  lv_label_set_text(s_presets_title, "PRESETS");
+  lv_obj_align(s_presets_title, LV_ALIGN_TOP_MID, 0, kPresetsTitleTopY);
+
+  // 3×3 slot grid. Each slot is a bordered rounded rect with a compact readout
+  // inside; active/empty styling + text are pushed by on_enter_presets each time
+  // the screen opens, so they always reflect current preset data. Display-only
+  // for now (no per-slot click) — slot interactions are a later change.
+  for (uint8_t i = 0; i < presets::kMaxPresets; ++i) {
+    const int32_t row = i / kGridCols;
+    const int32_t col = i % kGridCols;
+    lv_obj_t* slot = lv_obj_create(s_presets_group);
+    lv_obj_set_size(slot, kGridCell, kGridCell);
+    lv_obj_set_pos(slot, kGridLeftX + col * (kGridCell + kGridGap),
+                         kGridTopY  + row * (kGridCell + kGridGap));
+    lv_obj_set_style_radius(slot, kSlotRadius, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(slot, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_color(slot, kColorSlotEmpty, LV_PART_MAIN);
+    lv_obj_set_style_border_width(slot, kSlotBorder, LV_PART_MAIN);
+    lv_obj_set_style_border_opa(slot, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(slot, kSlotPad, LV_PART_MAIN);
+    lv_obj_clear_flag(slot, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(slot, LV_OBJ_FLAG_CLICKABLE);
+    s_grid_slot[i] = slot;
+    s_grid[i] = build_preset_readout_grid(slot);
+    lv_obj_center(s_grid[i].root);
+  }
+
+  // Back pill — bottom-center, outlined like the action pills, with a left
+  // chevron + "Back" label. Returns to Idle (reverse section fade).
+  s_back_btn = lv_button_create(s_presets_group);
+  lv_obj_set_size(s_back_btn, kBackBtnW, kBackBtnH);
+  lv_obj_set_style_radius(s_back_btn, kBackBtnH / 2, LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(s_back_btn, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_shadow_width(s_back_btn, 0, LV_PART_MAIN);
+  lv_obj_set_style_border_color(s_back_btn, kColorBack, LV_PART_MAIN);
+  lv_obj_set_style_border_width(s_back_btn, kPostBtnStroke, LV_PART_MAIN);
+  lv_obj_set_style_border_opa(s_back_btn, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_align(s_back_btn, LV_ALIGN_BOTTOM_MID, 0, -kBackBtnBottomInset);
+  lv_obj_set_ext_click_area(s_back_btn, kPostBtnExtClick);
+  lv_obj_add_event_cb(s_back_btn, on_back_tap, LV_EVENT_CLICKED, nullptr);
+
+  lv_obj_t* back_row = lv_obj_create(s_back_btn);
+  lv_obj_set_size(back_row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(back_row, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(back_row, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(back_row, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_column(back_row, 8, LV_PART_MAIN);
+  lv_obj_set_layout(back_row, LV_LAYOUT_FLEX);
+  lv_obj_set_flex_flow(back_row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(back_row, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_clear_flag(back_row, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(back_row, LV_OBJ_FLAG_SCROLLABLE);
+  build_back_chevron(back_row, kColorBack);
+  lv_obj_t* back_lbl = lv_label_create(back_row);
+  lv_obj_set_style_text_color(back_lbl, kColorBack, LV_PART_MAIN);
+  lv_obj_set_style_text_font(back_lbl, &lv_font_montserrat_24, LV_PART_MAIN);
+  lv_label_set_text(back_lbl, "Back");
+  lv_obj_center(back_row);
+}
+
 }  // namespace
 
 void start_report() {
@@ -2540,6 +3054,9 @@ void start_report() {
   build_grinder(scr);
   build_idle_group(scr);
   build_post_group(scr);
+  // Presets group sits above the idle/post groups in z-order but stays hidden
+  // until the Menu button opens it; built after them so it overlays cleanly.
+  build_presets_group(scr);
 
   s_toast_label = lv_label_create(scr);
   lv_obj_set_style_text_color(s_toast_label, kColorToast, LV_PART_MAIN);
@@ -2589,7 +3106,25 @@ void start_report() {
   // builds. Without this the strip flashes "--" for up to a second on boot.
   refresh_climate_tiles();
 
-  apply_mode();  // s_mode starts Idle; hides post group
+  // Populate the section-swap fade sets now that every handle exists. Idle set =
+  // the whole idle-visible world (climate band + center-line buttons + grinder
+  // chrome); presets set = the 9 slots + Back. The engine skips any HIDDEN entry
+  // (e.g. the suggestion arrow/label before the model has a suggestion).
+  s_idle_fade_n = 0;
+  for (lv_obj_t* w : {s_climate_anim, s_menu_btn, s_preset_btn, s_post_btn,
+                      s_grind.widget, s_static_cursor, s_suggestion_arrow,
+                      s_grind_value_label, s_grind_caption, s_suggestion_caption,
+                      s_suggested_label}) {
+    s_idle_fade[s_idle_fade_n++] = w;
+  }
+  s_presets_fade_n = 0;
+  s_presets_fade[s_presets_fade_n++] = s_presets_title;
+  for (uint8_t i = 0; i < presets::kMaxPresets; ++i) {
+    s_presets_fade[s_presets_fade_n++] = s_grid_slot[i];
+  }
+  s_presets_fade[s_presets_fade_n++] = s_back_btn;
+
+  apply_mode();  // s_mode starts Idle; hides post + presets groups
 
   lv_timer_create(update_climate_strip, 1000, nullptr);
 
