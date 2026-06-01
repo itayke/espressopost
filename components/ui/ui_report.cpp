@@ -918,6 +918,17 @@ void on_brew_plus_tap(lv_event_t*) {
   refresh_submit_enabled();
 }
 
+// The "--"/value readout doubles as a button: while still untouched, tapping
+// it commits the pre-seeded preset target (same first-tap reveal as the
+// steppers), which also clears Submit's brew-time gate. Once a value is set
+// it's display-only — the (-)/(+) discs own adjustment from there.
+void on_brew_value_tap(lv_event_t*) {
+  if (s_brew.touched) return;
+  s_brew.touched = true;
+  refresh_brew_time_value();
+  refresh_submit_enabled();
+}
+
 void on_submit(lv_event_t*) {
   if (!(s_stars_value > 0 && s_brew.touched)) return;  // belt-and-suspenders
 
@@ -2443,6 +2454,13 @@ void build_post_group(lv_obj_t* scr) {
   lv_label_set_text(s_brew_time_value, "--");
   lv_obj_set_style_text_color(s_brew_time_value, kColorMuted, LV_PART_MAIN);
   lv_obj_align(s_brew_time_value, LV_ALIGN_CENTER, 0, kBrewRowAlignDY);
+  // The readout itself is tappable: while "--", a tap commits the preset
+  // target (on_brew_value_tap). Labels aren't clickable by default — opt in
+  // and pad the hit area so the small glyphs are easy to land on.
+  lv_obj_add_flag(s_brew_time_value, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_ext_click_area(s_brew_time_value, kPostBtnExtClick);
+  lv_obj_add_event_cb(s_brew_time_value, on_brew_value_tap, LV_EVENT_CLICKED,
+                      nullptr);
 
   // (-) and (+) discs. Same chrome as the ✕ button (kPostBtnH × kPostBtnH
   // outline-only disc) but tinted with kColorStepper so the steppers read
