@@ -2,6 +2,8 @@ idf_component_register(
     SRCS
         "ui_report.cpp"
         "ui_bar.cpp"
+        "ui_preset_readout.cpp"
+        "ui_presets.cpp"
     INCLUDE_DIRS
         "include"
     REQUIRES
