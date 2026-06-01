@@ -34,40 +34,44 @@ constexpr float   kWeightWindowHalf = 5.0f;  // value units from cursor to edge
 // Weight bars — geometry. Near-full-width (a hair under the grind bar's
 // kBarHalfWidth) so the arc swatches clear at the middle rows.
 constexpr int32_t kWeightHalfWidth = 150;
-constexpr int32_t kInStripY        = 196;
-constexpr int32_t kOutStripY       = 276;
-constexpr int32_t kInCaptionY      = 128;   // "WEIGHT IN" caption top inset
-constexpr int32_t kInValueY        = 150;   // "18g" value (MS24) center-ish
-constexpr int32_t kOutCaptionY     = 214;
-constexpr int32_t kOutValueY       = 236;
+constexpr int32_t kInStripY        = 156;
+constexpr int32_t kOutStripY       = 236;
+constexpr int32_t kInCaptionY      = 88;    // "WEIGHT IN" caption top inset
+constexpr int32_t kInValueY        = 110;   // "18g" value (MS24) center-ish
+constexpr int32_t kOutCaptionY     = 174;
+constexpr int32_t kOutValueY       = 196;
 // Drag hit-bands (screen y). Must not overlap — a press picks at most one bar.
-constexpr int32_t kInBandTop    = 158;
-constexpr int32_t kInBandBottom = 232;
-constexpr int32_t kOutBandTop   = 234;
-constexpr int32_t kOutBandBottom = 318;
+constexpr int32_t kInBandTop    = 118;
+constexpr int32_t kInBandBottom = 192;
+constexpr int32_t kOutBandTop   = 194;
+constexpr int32_t kOutBandBottom = 278;
 
 // Brew-time stepper — compact (MS24 value), discs at kPostBtnH. Sits just above
 // the bottom pills (disc bottom must clear the pill tops at ~y392).
-constexpr int32_t kBrewCaptionY  = 300;
-constexpr int32_t kBrewStepperY  = 318;   // container top inset
+constexpr int32_t kBrewCaptionY  = 260;
+constexpr int32_t kBrewStepperY  = 278;   // container top inset
 constexpr int32_t kBrewBtnDX     = 86;
 constexpr int32_t kBrewTimeMin   = 0;
 constexpr int32_t kBrewTimeMax   = 99;
 constexpr int32_t kBrewTimeDef   = 30;    // seeded so the first tap shows 30s
 
 // Color swatches — 5 down each arc, centers evenly spaced about screen center.
-constexpr int32_t kSwatchDiam    = kPostBtnH;          // standard button height
-constexpr int32_t kSwatchSelDiam = (kPostBtnH * 5) / 4;  // selected: 25% larger
+constexpr int32_t kSwatchDiam    = (kPostBtnH * 3) / 4;   // ~25% under button height
+constexpr int32_t kSwatchSelDiam = (kSwatchDiam * 5) / 4;  // selected: 25% larger
 constexpr int32_t kSwatchEdgeGap = 6;     // inset from the round edge
+constexpr int32_t kSwatchEndInward = 10;  // top/bottom rows nudged toward center
 constexpr int32_t kSwatchTopY    = 94;    // top swatch center y (left+right rows)
 constexpr int32_t kSwatchPitch   = 67;    // center-to-center vertical spacing
                                           // (bottom row clears the pills at ~y392)
 constexpr int32_t kSwatchPerSide = 5;
 constexpr int32_t kNumSwatches   = 10;
 
-// Bottom action pills — same chrome as the post ✕ Cancel / Submit › pills.
+// Bottom action pills — same chrome as the post ✕ Cancel / Submit › pills, but
+// paired at center (a wide pill at the far corners gets clipped by the round
+// edge) with a minimal gap between them.
 constexpr int32_t kBtnBottomInset = 16;
-constexpr int32_t kBtnSideInset   = 24;
+constexpr int32_t kEditBtnW       = kPostBtnW + 20;  // matches the post pills
+constexpr int32_t kBtnGap         = 10;   // between the centered Cancel / Save
 
 // Palette — 10 distinct hues kept off max intensity (AMOLED burn-in / matches
 // the kColorText grey at the end). gather() stores the chosen entry verbatim.
@@ -140,8 +144,16 @@ void set_weight_label(lv_obj_t* lbl, float v) {
   lv_label_set_text(lbl, buf);
 }
 
-void in_on_change(BarState* s)  { set_weight_label(s_in_value, s->value); }
-void out_on_change(BarState* s) { set_weight_label(s_out_value, s->value); }
+// Update the value readout AND invalidate the strip so its ticks scroll with the
+// drag (the bar engine reads value at paint time but doesn't self-invalidate).
+void in_on_change(BarState* s) {
+  set_weight_label(s_in_value, s->value);
+  if (s->widget) lv_obj_invalidate(s->widget);
+}
+void out_on_change(BarState* s) {
+  set_weight_label(s_out_value, s->value);
+  if (s->widget) lv_obj_invalidate(s->widget);
+}
 
 // Overlay forwarder — routes a touch to whichever weight bar's y-band it lands
 // in (each bar ignores presses outside its band).
@@ -301,7 +313,12 @@ lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_cancel, lv_event_cb_t on_save) {
         std::sqrt(static_cast<float>(kCenter) * kCenter - dy * dy);
     const int32_t inset = static_cast<int32_t>(std::lround(
         chord_half)) - kSwatchDiam / 2 - kSwatchEdgeGap;
-    const int32_t cx = left ? (kCenter - inset) : (kCenter + inset);
+    int32_t cx = left ? (kCenter - inset) : (kCenter + inset);
+    // Pull the top + bottom rows of each column a touch further toward center so
+    // they don't crowd the rim where the arc curves in hardest.
+    if (row == 0 || row == kSwatchPerSide - 1) {
+      cx += left ? kSwatchEndInward : -kSwatchEndInward;
+    }
     s_swatch_cx[i] = cx;
     s_swatch_cy[i] = cy;
 
@@ -316,13 +333,14 @@ lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_cancel, lv_event_cb_t on_save) {
   }
   apply_swatch_visuals();  // sizes + centers them (none selected yet)
 
-  // Bottom pills — ✕ Cancel (left), Save › (right).
+  // Bottom pills — ✕ Cancel + Save › paired at center, gap kBtnGap between them.
+  const int32_t btn_dx = kEditBtnW / 2 + kBtnGap / 2;
   lv_obj_t* cancel_btn =
-      build_pill(group, kPostBtnW + 20, kColorCancel, LV_SYMBOL_CLOSE " Cancel",
-                 on_cancel, LV_ALIGN_BOTTOM_LEFT, kBtnSideInset);
-  s_save_btn = build_pill(group, kPostBtnW + 20, kColorSaveDisabled,
+      build_pill(group, kEditBtnW, kColorCancel, LV_SYMBOL_CLOSE " Cancel",
+                 on_cancel, LV_ALIGN_BOTTOM_MID, -btn_dx);
+  s_save_btn = build_pill(group, kEditBtnW, kColorSaveDisabled,
                           "Save " LV_SYMBOL_RIGHT, on_save,
-                          LV_ALIGN_BOTTOM_RIGHT, -kBtnSideInset);
+                          LV_ALIGN_BOTTOM_MID, +btn_dx);
 
   // Fade set — every visible widget (overlay stays transparent, excluded).
   s_fade_n = 0;
