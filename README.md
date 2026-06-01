@@ -9,10 +9,11 @@ and learns a per-preset grind adjustment from local data. Offline-first.
 **Steps 1 – 5 (model v1) + idle policy + RTC + grind capture + ring UI.**
 Display + capacitive touch up under LVGL 9 (round 466 × 466, 2-px-aligned
 partial redraws), 1 Hz BME280 read loop, an NVS-backed preset table (3
-defaults seeded on first boot, selection persistent across reboots), and
-a two-mode screen built around a rotating grind bezel: **Idle** shows
-the preset name, climate strip, the current grind value big in the
-center, and a Post button; the outer rim is a 0 – 30 ring (0.1 steps)
+defaults seeded on first boot, selection persistent across reboots, each
+carrying its own accent color), and a three-mode screen built around a
+rotating grind bezel: **Idle** shows the selected preset readout, climate
+strip, the current grind value big in the center, and **Post** / **Menu**
+buttons on the center line; the outer rim is a 0 – 30 ring (0.1 steps)
 that rotates under finger drag with a static down-arrow at 6 o'clock
 indicating the live dial value. A second arrow on the ring — green,
 orange, or red by confidence tier (`>80 / >50 / >30`, hidden below) —
@@ -20,7 +21,13 @@ points at the model's recommended grind, so the user can see at a
 glance how far they are from it. Tapping **Post** swaps the center
 content for a time-delta stepper + 1–5 stars + Submit; the ring stays
 live so they can keep dialing. Submit appends a 40-byte v3 `ShotRecord`
-to LittleFS and returns to Idle. The grind value persists per preset
+to LittleFS and returns to Idle. Tapping **Menu** swaps to the **Presets**
+screen — a "PRESETS" title over a 3×3 grid of slots (each showing
+`PRESET N` / `Xg → Yg` / `Zs` tinted in the preset's accent color, empty
+slots a bare outline) with a Back pill that returns to Idle; the mode
+swap fades each section individually rather than the whole screen. The
+grid is view-only for now — per-slot select/edit/color-pick is the next
+step. The grind value persists per preset
 (NVS key `gN`); the model's recommendation lands in a separate
 `suggested_grind` field on the record. An idle watchdog dims the AMOLED 
 after 30 s and turns the panel off after 2 min; any touch wakes it
@@ -76,7 +83,9 @@ byte at offset 2 holds the raw `actual_time_s` instead. Both steps go
 through a temp file + atomic rename so a power loss mid-migration retries
 on the next boot. Preset blobs in NVS get the same family of treatment:
 v1 (20 B, int8 `click_anchor`) → v2 (24 B, float `grind_anchor = 5.2f`),
-v2 → v3 (last byte repurposed as `yield_g`). After first boot logs
+v2 → v3 (last byte repurposed as `yield_g`), v3 → v4 (28 B, appends a
+`uint32_t color` accent, seeded `0xE0E0E0`). Size keys the migration path
+(20/24/28 B); a version byte disambiguates within a shared size. After first boot logs
 `storage: migrated N shots from v2 → v3` /
 `storage: migrated N shots from v3/v4 → v5` and the preset migration
 line, every step becomes a no-op forever.
@@ -301,8 +310,10 @@ If any of these fail, the most likely culprits in order:
   is approximate (off by the build machine's TZ; minutes-to-hours stale
   by the time the device actually boots). NTP-over-companion-app, a
   serial command, or a hidden UI gesture will eventually replace it.
-- A Preset editor — names, target time, dose, and the table itself are
-  hard-coded defaults until the UI overhaul.
+- A Preset editor — the Presets screen renders the 3×3 grid but is
+  view-only; per-slot select, edit (dose / yield / target time), and
+  color-pick are the next UI step. The table itself is still seeded from
+  hard-coded defaults.
 - The model's full spec — v1 ships a time-only Bayesian regression
   fitted per preset. The quality model (peak-quality grind via
   `α + β·grind + γ·grind² + climate + interactions`) and cross-preset
@@ -337,11 +348,13 @@ memory notes for design decisions already locked in.
     │   ├── include/model_math.hpp pure math API (FitSample, fit, suggest, Suggestion)
     │   ├── model.cpp              IDF glue: mutex, storage, climate, logging
     │   └── model_math.cpp         pure math: standardization, ridge prior, Σ
-    └── ui/                     Report screen (preset / brew time / grind / suggestion / stars / Submit)
-        ├── include/ui.hpp         public API (start_report)
-        ├── ui_report.cpp          screen build + mode registry (switch_mode) + refreshers + handlers
-        ├── ui_bar.{hpp,cpp}       generic scroll/momentum bar engine (grind dial is the only consumer)
-        └── ui_theme.hpp           shared layout frame + base palette (mode-specific tuning stays in ui_report)
+    └── ui/                     screen build (Idle / Post / Presets modes) + mode registry
+        ├── include/ui.hpp              public API (start_report)
+        ├── ui_report.cpp              screen build + mode registry (switch_mode) + section-swap engine + refreshers + handlers
+        ├── ui_presets.{hpp,cpp}       Presets screen: "PRESETS" title + 3×3 slot grid + Back pill + menu/back glyphs
+        ├── ui_preset_readout.{hpp,cpp} shared "PRESET N / Xg→Yg / Zs" readout (idle center line, post surface, grid slots)
+        ├── ui_bar.{hpp,cpp}           generic scroll/momentum bar engine (grind dial is the only consumer)
+        └── ui_theme.hpp               shared layout frame + base palette (mode-specific tuning stays in ui_report)
 
 tests/
 └── host/                          host-side unit tests for model_math (no IDF)
