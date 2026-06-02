@@ -717,6 +717,10 @@ void animate_section_swap(lv_obj_t* const* out, int out_n,
                           lv_obj_t* const* in, int in_n, void (*on_mid)());
 void panel_swap_mid();
 
+// Replay a short slide-up + fade-in on the center-line preset readout after its
+// text is swapped (preset cycle). Defined with the other anim helpers below.
+void animate_preset_readout_in(lv_obj_t* root);
+
 // Reset post-form state to the preset's defaults. Shared by the Post view's
 // on_enter (reseed before the fade-in) and on_exit_done (deferred clear once
 // the post group is fully hidden, so it doesn't visibly blank mid-fade out).
@@ -838,6 +842,7 @@ void on_preset_tap(lv_event_t*) {
   const auto new_id = presets::cycle_selected();
   s_grind.value = std::clamp(presets::last_grind(new_id), kGrindMin, kGrindMax);
   refresh_preset_label();
+  animate_preset_readout_in(s_idle_preset.root);  // slide+fade the new values in
   refresh_grind_value_label();
   refresh_suggestion();
   refresh_grinder();
@@ -1608,6 +1613,35 @@ void translate_y_exec(void* var, int32_t v) {
 void opa_exec(void* var, int32_t v) {
   lv_obj_set_style_opa(static_cast<lv_obj_t*>(var),
                        static_cast<lv_opa_t>(v), LV_PART_MAIN);
+}
+
+// Center-line preset readout flip — mirrors the climate tile's slide+fade but on
+// the whole readout block at once (it's a single aligned container, so translate
+// is purely visual and opa cascades to the labels + arrow). Called after the
+// text is swapped on a preset cycle: snap the block kPresetFlipSlideY px down and
+// transparent, then ease it back up to its rest pose at full opacity.
+constexpr int32_t  kPresetFlipSlideY = 20;
+constexpr uint32_t kPresetFlipMs     = 220;
+void animate_preset_readout_in(lv_obj_t* root) {
+  if (root == nullptr) return;
+  lv_obj_set_style_translate_y(root, kPresetFlipSlideY, LV_PART_MAIN);
+  lv_obj_set_style_opa(root, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_anim_t slide;
+  lv_anim_init(&slide);
+  lv_anim_set_var(&slide, root);
+  lv_anim_set_exec_cb(&slide, translate_y_exec);
+  lv_anim_set_values(&slide, kPresetFlipSlideY, 0);
+  lv_anim_set_duration(&slide, kPresetFlipMs);
+  lv_anim_set_path_cb(&slide, lv_anim_path_ease_out);
+  lv_anim_start(&slide);
+  lv_anim_t fade;
+  lv_anim_init(&fade);
+  lv_anim_set_var(&fade, root);
+  lv_anim_set_exec_cb(&fade, opa_exec);
+  lv_anim_set_values(&fade, LV_OPA_TRANSP, LV_OPA_COVER);
+  lv_anim_set_duration(&fade, kPresetFlipMs);
+  lv_anim_set_path_cb(&fade, lv_anim_path_ease_out);
+  lv_anim_start(&fade);
 }
 
 // ---------------------------------------------------------------------------
