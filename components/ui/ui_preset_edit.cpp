@@ -34,26 +34,36 @@ constexpr float   kWeightWindowHalf = 5.0f;  // value units from cursor to edge
 // Weight bars — geometry. Near-full-width (a hair under the grind bar's
 // kBarHalfWidth) so the arc swatches clear at the middle rows.
 constexpr int32_t kWeightHalfWidth = 150;
-constexpr int32_t kInStripY        = 156;
-constexpr int32_t kOutStripY       = 236;
-constexpr int32_t kInCaptionY      = 88;    // "WEIGHT IN" caption top inset
-constexpr int32_t kInValueY        = 110;   // "18g" value (MS24) center-ish
-constexpr int32_t kOutCaptionY     = 174;
-constexpr int32_t kOutValueY       = 196;
+constexpr int32_t kInStripY        = 126;
+constexpr int32_t kOutStripY       = 216;
+constexpr int32_t kInValueY        = 70;   // "18g" value (MS24); caption shares this y
+constexpr int32_t kOutValueY       = 162;
+// Captions sit on the same row as the value, left-aligned to the strip's left
+// edge (value stays centered).
+constexpr int32_t kWeightCaptionX  = kCenter - kWeightHalfWidth;
 // Drag hit-bands (screen y). Must not overlap — a press picks at most one bar.
-constexpr int32_t kInBandTop    = 118;
-constexpr int32_t kInBandBottom = 192;
-constexpr int32_t kOutBandTop   = 194;
-constexpr int32_t kOutBandBottom = 278;
+constexpr int32_t kInBandTop    = 98;
+constexpr int32_t kInBandBottom = 172;
+constexpr int32_t kOutBandTop   = 174;
+constexpr int32_t kOutBandBottom = 258;
+
+// Static center cursor — a tiny upward triangle just below each strip marking the
+// read point (matches the grind dial's cursor). kCursorTipGap is the gap from the
+// big-tick bottom edge to the triangle tip.
+constexpr int32_t kCursorHalfBase = 6;
+constexpr int32_t kCursorHeight   = 8;
+constexpr int32_t kCursorTipGap   = 3;
+constexpr int32_t kCursorBox      = 18;  // widget bound (> triangle, for headroom)
 
 // Brew-time stepper — compact (MS24 value), discs at kPostBtnH. Sits just above
 // the bottom pills (disc bottom must clear the pill tops at ~y392).
-constexpr int32_t kBrewCaptionY  = 260;
-constexpr int32_t kBrewStepperY  = 278;   // container top inset
+constexpr int32_t kBrewCaptionY  = 258;
+constexpr int32_t kBrewStepperY  = 258;   // container top inset
 constexpr int32_t kBrewBtnDX     = 86;
 constexpr int32_t kBrewTimeMin   = 0;
 constexpr int32_t kBrewTimeMax   = 99;
 constexpr int32_t kBrewTimeDef   = 30;    // seeded so the first tap shows 30s
+constexpr int32_t kBrewValueExtClick = 28;  // generous hit area around the "--"
 
 // Color swatches — 5 down each arc, centers evenly spaced about screen center.
 constexpr int32_t kSwatchDiam    = (kPostBtnH * 3) / 4;   // ~25% under button height
@@ -96,6 +106,10 @@ const lv_color_t kColorSaveDisabled = kColorMuted3;
 const lv_color_t kColorEditTitle    = kColorText;
 const lv_color_t kColorWeight       = kColorText;   // weight value readouts
 const lv_color_t kColorCaption      = COLOR(0xB0B0B0);  // small all-caps headers
+const lv_color_t kColorCursor       = kColorText;   // the center triangle cursor
+
+// Shared value font for every editor readout (Weight In/Out + brew time).
+const lv_font_t* const kEditValueFont = &lv_font_montserrat_36;
 // ===========================================================================
 
 // ---- State ----------------------------------------------------------------
@@ -130,9 +144,9 @@ presets::Preset s_loaded        = {};   // the slot's prior data (zeros if empty
 bool            s_loaded_active = false;
 int             s_color_idx     = -1;   // selected palette index, -1 = none
 
-// 10 swatches + 11 chrome (title, 2 captions, 2 values, 2 bars, brew caption +
-// stepper, 2 pills).
-lv_obj_t* s_fade[kNumSwatches + 11] = {};
+// 10 swatches + 13 chrome (title, 2 captions, 2 values, 2 bars, 2 cursors, brew
+// caption + stepper, 2 pills).
+lv_obj_t* s_fade[kNumSwatches + 13] = {};
 int       s_fade_n = 0;
 
 // ---- Helpers --------------------------------------------------------------
@@ -224,23 +238,64 @@ lv_obj_t* build_pill(lv_obj_t* parent, int32_t w, lv_color_t color,
   return b;
 }
 
-// A muted caption label (the small all-caps headers above each control).
-lv_obj_t* build_caption(lv_obj_t* parent, const char* text, int32_t top_y) {
+// A muted caption label (the small all-caps headers). Brew uses TOP_MID; the
+// weight captions sit left-aligned on the value's row.
+lv_obj_t* build_caption(lv_obj_t* parent, const char* text, lv_align_t align,
+                        int32_t dx, int32_t top_y) {
   lv_obj_t* l = lv_label_create(parent);
   lv_obj_set_style_text_color(l, kColorCaption, LV_PART_MAIN);
   lv_obj_set_style_text_font(l, &lv_font_montserrat_14, LV_PART_MAIN);
   lv_label_set_text(l, text);
-  lv_obj_align(l, LV_ALIGN_TOP_MID, 0, top_y);
+  lv_obj_align(l, align, dx, top_y);
   return l;
 }
 
 lv_obj_t* build_weight_value(lv_obj_t* parent, int32_t top_y) {
   lv_obj_t* l = lv_label_create(parent);
   lv_obj_set_style_text_color(l, kColorWeight, LV_PART_MAIN);
-  lv_obj_set_style_text_font(l, &lv_font_montserrat_24, LV_PART_MAIN);
+  lv_obj_set_style_text_font(l, kEditValueFont, LV_PART_MAIN);
   lv_label_set_text(l, "--");
   lv_obj_align(l, LV_ALIGN_TOP_MID, 0, top_y);
   return l;
+}
+
+// Tiny upward-pointing triangle marking the bar's read point, parked just below
+// the strip's big ticks. Custom-drawn (house style) so it tints + fades cleanly.
+void draw_bar_cursor_event(lv_event_t* e) {
+  lv_layer_t* layer = lv_event_get_layer(e);
+  if (layer == nullptr) return;
+  auto* obj = static_cast<lv_obj_t*>(lv_event_get_target(e));
+  lv_area_t coords;
+  lv_obj_get_coords(obj, &coords);
+  const float cx = coords.x1 + lv_area_get_width(&coords)  * 0.5f;
+  const float cy = coords.y1 + lv_area_get_height(&coords) * 0.5f;
+  const float hb = static_cast<float>(kCursorHalfBase);
+  const float h  = static_cast<float>(kCursorHeight);
+  lv_draw_triangle_dsc_t dsc;
+  lv_draw_triangle_dsc_init(&dsc);
+  dsc.color = kColorCursor;
+  dsc.opa   = LV_OPA_COVER;
+  dsc.p[0]  = {cx,      cy - h * 0.5f};  // tip (up)
+  dsc.p[1]  = {cx - hb, cy + h * 0.5f};  // base-left
+  dsc.p[2]  = {cx + hb, cy + h * 0.5f};  // base-right
+  lv_draw_triangle(layer, &dsc);
+}
+
+// Build the center cursor for the strip centered on screen-y `strip_y`; the
+// triangle tip lands kCursorTipGap below the big-tick bottom edge.
+lv_obj_t* build_bar_cursor(lv_obj_t* parent, int32_t strip_y) {
+  lv_obj_t* c = lv_obj_create(parent);
+  lv_obj_set_size(c, kCursorBox, kCursorBox);
+  lv_obj_set_style_bg_opa(c, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(c, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(c, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(c, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(c, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(c, draw_bar_cursor_event, LV_EVENT_DRAW_MAIN, nullptr);
+  const int32_t tip_y = strip_y + kBigTickLen / 2 + kCursorTipGap;
+  const int32_t cy    = tip_y + kCursorHeight / 2;  // triangle is centered in box
+  lv_obj_set_pos(c, kCenter - kCursorBox / 2, cy - kCursorBox / 2);
+  return c;
 }
 
 }  // namespace
@@ -279,28 +334,42 @@ lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_cancel, lv_event_cb_t on_save) {
   lv_label_set_text(s_title, "EDIT PRESET");
   lv_obj_align(s_title, LV_ALIGN_TOP_MID, 0, kTitleTopY);
 
+  // Captions share the value's row, left-aligned. The value is taller (MS36) than
+  // the caption (MS14), so offset the caption down by half the line-height delta
+  // to match vertical centers instead of top edges.
+  const int32_t cap_dy = (lv_font_get_line_height(kEditValueFont) -
+                          lv_font_get_line_height(&lv_font_montserrat_14)) / 2;
+
   // Weight In.
-  lv_obj_t* in_cap = build_caption(group, "WEIGHT IN", kInCaptionY);
+  lv_obj_t* in_cap = build_caption(group, "WEIGHT IN", LV_ALIGN_TOP_LEFT,
+                                   kWeightCaptionX, kInValueY + cap_dy);
   s_in_value       = build_weight_value(group, kInValueY);
   s_in.spec        = &s_in_spec;
   s_in.on_change   = in_on_change;
   s_in.widget      = make_bar_widget(group, &s_in);
+  lv_obj_t* in_cursor = build_bar_cursor(group, kInStripY);
 
   // Weight Out.
-  lv_obj_t* out_cap = build_caption(group, "WEIGHT OUT", kOutCaptionY);
+  lv_obj_t* out_cap = build_caption(group, "WEIGHT OUT", LV_ALIGN_TOP_LEFT,
+                                    kWeightCaptionX, kOutValueY + cap_dy);
   s_out_value       = build_weight_value(group, kOutValueY);
   s_out.spec        = &s_out_spec;
   s_out.on_change   = out_on_change;
   s_out.widget      = make_bar_widget(group, &s_out);
+  lv_obj_t* out_cursor = build_bar_cursor(group, kOutStripY);
 
   // Brew time.
-  lv_obj_t* brew_cap = build_caption(group, "BREW TIME", kBrewCaptionY);
+  lv_obj_t* brew_cap =
+      build_caption(group, "BREW TIME", LV_ALIGN_TOP_MID, 0, kBrewCaptionY);
   s_time.min_s       = kBrewTimeMin;
   s_time.max_s       = kBrewTimeMax;
   s_time.on_change   = refresh_save_enabled;
-  const TimeStepperCfg brew_cfg = {&lv_font_montserrat_24, kBrewBtnDX, kPostBtnH};
+  const TimeStepperCfg brew_cfg = {kEditValueFont, kBrewBtnDX, kPostBtnH};
   lv_obj_t* brew_row = build_time_stepper(group, &s_time, brew_cfg);
   lv_obj_align(brew_row, LV_ALIGN_TOP_MID, 0, kBrewStepperY);
+  // Tapping the "--"/value commits the default brew time (wired by the stepper);
+  // the glyph is a small target, so widen its hit area to land taps easily.
+  lv_obj_set_ext_click_area(s_time.value_lbl, kBrewValueExtClick);
 
   // Color swatches — 5 down each arc. cx hugs the round edge (inset by the
   // swatch radius + kSwatchEdgeGap) so the center rows clear the weight bars.
@@ -348,9 +417,11 @@ lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_cancel, lv_event_cb_t on_save) {
   s_fade[s_fade_n++] = in_cap;
   s_fade[s_fade_n++] = s_in_value;
   s_fade[s_fade_n++] = s_in.widget;
+  s_fade[s_fade_n++] = in_cursor;
   s_fade[s_fade_n++] = out_cap;
   s_fade[s_fade_n++] = s_out_value;
   s_fade[s_fade_n++] = s_out.widget;
+  s_fade[s_fade_n++] = out_cursor;
   s_fade[s_fade_n++] = brew_cap;
   s_fade[s_fade_n++] = brew_row;
   for (int i = 0; i < kNumSwatches; ++i) s_fade[s_fade_n++] = s_swatch[i];
