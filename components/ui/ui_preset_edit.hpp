@@ -5,13 +5,12 @@
 #include "lvgl.h"
 #include "presets.hpp"
 
-// Preset editor (the Mode::Edit view): an "EDIT PRESET N" title over Weight In /
-// Weight Out scroll bars, a brew-time stepper, and a 5+5 arc of color swatches,
-// with ✕ Cancel / Save › at the bottom. Owns its look, the two weight bars (and
-// their drag overlay), the swatch palette, and its form state — but NOT mode /
-// navigation / swap, which ui_report drives (it injects the Cancel/Save handlers
-// and reads the fade set). Dependency is one-directional:
-// ui_report → ui_preset_edit → {ui_bar, ui_time_stepper, ui_preset_readout-free}.
+// Preset editor (the Mode::Edit view): a "PRESET N" title over three
+// steppers (Weight In / Weight Out / Brew Time) flanked by two columns of color
+// swatches, with ✕ Cancel / Save › at the bottom. Owns its look, the swatch
+// palette, and its form state — but NOT mode / navigation / swap, which ui_report
+// drives (it injects the Cancel/Save handlers and reads the fade set). Dependency
+// is one-directional: ui_report → ui_preset_edit → ui_stepper.
 namespace espressopost::ui::preset_edit {
 
 // Build the screen under `scr`. Cancel's CLICKED → `on_cancel`, Save's →
@@ -20,7 +19,7 @@ namespace espressopost::ui::preset_edit {
 lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_cancel, lv_event_cb_t on_save);
 
 // Reseed the form for editing slot `id`: existing values if the slot is active,
-// defaults if it's empty. Sets the "EDIT PRESET N" title and the Save gate.
+// defaults if it's empty. Sets the "PRESET N" title and the Save gate.
 // Call just before the screen fades in.
 void load(uint8_t slot);
 

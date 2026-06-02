@@ -4,7 +4,7 @@
 #include "ui_preset_readout.hpp"
 #include "ui_presets.hpp"
 #include "ui_theme.hpp"
-#include "ui_time_stepper.hpp"
+#include "ui_stepper.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -239,12 +239,12 @@ lv_obj_t* s_suggested_label   = nullptr;  // "x.xx (xx%)" value line under SUGGE
 // Shown in both modes.
 BarState s_grind = {};
 
-// Brew time captured by the post-mode stepper (the shared ui_time_stepper
-// instance). `touched` flips false→true on the first tap (so the value shows
-// "--" until then and Submit stays gated); `value_s` carries the current
-// seconds within [kBrewMinS, kBrewMaxS]. min/max/on_change/value_lbl are wired
-// when the stepper is built.
-TimeStepperState s_brew = {};
+// Brew time captured by the post-mode stepper (the shared ui_stepper instance).
+// `touched` flips false→true on the first tap (so the value shows "--" until
+// then and Submit stays gated); `value` carries the current seconds within
+// [kBrewMinS, kBrewMaxS]. min/max/unit/on_change/value_lbl are wired when the
+// stepper is built.
+StepperState s_brew = {};
 
 // Idle group:
 lv_obj_t* s_idle_group          = nullptr;
@@ -315,7 +315,7 @@ lv_obj_t* s_post_anim           = nullptr;
 lv_obj_t* s_swap_block          = nullptr;
 lv_obj_t* s_brew_time_caption   = nullptr;  // "BREW TIME" caption at the top of the post screen
 // The brew "--"/value readout + (-)/(+) discs are owned by the shared
-// ui_time_stepper instance (s_brew), not tracked here.
+// ui_stepper instance (s_brew), not tracked here.
 lv_obj_t* s_star_icons[kMaxStars] = {};      // custom-drawn star widgets (outline when unlit, filled fan when lit); tap+swipe handled by a shared overlay (see build_post_group)
 // Per-star lit/unlit flag read by draw_star_event each paint. Declared as a
 // forward-friendly POD struct so refresh_stars (which lives earlier in the
@@ -733,11 +733,11 @@ void reset_post_form() {
   // Pre-seed the brew time at the preset's target so the first (-)/(+) tap
   // can promote it straight to the user's normal target value without an
   // intervening jump. The "--" display stays until `touched` flips.
-  const auto p   = presets::get(presets::selected_id());
-  s_brew.value_s = std::clamp<uint8_t>(p.target_time_s, kBrewMinS, kBrewMaxS);
+  const auto p  = presets::get(presets::selected_id());
+  s_brew.value  = std::clamp<uint8_t>(p.target_time_s, kBrewMinS, kBrewMaxS);
   refresh_stars();
   refresh_taste_toggles();
-  time_stepper_refresh(&s_brew);
+  stepper_refresh(&s_brew);
   refresh_submit_enabled();
 }
 
@@ -883,6 +883,10 @@ void on_edit_save_tap(lv_event_t*) {
   presets::Preset p;
   if (preset_edit::gather(&p)) {
     presets::set(s_edit_slot, p);
+    // Re-push the center-line readout so a new accent/values show at once if the
+    // edited slot is the selected one (no-op for the others — it re-reads the
+    // selected preset).
+    refresh_preset_label();
   }
   switch_mode(Mode::Presets);
 }
@@ -930,7 +934,7 @@ void on_taste_tap(lv_event_t* e) {
   // gate Submit.
 }
 
-// The brew-time (-)/(+)/value-tap handlers now live in ui_time_stepper; the
+// The brew-time (-)/(+)/value-tap handlers now live in ui_stepper; the
 // stepper fires s_brew.on_change (wired to refresh_submit_enabled) after each
 // tap, so Submit re-gates without any post-local handler.
 
@@ -940,7 +944,7 @@ void on_submit(lv_event_t*) {
   const climate::Reading& r = s_post_climate;
   storage::ShotRecord rec = {};
   rec.preset_id       = presets::selected_id();
-  rec.actual_time_s   = s_brew.value_s;
+  rec.actual_time_s   = s_brew.value;
   rec.quality_stars   = s_stars_value;
   rec.taste_flags     = s_taste_flags;
   rec.timestamp_us    = esp_timer_get_time();
@@ -2474,14 +2478,15 @@ void build_post_group(lv_obj_t* scr) {
   lv_label_set_text(s_brew_time_caption, "BREW TIME");
   lv_obj_align(s_brew_time_caption, LV_ALIGN_TOP_MID, 0, kBrewCaptionTopY);
 
-  // [ (-) value (+) ] row — the shared ui_time_stepper instance (MS46 value,
+  // [ (-) value (+) ] row — the shared ui_stepper instance (MS46 value,
   // kPostBtnH discs at ±kBrewBtnDX). reset_post_form wires s_brew's min/max +
   // on_change and seeds value/touched; the stepper owns the readout + handlers.
-  s_brew.min_s     = kBrewMinS;
-  s_brew.max_s     = kBrewMaxS;
+  s_brew.min      = kBrewMinS;
+  s_brew.max      = kBrewMaxS;
+  s_brew.unit     = 's';
   s_brew.on_change = refresh_submit_enabled;
-  const TimeStepperCfg brew_cfg = {&lv_font_montserrat_46, kBrewBtnDX, kPostBtnH};
-  lv_obj_t* brew_row = build_time_stepper(s_post_anim, &s_brew, brew_cfg);
+  const StepperCfg brew_cfg = {&lv_font_montserrat_46, kBrewBtnDX, kPostBtnH};
+  lv_obj_t* brew_row = build_stepper(s_post_anim, &s_brew, brew_cfg);
   lv_obj_align(brew_row, LV_ALIGN_CENTER, 0, kBrewRowAlignDY);
 
   // --- Quality section (middle band) ---
@@ -2726,8 +2731,8 @@ void start_report() {
   // (-)/(+) in post mode promotes the readout straight from "--" to the
   // user's normal target value. `touched` stays false until that tap.
   const auto seed_preset = presets::get(presets::selected_id());
-  s_brew.value_s = std::clamp<uint8_t>(seed_preset.target_time_s,
-                                       kBrewMinS, kBrewMaxS);
+  s_brew.value = std::clamp<uint8_t>(seed_preset.target_time_s,
+                                     kBrewMinS, kBrewMaxS);
 
   refresh_preset_label();
   refresh_grind_value_label();

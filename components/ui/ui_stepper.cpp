@@ -1,4 +1,4 @@
-#include "ui_time_stepper.hpp"
+#include "ui_stepper.hpp"
 
 #include <cstdio>
 
@@ -12,34 +12,34 @@ namespace {
 const lv_color_t kColorStepper = COLOR(0xC88036);
 
 void stepper_minus(lv_event_t* e) {
-  auto* st = static_cast<TimeStepperState*>(lv_event_get_user_data(e));
-  if (!st->touched)                 st->touched = true;
-  else if (st->value_s > st->min_s) --st->value_s;
-  time_stepper_refresh(st);
+  auto* st = static_cast<StepperState*>(lv_event_get_user_data(e));
+  if (!st->touched)             st->touched = true;
+  else if (st->value > st->min) --st->value;
+  stepper_refresh(st);
   if (st->on_change) st->on_change();
 }
 
 void stepper_plus(lv_event_t* e) {
-  auto* st = static_cast<TimeStepperState*>(lv_event_get_user_data(e));
-  if (!st->touched)                 st->touched = true;
-  else if (st->value_s < st->max_s) ++st->value_s;
-  time_stepper_refresh(st);
+  auto* st = static_cast<StepperState*>(lv_event_get_user_data(e));
+  if (!st->touched)             st->touched = true;
+  else if (st->value < st->max) ++st->value;
+  stepper_refresh(st);
   if (st->on_change) st->on_change();
 }
 
 // Tapping the "--"/value readout while untouched commits the seeded value;
 // once set it's display-only — the discs own adjustment from there.
 void stepper_value_tap(lv_event_t* e) {
-  auto* st = static_cast<TimeStepperState*>(lv_event_get_user_data(e));
+  auto* st = static_cast<StepperState*>(lv_event_get_user_data(e));
   if (st->touched) return;
   st->touched = true;
-  time_stepper_refresh(st);
+  stepper_refresh(st);
   if (st->on_change) st->on_change();
 }
 
 // One outline disc with a centered glyph — same chrome as the post ✕ button.
 lv_obj_t* build_disc(lv_obj_t* parent, const char* glyph, int32_t diam,
-                     lv_event_cb_t cb, TimeStepperState* st) {
+                     lv_event_cb_t cb, StepperState* st) {
   lv_obj_t* b = lv_button_create(parent);
   lv_obj_set_size(b, diam, diam);
   lv_obj_set_style_radius(b, diam / 2, LV_PART_MAIN);
@@ -60,8 +60,8 @@ lv_obj_t* build_disc(lv_obj_t* parent, const char* glyph, int32_t diam,
 
 }  // namespace
 
-lv_obj_t* build_time_stepper(lv_obj_t* parent, TimeStepperState* st,
-                             const TimeStepperCfg& cfg) {
+lv_obj_t* build_stepper(lv_obj_t* parent, StepperState* st,
+                        const StepperCfg& cfg) {
   // Transparent container, padded so each disc's ext-click area stays within its
   // bounds — a tight parent would otherwise clip taps in the padded zone.
   const int32_t w = 2 * cfg.btn_dx + cfg.btn_diam + 2 * kPostBtnExtClick;
@@ -88,11 +88,11 @@ lv_obj_t* build_time_stepper(lv_obj_t* parent, TimeStepperState* st,
       build_disc(row, LV_SYMBOL_PLUS, cfg.btn_diam, stepper_plus, st);
   lv_obj_align(plus, LV_ALIGN_CENTER, +cfg.btn_dx, 0);
 
-  time_stepper_refresh(st);
+  stepper_refresh(st);
   return row;
 }
 
-void time_stepper_refresh(TimeStepperState* st) {
+void stepper_refresh(StepperState* st) {
   if (st == nullptr || st->value_lbl == nullptr) return;
   if (!st->touched) {
     lv_label_set_text(st->value_lbl, "--");
@@ -100,7 +100,8 @@ void time_stepper_refresh(TimeStepperState* st) {
     return;
   }
   char buf[8];
-  std::snprintf(buf, sizeof(buf), "%us", static_cast<unsigned>(st->value_s));
+  std::snprintf(buf, sizeof(buf), "%u%c", static_cast<unsigned>(st->value),
+                st->unit);
   lv_label_set_text(st->value_lbl, buf);
   lv_obj_set_style_text_color(st->value_lbl, kColorText, LV_PART_MAIN);
 }
