@@ -76,12 +76,12 @@ constexpr int32_t kSwatchPitch   = 67;    // center-to-center vertical spacing
 constexpr int32_t kSwatchPerSide = 5;
 constexpr int32_t kNumSwatches   = 10;
 
-// Bottom action pills — same chrome as the post ✕ Cancel / Submit › pills, but
-// paired at center (a wide pill at the far corners gets clipped by the round
-// edge) with a minimal gap between them.
+// Bottom actions — a circular ✕ Cancel disc + a snug Save › pill, paired at
+// center with a small gap (narrow buttons clear the round edge cleanly).
 constexpr int32_t kBtnBottomInset = 16;
-constexpr int32_t kEditBtnW       = kPostBtnW + 20;  // matches the post pills
-constexpr int32_t kBtnGap         = 10;   // between the centered Cancel / Save
+constexpr int32_t kCancelBtnDiam  = kPostBtnH;  // circular ✕ disc
+constexpr int32_t kSaveBtnW       = 110;        // just wide enough for "Save ›"
+constexpr int32_t kBtnGap         = 12;         // between Cancel and Save
 
 // Palette — 10 distinct hues kept off max intensity (AMOLED burn-in / matches
 // the kColorText grey at the end). gather() stores the chosen entry verbatim.
@@ -402,14 +402,17 @@ lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_cancel, lv_event_cb_t on_save) {
   }
   apply_swatch_visuals();  // sizes + centers them (none selected yet)
 
-  // Bottom pills — ✕ Cancel + Save › paired at center, gap kBtnGap between them.
-  const int32_t btn_dx = kEditBtnW / 2 + kBtnGap / 2;
+  // Bottom actions — ✕ disc (left) + Save › pill (right), centered as a pair with
+  // a kBtnGap gap. The dx offsets keep the combined [disc | gap | pill] block
+  // centered on screen despite the two differing widths.
+  const int32_t cancel_dx = -(kBtnGap + kSaveBtnW) / 2;
+  const int32_t save_dx   = (kCancelBtnDiam + kBtnGap) / 2;
   lv_obj_t* cancel_btn =
-      build_pill(group, kEditBtnW, kColorCancel, LV_SYMBOL_CLOSE " Cancel",
-                 on_cancel, LV_ALIGN_BOTTOM_MID, -btn_dx);
-  s_save_btn = build_pill(group, kEditBtnW, kColorSaveDisabled,
+      build_pill(group, kCancelBtnDiam, kColorCancel, LV_SYMBOL_CLOSE,
+                 on_cancel, LV_ALIGN_BOTTOM_MID, cancel_dx);
+  s_save_btn = build_pill(group, kSaveBtnW, kColorSaveDisabled,
                           "Save " LV_SYMBOL_RIGHT, on_save,
-                          LV_ALIGN_BOTTOM_MID, +btn_dx);
+                          LV_ALIGN_BOTTOM_MID, save_dx);
 
   // Fade set — every visible widget (overlay stays transparent, excluded).
   s_fade_n = 0;
