@@ -12,15 +12,13 @@ namespace espressopost::ui::preset_edit {
 namespace {
 
 // ===== EDIT PRESET TUNING ==================================================
-// One bannered block for the whole screen so it's tuned in one place. Geometry
-// notes: the two weight bars own the vertical-middle band (widest chord), so the
-// 5+5 color swatches that flank them on the arcs hug the screen edge there and
-// the near-full-width strips clear them. The swatches that curve inward (top /
-// bottom of each column) sit in the rows above/below the bars, where nothing
-// else lives. Retune strip y + half-width together with the swatch rows.
+// One bannered block for the whole screen so it's tuned in one place. Layout
+// top to bottom: title, the two weight bars (value + caption row above each
+// strip), the brew-time stepper, a single centered row of 10 color swatches,
+// then the ✕ Cancel / Save › buttons on the bottom arc.
 
 // Title.
-constexpr int32_t kTitleTopY = 24;
+constexpr int32_t kTitleTopY = 22;
 
 // Weight bars — value domain. "Density 10g" window: default 18 shows 13..23.
 constexpr int32_t kDoseMin   = 5;
@@ -34,18 +32,18 @@ constexpr float   kWeightWindowHalf = 5.0f;  // value units from cursor to edge
 // Weight bars — geometry. Near-full-width (a hair under the grind bar's
 // kBarHalfWidth) so the arc swatches clear at the middle rows.
 constexpr int32_t kWeightHalfWidth = 150;
-constexpr int32_t kInStripY        = 126;
-constexpr int32_t kOutStripY       = 216;
-constexpr int32_t kInValueY        = 70;   // "18g" value (MS24); caption shares this y
-constexpr int32_t kOutValueY       = 162;
+constexpr int32_t kInStripY        = 121;
+constexpr int32_t kOutStripY       = 211;
+constexpr int32_t kInValueY        = 65;   // "18g" value (MS24); caption shares this y
+constexpr int32_t kOutValueY       = 157;
 // Captions sit on the same row as the value, left-aligned to the strip's left
 // edge (value stays centered).
 constexpr int32_t kWeightCaptionX  = kCenter - kWeightHalfWidth;
 // Drag hit-bands (screen y). Must not overlap — a press picks at most one bar.
-constexpr int32_t kInBandTop    = 98;
-constexpr int32_t kInBandBottom = 172;
-constexpr int32_t kOutBandTop   = 174;
-constexpr int32_t kOutBandBottom = 258;
+constexpr int32_t kInBandTop    = 93;
+constexpr int32_t kInBandBottom = 167;
+constexpr int32_t kOutBandTop   = 169;
+constexpr int32_t kOutBandBottom = 253;
 
 // Static center cursor — a tiny upward triangle just below each strip marking the
 // read point (matches the grind dial's cursor). kCursorTipGap is the gap from the
@@ -57,24 +55,22 @@ constexpr int32_t kCursorBox      = 18;  // widget bound (> triangle, for headro
 
 // Brew-time stepper — compact (MS24 value), discs at kPostBtnH. Sits just above
 // the bottom pills (disc bottom must clear the pill tops at ~y392).
-constexpr int32_t kBrewCaptionY  = 258;
-constexpr int32_t kBrewStepperY  = 258;   // container top inset
+constexpr int32_t kBrewCaptionY  = 250;   // above the swatch row
+constexpr int32_t kBrewStepperY  = 250;   // container top inset
 constexpr int32_t kBrewBtnDX     = 86;
 constexpr int32_t kBrewTimeMin   = 0;
 constexpr int32_t kBrewTimeMax   = 99;
 constexpr int32_t kBrewTimeDef   = 30;    // seeded so the first tap shows 30s
 constexpr int32_t kBrewValueExtClick = 28;  // generous hit area around the "--"
 
-// Color swatches — 5 down each arc, centers evenly spaced about screen center.
-constexpr int32_t kSwatchDiam    = (kPostBtnH * 3) / 4;   // ~25% under button height
-constexpr int32_t kSwatchSelDiam = (kSwatchDiam * 5) / 4;  // selected: 25% larger
-constexpr int32_t kSwatchEdgeGap = 6;     // inset from the round edge
-constexpr int32_t kSwatchEndInward = 10;  // top/bottom rows nudged toward center
-constexpr int32_t kSwatchTopY    = 94;    // top swatch center y (left+right rows)
-constexpr int32_t kSwatchPitch   = 67;    // center-to-center vertical spacing
-                                          // (bottom row clears the pills at ~y392)
-constexpr int32_t kSwatchPerSide = 5;
+// Color swatches — a single centered row of 10, just above the bottom buttons
+// (brew time sits above this row). Sized so all 10 + gaps fit the chord at
+// kSwatchRowY (which is narrower this low, so the gap stays modest).
 constexpr int32_t kNumSwatches   = 10;
+constexpr int32_t kSwatchDiam    = 30;
+constexpr int32_t kSwatchSelDiam = (kSwatchDiam * 5) / 4;  // selected: 25% larger
+constexpr int32_t kSwatchGap     = 7;     // between swatches in the row
+constexpr int32_t kSwatchRowY    = 353;   // row center y (above the bottom buttons)
 
 // Bottom actions — a circular ✕ Cancel disc + a snug Save › pill, paired at
 // center with a small gap (narrow buttons clear the round edge cleanly).
@@ -371,25 +367,15 @@ lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_cancel, lv_event_cb_t on_save) {
   // the glyph is a small target, so widen its hit area to land taps easily.
   lv_obj_set_ext_click_area(s_time.value_lbl, kBrewValueExtClick);
 
-  // Color swatches — 5 down each arc. cx hugs the round edge (inset by the
-  // swatch radius + kSwatchEdgeGap) so the center rows clear the weight bars.
+  // Color swatches — one centered row of 10. The row is laid out left-to-right
+  // about screen center at a fixed pitch (diam + gap).
+  const int32_t sw_pitch = kSwatchDiam + kSwatchGap;
+  const int32_t row_w    = kNumSwatches * kSwatchDiam +
+                           (kNumSwatches - 1) * kSwatchGap;
+  const int32_t first_cx = kCenter - row_w / 2 + kSwatchDiam / 2;
   for (int i = 0; i < kNumSwatches; ++i) {
-    const bool left = (i < kSwatchPerSide);
-    const int  row  = left ? i : (i - kSwatchPerSide);
-    const int32_t cy = kSwatchTopY + row * kSwatchPitch;
-    const float   dy = static_cast<float>(cy - kCenter);
-    const float   chord_half =
-        std::sqrt(static_cast<float>(kCenter) * kCenter - dy * dy);
-    const int32_t inset = static_cast<int32_t>(std::lround(
-        chord_half)) - kSwatchDiam / 2 - kSwatchEdgeGap;
-    int32_t cx = left ? (kCenter - inset) : (kCenter + inset);
-    // Pull the top + bottom rows of each column a touch further toward center so
-    // they don't crowd the rim where the arc curves in hardest.
-    if (row == 0 || row == kSwatchPerSide - 1) {
-      cx += left ? kSwatchEndInward : -kSwatchEndInward;
-    }
-    s_swatch_cx[i] = cx;
-    s_swatch_cy[i] = cy;
+    s_swatch_cx[i] = first_cx + i * sw_pitch;
+    s_swatch_cy[i] = kSwatchRowY;
 
     lv_obj_t* sw = lv_button_create(group);
     lv_obj_set_style_bg_color(sw, lv_color_hex(kPalette[i]), LV_PART_MAIN);
