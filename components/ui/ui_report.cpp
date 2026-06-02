@@ -1092,6 +1092,41 @@ void on_edit_save_tap(lv_event_t*) {
   switch_mode(Mode::Presets);
 }
 
+// Confirm button of the delete popup: drop the slot's blob and return to the
+// grid. clear() auto-advances the selection if the deleted slot was selected, so
+// re-push the center-line readout (it's behind the panel now, but correct when
+// idle reappears).
+void confirm_delete_preset(lv_event_t*) {
+  presets::clear(s_edit_slot);
+  refresh_preset_label();
+  switch_mode(Mode::Presets);
+}
+
+// Editor trash — ask before deleting. The device always needs at least one
+// preset, so deleting the only remaining one is refused with a brief note rather
+// than a confirm. Both use the shared scrimmed popup.
+void on_edit_delete_tap(lv_event_t*) {
+  if (presets::count() <= 1) {
+    PopupConfig info{};
+    info.body       = "Keep at least one preset.";
+    info.scrim      = true;
+    info.n_buttons  = 1;
+    info.buttons[0] = PopupButton{"OK", PopupBtnStyle::Neutral, nullptr};
+    show_popup(info);
+    return;
+  }
+  char body[24];
+  std::snprintf(body, sizeof(body), "Delete PRESET %u?",
+                static_cast<unsigned>(s_edit_slot + 1));
+  PopupConfig cfg{};
+  cfg.body       = body;
+  cfg.scrim      = true;
+  cfg.n_buttons  = 2;
+  cfg.buttons[0] = PopupButton{"Keep",   PopupBtnStyle::Neutral,     nullptr};
+  cfg.buttons[1] = PopupButton{"Delete", PopupBtnStyle::Destructive, confirm_delete_preset};
+  show_popup(cfg);
+}
+
 // Hit-area-enter swipe handler for the star row. Maps the indev's current
 // x to a star count via threshold crossings — one threshold at each star's
 // hit-area left edge (visible left edge minus kStarExtClick). Triggered
@@ -2945,8 +2980,9 @@ void start_report() {
   // (opens the editor).
   s_presets_group = presets_screen::build(scr, on_back_tap, on_slot_tap);
   // Edit group overlays the Presets grid (reached by tapping a slot); Cancel →
-  // back to the grid, Save → persist + back to the grid.
-  s_edit_group = preset_edit::build(scr, on_edit_cancel_tap, on_edit_save_tap);
+  // back to the grid, Save → persist + back to the grid, trash → confirm + clear.
+  s_edit_group = preset_edit::build(scr, on_edit_cancel_tap, on_edit_save_tap,
+                                    on_edit_delete_tap);
 
   // Mode-swap input block — full-screen transparent click-eater, hidden until a
   // cross-fade brings it to the foreground (see animate_mode_swap). Clickable so

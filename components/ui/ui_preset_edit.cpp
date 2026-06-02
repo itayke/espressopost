@@ -70,6 +70,15 @@ constexpr int32_t kCancelBtnDiam  = kPostBtnH;  // circular ✕ disc
 constexpr int32_t kSaveBtnW       = 110;        // just wide enough for "Save ›"
 constexpr int32_t kBtnGap         = 12;         // between Cancel and Save
 
+// Delete affordance — a small circular trash disc top-right, beside the title.
+// Built once; load() shows it only for an existing (active) slot, since a fresh
+// slot has nothing to delete. Tucked into the right of the top arc, clear of the
+// centered title and above the WEIGHT IN caption. ui_report owns the CLICKED
+// handler (the confirm popup + the actual clear).
+constexpr int32_t kDeleteBtnDiam = 44;
+constexpr int32_t kDeleteBtnDX   = 96;   // center x, right of the centered title
+constexpr int32_t kDeleteBtnY    = 26;   // top inset — clears the arc
+
 // Palette — 10 distinct hues kept off max intensity (AMOLED burn-in / matches
 // the kColorText grey at the end). gather() stores the chosen entry verbatim.
 constexpr uint32_t kPalette[kNumSwatches] = {
@@ -90,6 +99,7 @@ constexpr uint32_t kPalette[kNumSwatches] = {
 const lv_color_t kColorCancel       = COLOR(0xE07055);
 const lv_color_t kColorSaveEnabled  = COLOR(0x60A8E0);
 const lv_color_t kColorSaveDisabled = kColorMuted3;
+const lv_color_t kColorDelete       = COLOR(0xCC4444);  // trash disc — red, distinct from coral Cancel
 const lv_color_t kColorEditTitle    = kColorText;
 const lv_color_t kColorCaption      = COLOR(0xB0B0B0);  // small all-caps headers
 const lv_color_t kColorSwatchSel    = COLOR(0xFFFFFF);  // outline on the chosen swatch
@@ -109,15 +119,16 @@ lv_obj_t* s_swatch[kNumSwatches] = {};
 int32_t   s_swatch_cx[kNumSwatches] = {};
 int32_t   s_swatch_cy[kNumSwatches] = {};
 lv_obj_t* s_save_btn    = nullptr;
+lv_obj_t* s_delete_btn  = nullptr;
 
 presets::Preset s_loaded        = {};   // the slot's prior data (zeros if empty)
 bool            s_loaded_active = false;
 int             s_color_idx     = -1;   // selected palette index, -1 = none
 bool            s_dirty         = false;  // a field changed since load → Save armed
 
-// 10 swatches + 10 chrome (title, 3 captions, 3 stepper rows, In→Out arrow,
-// 2 pills).
-lv_obj_t* s_fade[kNumSwatches + 10] = {};
+// 10 swatches + 11 chrome (title, 3 captions, 3 stepper rows, In→Out arrow,
+// 2 bottom pills, trash disc).
+lv_obj_t* s_fade[kNumSwatches + 11] = {};
 int       s_fade_n = 0;
 
 // ---- Helpers --------------------------------------------------------------
@@ -280,9 +291,33 @@ lv_obj_t* build_weight_arrow(lv_obj_t* parent) {
   return c;
 }
 
+// Outline trash disc top-right. Same chrome as the bottom pills (transparent fill
+// + red stroke + centered glyph), just circular and smaller. CLICKED → the
+// injected on_delete; load() toggles its visibility per slot.
+lv_obj_t* build_delete_btn(lv_obj_t* parent, lv_event_cb_t on_delete) {
+  lv_obj_t* b = lv_button_create(parent);
+  lv_obj_set_size(b, kDeleteBtnDiam, kDeleteBtnDiam);
+  lv_obj_set_style_radius(b, kDeleteBtnDiam / 2, LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(b, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_shadow_width(b, 0, LV_PART_MAIN);
+  lv_obj_set_style_border_color(b, kColorDelete, LV_PART_MAIN);
+  lv_obj_set_style_border_width(b, kPostBtnStroke, LV_PART_MAIN);
+  lv_obj_set_style_border_opa(b, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_align(b, LV_ALIGN_TOP_MID, kDeleteBtnDX, kDeleteBtnY);
+  lv_obj_set_ext_click_area(b, kPostBtnExtClick);
+  lv_obj_add_event_cb(b, on_delete, LV_EVENT_CLICKED, nullptr);
+  lv_obj_t* lbl = lv_label_create(b);
+  lv_obj_set_style_text_color(lbl, kColorDelete, LV_PART_MAIN);
+  lv_obj_set_style_text_font(lbl, &lv_font_montserrat_24, LV_PART_MAIN);
+  lv_label_set_text(lbl, LV_SYMBOL_TRASH);
+  lv_obj_center(lbl);
+  return b;
+}
+
 }  // namespace
 
-lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_cancel, lv_event_cb_t on_save) {
+lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_cancel, lv_event_cb_t on_save,
+                lv_event_cb_t on_delete) {
   lv_obj_t* group = lv_obj_create(scr);
   lv_obj_set_size(group, kScreen, kScreen);
   lv_obj_set_pos(group, 0, 0);
@@ -348,6 +383,10 @@ lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_cancel, lv_event_cb_t on_save) {
                           "Save " LV_SYMBOL_RIGHT, on_save,
                           LV_ALIGN_BOTTOM_MID, save_dx);
 
+  // Trash disc — hidden until load() decides (only existing slots can delete).
+  s_delete_btn = build_delete_btn(group, on_delete);
+  lv_obj_add_flag(s_delete_btn, LV_OBJ_FLAG_HIDDEN);
+
   // Fade set — every visible widget.
   s_fade_n = 0;
   s_fade[s_fade_n++] = s_title;
@@ -361,6 +400,7 @@ lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_cancel, lv_event_cb_t on_save) {
   for (int i = 0; i < kNumSwatches; ++i) s_fade[s_fade_n++] = s_swatch[i];
   s_fade[s_fade_n++] = cancel_btn;
   s_fade[s_fade_n++] = s_save_btn;
+  s_fade[s_fade_n++] = s_delete_btn;
 
   return group;
 }
@@ -389,6 +429,11 @@ void load(uint8_t slot) {
   stepper_refresh(&s_in);
   stepper_refresh(&s_out);
   stepper_refresh(&s_time);
+
+  // Trash disc only makes sense for an existing slot — a brand-new one has
+  // nothing to delete yet.
+  if (s_loaded_active) lv_obj_remove_flag(s_delete_btn, LV_OBJ_FLAG_HIDDEN);
+  else                 lv_obj_add_flag(s_delete_btn, LV_OBJ_FLAG_HIDDEN);
 
   // Color: match the stored accent to a swatch (active slots always match).
   s_color_idx = s_loaded_active ? palette_index_of(s_loaded.color) : -1;

@@ -7,16 +7,19 @@
 
 // Preset editor (the Mode::Edit view): a "PRESET N" title over three
 // steppers (Weight In / Weight Out / Brew Time) flanked by two columns of color
-// swatches, with ✕ Cancel / Save › at the bottom. Owns its look, the swatch
+// swatches, with ✕ Cancel / Save › at the bottom and a trash disc top-right
+// (shown only when editing an existing preset). Owns its look, the swatch
 // palette, and its form state — but NOT mode / navigation / swap, which ui_report
-// drives (it injects the Cancel/Save handlers and reads the fade set). Dependency
-// is one-directional: ui_report → ui_preset_edit → ui_stepper.
+// drives (it injects the Cancel/Save/Delete handlers and reads the fade set, and
+// owns the delete-confirm popup). Dependency is one-directional:
+// ui_report → ui_preset_edit → ui_stepper.
 namespace espressopost::ui::preset_edit {
 
 // Build the screen under `scr`. Cancel's CLICKED → `on_cancel`, Save's →
-// `on_save`. Returns the group handle so ui_report can show/hide it across the
-// mode swap.
-lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_cancel, lv_event_cb_t on_save);
+// `on_save`, the trash disc's → `on_delete`. Returns the group handle so
+// ui_report can show/hide it across the mode swap.
+lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_cancel, lv_event_cb_t on_save,
+                lv_event_cb_t on_delete);
 
 // Reseed the form for editing slot `id`: existing values if the slot is active,
 // defaults if it's empty. Sets the "PRESET N" title and the Save gate.
