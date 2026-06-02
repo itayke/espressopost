@@ -71,6 +71,12 @@ struct Suggestion {
 //                  algebraically equals the real-shots-only grind mean —
 //                  so it doubles as both the fit's standardization basis
 //                  and the user's observed dial centroid.
+//                  NOTE: `mean_y`/`std_y` are in LOG-seconds — the model
+//                  regresses log(brew time), not raw seconds (flow through a
+//                  puck is convex in grind, so time is convex; logging
+//                  linearizes it and symmetrizes residuals). The seconds⇄log
+//                  transform is internal to model_math: FitSample.actual_time_s
+//                  and suggest()'s target_time_s stay in seconds.
 // `std_g_real`     real-shots-only grind spread, floored at kGrindStdFloor.
 //                  Used by suggest() to score how far the recommended
 //                  grind is from anything the user has actually pulled;
@@ -117,5 +123,29 @@ PresetFit fit(const FitSample* samples, std::size_t n_real);
 // "quality-weighted target" hack from the parked-suggestion memory.
 Suggestion suggest(const PresetFit& f, ClimateInput climate,
                    float target_time_s);
+
+// Forward evaluation: the brew time (in SECONDS) the fitted model expects for a
+// shot pulled at `grind` under `climate`. This is the inverse direction of
+// suggest() — suggest() solves grind for a target time, predict_time_s() solves
+// time for a given grind. Climate is clamped the same way suggest() clamps it
+// (kClimateClampZ) so a wild live reading can't project the slope into a region
+// we never sampled. Returns NaN when the fit is invalid.
+float predict_time_s(const PresetFit& f, ClimateInput climate, float grind);
+
+// How a finished shot's actual brew time compares to what the model predicted
+// for it. `InBand` means "nothing to flag" — used both for genuinely on-target
+// shots AND for the cases where we deliberately stay quiet (invalid fit, or the
+// model wasn't confident enough to have an opinion worth defending).
+enum class ShotVerdict { InBand, RanLong, RanShort };
+
+// Classify a finished shot for the out-of-band tip. Conservative by design:
+// returns `InBand` unless the model was confident (confidence_pct >=
+// kTipConfidenceGate) AND the actual time deviates from prediction by more than
+// kTipBandLogRatio in log space (a symmetric multiplicative margin — same %
+// either direction). `RanLong` = slower than predicted, `RanShort` = faster.
+// `confidence_pct` is the suggestion confidence recorded with the shot; it
+// gates the tip so we never cry wolf on shots the model couldn't predict well.
+ShotVerdict classify_shot(const PresetFit& f, ClimateInput climate, float grind,
+                          float actual_time_s, uint8_t confidence_pct);
 
 }  // namespace espressopost::model

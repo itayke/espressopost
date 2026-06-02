@@ -29,11 +29,12 @@ constexpr float kPriorPrec = 3.0f;
 // dial runs the other way). Climate values land at typical room conditions
 // so the phantoms barely touch β_T/β_H/β_P after standardization.
 //
-// `delta_from_target_s` is the phantom's brew time RELATIVE to the
-// per-preset target — at fit time we add the caller-provided target to get
-// the absolute brew seconds the math layer regresses on. Storing the
-// phantoms as deltas keeps them target-agnostic so the same prior shape
-// reads correctly whether a preset targets 22 s or 40 s.
+// The model regresses LOG brew time (see fit()), so the phantom's time anchor
+// is expressed as a symmetric log-ratio around the real-shot log-mean: the
+// finer phantom sits at log_mean + ln(kPriorShotTimeRatio), the coarser at
+// log_mean − ln(kPriorShotTimeRatio). A multiplicative offset reads the same
+// whether the user pulls 22 s or 40 s shots, and stays symmetric in the space
+// the regression actually lives in (a fixed ±seconds offset would not).
 //
 // Two purposes:
 //   1) Inject grind variance — your first dozen shots may all be at the same
@@ -52,25 +53,34 @@ constexpr float kPriorPrec = 3.0f;
 // dial centroid" without a separate field.
 //
 // Each phantom carries kPriorShotWeight, so two real shots already out-vote
-// the prior. The ±10 magnitude on time_delta is intentionally larger than
-// real-shot scatter — that pushes std_y up and dampens real-shot signal
-// while data is sparse, keeping the suggestion conservative. Lowering it to
-// ±3 was tried (2026-05-18) and made things noticeably worse: the smaller
-// scale shrank std_y so β_T (the climate slope) had relatively *more*
-// influence per-σ, and the solver compensated with absurd grind moves
-// (suggested 1.7 instead of 4.4 in the hot-climate real-data test). The
-// real fix for that scenario lives in the climate-extrapolation clamp
-// (kClimateClampZ) below, not here.
+// the prior. kPriorShotTimeRatio is intentionally larger than real-shot
+// log-scatter — it pushes std_y up and dampens real-shot signal while data is
+// sparse, keeping the suggestion conservative. The seconds-space predecessor
+// (±10 s) was tuned the same way; shrinking it (±3 s tried 2026-05-18) made
+// β_T relatively more influential per-σ and the solver compensated with absurd
+// grind moves. The real fix for far-climate extrapolation lives in the climate
+// clamp (kClimateClampZ) below, not here.
 //
 // Spread (±0.5) is a soft knob — after standardization, the algebra cancels
 // most of its effect on β_g. Picked to read as "small dial movement" to a
 // human; the model behaves nearly identically at ±0.1 or ±5.0.
 struct PriorShot {
   float user_grind;
-  float delta_from_y_center_s;  // signed seconds offset from the real-shot mean brew time; absolute time is added in at fit time
+  float log_delta_from_y_center;  // signed LOG-seconds offset from the real-shot log-mean brew time (= ±ln(kPriorShotTimeRatio))
 };
 constexpr float kPriorShotWeight     = 0.5f;
 constexpr float kPriorShotGrindSpread = 0.5f;
+
+// Phantom brew-time spread as a multiplicative ratio in log space: the finer
+// phantom is this factor slower than the real-shot geometric-mean time, the
+// coarser one this factor faster. ~1.4 ≈ the old ±10 s anchor at a ~28 s mean,
+// kept deliberately wide so the prior stays conservative while data is sparse.
+constexpr float kPriorShotTimeRatio = 1.4f;
+
+// Floor on brew seconds before taking the log, so a stray 0 s record (or any
+// sub-second value) can't blow log() to -inf. Real espresso shots are tens of
+// seconds, so this only ever guards corrupt/empty inputs.
+constexpr float kMinBrewSecondsForLog = 1.0f;
 
 // Typical room conditions phantom shots are pinned to. Real shots in most
 // homes land within a few % of these; after standardization the phantom
@@ -147,6 +157,22 @@ constexpr float kExtrapPenaltyEnd   = 3.0f;
 // observed range."
 constexpr float kGrindStdFloor = 0.1f;
 
+// Out-of-band tip gates (classify_shot). The tip only fires when the model was
+// confident enough to have a defensible opinion (>= gate) AND the actual brew
+// time missed the prediction by more than this multiplicative margin. The band
+// is symmetric in log space: kTipBandRatio=1.4 flags a shot >40% slower OR
+// (1/1.4 ≈) >29% faster than predicted. Conservative on purpose — a tip that
+// fires on ordinary shot-to-shot noise trains the user to ignore it.
+constexpr uint8_t kTipConfidenceGate = 80;
+constexpr float   kTipBandRatio      = 1.4f;
+
+// Brew seconds → model y-space (log seconds), with the corrupt-input floor.
+// Single source of truth for the seconds⇄log boundary so fit(), suggest(),
+// predict_time_s() and classify_shot() all transform identically.
+inline float log_time_s(float seconds) {
+  return std::log(std::max(seconds, kMinBrewSecondsForLog));
+}
+
 // In-place Gauss-Jordan inverse of an n×n matrix with partial pivoting. We
 // only ever invert n=kNFeat (4×4) so stack-allocating the augmented matrix is
 // fine and avoids dragging in std::vector / a heap allocation per refit. With
@@ -217,25 +243,26 @@ PresetFit fit(const FitSample* samples, std::size_t n_real) {
   // so f.mean_g (computed below across all weighted samples) will equal
   // this real-only centroid algebraically.
   //
-  // Shot records now carry absolute brew seconds (v5+), so the phantom
-  // brew-time anchor follows the real-shot mean too — finer phantom = mean
-  // + 10 s, coarser phantom = mean − 10 s. Anchoring on the user's actual
-  // brew range instead of on the preset target keeps the prior shape
-  // sensible whether the user pulls 22 s shots or 40 s shots.
+  // The regression works in LOG brew time, so the phantom time anchor follows
+  // the real-shot log-mean: finer phantom = log_mean + ln(ratio), coarser =
+  // log_mean − ln(ratio). A multiplicative (log) offset keeps the prior shape
+  // sensible whether the user pulls 22 s shots or 40 s shots, and symmetric in
+  // the space the fit lives in.
   double sum_g_real = 0.0;
-  double sum_y_real = 0.0;
+  double sum_y_real = 0.0;  // accumulates LOG brew time
   for (std::size_t i = 0; i < n_real; ++i) {
     sum_g_real += samples[i].user_grind;
-    sum_y_real += samples[i].actual_time_s;
+    sum_y_real += log_time_s(samples[i].actual_time_s);
   }
-  const float g_real_mean = static_cast<float>(sum_g_real / n_real);
-  const float y_real_mean = static_cast<float>(sum_y_real / n_real);
+  const float g_real_mean    = static_cast<float>(sum_g_real / n_real);
+  const float y_real_logmean = static_cast<float>(sum_y_real / n_real);
+  const float log_delta      = std::log(kPriorShotTimeRatio);
   const PriorShot phantoms[] = {
-      {g_real_mean - kPriorShotGrindSpread, +10.0f},  // finer  → longer
-      {g_real_mean + kPriorShotGrindSpread, -10.0f},  // coarser → shorter
+      {g_real_mean - kPriorShotGrindSpread, +log_delta},  // finer  → longer
+      {g_real_mean + kPriorShotGrindSpread, -log_delta},  // coarser → shorter
   };
   auto phantom_y = [&](const PriorShot& ph) {
-    return y_real_mean + ph.delta_from_y_center_s;
+    return y_real_logmean + ph.log_delta_from_y_center;
   };
 
   // --- Step 1: weighted means + stds ------------------------------------
@@ -251,7 +278,7 @@ PresetFit fit(const FitSample* samples, std::size_t n_real) {
     sum_T += samples[i].temp_c;
     sum_H += samples[i].humidity_pct;
     sum_P += samples[i].pressure_hpa;
-    sum_y += samples[i].actual_time_s;
+    sum_y += log_time_s(samples[i].actual_time_s);
   }
   for (const auto& ph : phantoms) {
     w_sum += kPriorShotWeight;
@@ -274,7 +301,7 @@ PresetFit fit(const FitSample* samples, std::size_t n_real) {
     const float dT = samples[i].temp_c       - f.mean_T;
     const float dH = samples[i].humidity_pct - f.mean_H;
     const float dP = samples[i].pressure_hpa - f.mean_P;
-    const float dy = samples[i].actual_time_s - f.mean_y;
+    const float dy = log_time_s(samples[i].actual_time_s) - f.mean_y;
     var_g += dg * dg;
     var_T += dT * dT;
     var_H += dH * dH;
@@ -339,7 +366,7 @@ PresetFit fit(const FitSample* samples, std::size_t n_real) {
   for (std::size_t i = 0; i < n_real; ++i) {
     accumulate(1.0f, samples[i].user_grind, samples[i].temp_c,
                samples[i].humidity_pct, samples[i].pressure_hpa,
-               samples[i].actual_time_s);
+               log_time_s(samples[i].actual_time_s));
   }
   for (const auto& ph : phantoms) {
     accumulate(kPriorShotWeight, ph.user_grind, kPriorShotTempC,
@@ -370,7 +397,7 @@ Suggestion suggest(const PresetFit& f, ClimateInput c, float target_time_s) {
   // grind_z is unknown — we're solving for it. Plug the target brew time
   // into the standardized regression equation:
   //   y_z = β_g·g_z + β_T·T_z + β_H·H_z + β_P·P_z
-  //   target y_raw = target_time_s → target y_z = (target - mean_y) / std_y
+  //   target y_z = (log(target_time_s) - mean_y) / std_y   (y is log-seconds)
   // Rearrange:
   //   g_z = (target_y_z - β_T·T_z - β_H·H_z - β_P·P_z) / β_g
   // Because records now carry absolute brew seconds, retuning a preset's
@@ -385,7 +412,7 @@ Suggestion suggest(const PresetFit& f, ClimateInput c, float target_time_s) {
   const float T_z = std::clamp(T_z_raw, -kClimateClampZ, kClimateClampZ);
   const float H_z = std::clamp(H_z_raw, -kClimateClampZ, kClimateClampZ);
   const float P_z = std::clamp(P_z_raw, -kClimateClampZ, kClimateClampZ);
-  const float target_y_z = (target_time_s - f.mean_y) / f.std_y;
+  const float target_y_z = (log_time_s(target_time_s) - f.mean_y) / f.std_y;
 
   // β_g (grind coefficient) near zero means the model didn't learn a useful
   // grind→time relationship — usually because every shot used the same grind
@@ -439,6 +466,44 @@ Suggestion suggest(const PresetFit& f, ClimateInput c, float target_time_s) {
   if (conf == 0) return none;
 
   return Suggestion{grind, conf};
+}
+
+float predict_time_s(const PresetFit& f, ClimateInput c, float grind) {
+  if (!f.valid) return std::nanf("");
+
+  // Standardize inputs into the space β lives in. Climate is clamped exactly as
+  // suggest() clamps it (kClimateClampZ) so a wild live reading can't project
+  // the slope into a region we never sampled. Grind is the shot's own dial
+  // setting, used as-is — we want the honest prediction for what was pulled.
+  const float g_z = (grind - f.mean_g) / f.std_g;
+  const float T_z = std::clamp((c.temp_c       - f.mean_T) / f.std_T,
+                               -kClimateClampZ, kClimateClampZ);
+  const float H_z = std::clamp((c.humidity_pct - f.mean_H) / f.std_H,
+                               -kClimateClampZ, kClimateClampZ);
+  const float P_z = std::clamp((c.pressure_hpa - f.mean_P) / f.std_P,
+                               -kClimateClampZ, kClimateClampZ);
+
+  const float y_z = f.beta[0] * g_z + f.beta[1] * T_z
+                  + f.beta[2] * H_z + f.beta[3] * P_z;
+  return std::exp(y_z * f.std_y + f.mean_y);  // log-seconds → seconds
+}
+
+ShotVerdict classify_shot(const PresetFit& f, ClimateInput c, float grind,
+                          float actual_time_s, uint8_t confidence_pct) {
+  // Stay silent unless the model had a confident opinion to defend. Below the
+  // gate the prediction isn't trustworthy enough to call a shot "out of band,"
+  // and a tip would just be noise on data the model can't model yet.
+  if (!f.valid || confidence_pct < kTipConfidenceGate) return ShotVerdict::InBand;
+
+  const float predicted = predict_time_s(f, c, grind);
+  if (!std::isfinite(predicted) || predicted <= 0.0f) return ShotVerdict::InBand;
+
+  // Residual in log space → a symmetric multiplicative band. |resid| within
+  // ln(ratio) is the tolerated factor either way; outside it the sign gives the
+  // direction (positive = actual slower than predicted = ran long).
+  const float resid = log_time_s(actual_time_s) - std::log(predicted);
+  if (std::fabs(resid) <= std::log(kTipBandRatio)) return ShotVerdict::InBand;
+  return resid > 0.0f ? ShotVerdict::RanLong : ShotVerdict::RanShort;
 }
 
 }  // namespace espressopost::model

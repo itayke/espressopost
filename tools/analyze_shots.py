@@ -3,7 +3,9 @@
 
 Independent of the on-device Bayesian model — won't reproduce its coefficients,
 but if the sign of any OLS β here disagrees with what the device emits, that's
-worth investigating.
+worth investigating. The OLS regresses log(brew time), matching the transform
+the firmware fits (model_math.cpp), and the out-of-band block replays the
+device's tip gate on the logged shots as a proxy (plain OLS, no ridge/phantoms).
 
 Usage:
     tools/analyze_shots.py path/to/monitor.log
@@ -21,6 +23,15 @@ import numpy as np
 
 TOMBSTONE = 0x01
 ANOMALY = 0x02
+
+# Mirror the firmware's model constants (model_math.cpp) so the OLS below
+# regresses the same transform the device fits and the out-of-band check uses
+# the same tip gate. The fit here is plain OLS (no ridge/phantoms), so it's a
+# proxy for the device's Bayesian fit — signs + rough magnitudes agree, exact
+# coefficients won't.
+MIN_BREW_S_FOR_LOG = 1.0  # kMinBrewSecondsForLog — log() floor for stray 0s records
+TIP_CONF_GATE = 80        # kTipConfidenceGate — min confidence for a tip to fire
+TIP_BAND_RATIO = 1.4      # kTipBandRatio — flag beyond this multiplicative miss
 
 # `taste=0x..` is v4+; v3 dump lines omit it entirely. Keep the group optional
 # so a single regex parses both — when absent, taste_flags reads 0 ("none
@@ -142,22 +153,42 @@ def corr_block(shots):
     print(f"(n={len(rows)})")
 
 
-def ols_block(shots):
-    rows = [(s.T, s.H, s.P, s.grind, s.ts) for s in shots if not math.isnan(s.T)]
+def _logtime_fit(shots):
+    """Standardized OLS of log(brew seconds) on [T, H, P, grind] — same response
+    transform the firmware regresses (model_math.cpp). Returns a dict with beta,
+    raw feature std, per-shot prediction (in log space), and the rows used, or
+    None if there are too few rows. Plain OLS (no ridge / no phantoms), so it's a
+    proxy for the device's Bayesian fit, not a bit-exact reproduction."""
+    rows = [s for s in shots
+            if not math.isnan(s.T) and not math.isnan(s.grind)]
     if len(rows) < 5:
-        print(f"(skipping — only {len(rows)} rows, need ≥5)")
-        return
-    X = np.array([r[:4] for r in rows], dtype=float)
-    y = np.array([r[4] for r in rows], dtype=float)
+        return None
+    X = np.array([[s.T, s.H, s.P, s.grind] for s in rows], dtype=float)
+    y = np.log(np.maximum([s.ts for s in rows], MIN_BREW_S_FOR_LOG))
     std_X = X.std(0, ddof=1)
     std_X_safe = np.where(std_X == 0, 1.0, std_X)
     Xs = (X - X.mean(0)) / std_X_safe
     A = np.hstack([np.ones((len(Xs), 1)), Xs])
     beta, *_ = np.linalg.lstsq(A, y, rcond=None)
-    yhat = A @ beta
+    return {"beta": beta, "std_X": std_X, "rows": rows, "y": y, "yhat": A @ beta}
+
+
+def ols_block(shots):
+    fit = _logtime_fit(shots)
+    if fit is None:
+        n = sum(1 for s in shots
+                if not math.isnan(s.T) and not math.isnan(s.grind))
+        print(f"(skipping — only {n} rows, need ≥5)")
+        return
+    beta, std_X, y, yhat = fit["beta"], fit["std_X"], fit["y"], fit["yhat"]
     ss_res = ((y - yhat) ** 2).sum()
     ss_tot = ((y - y.mean()) ** 2).sum()
     r2 = 1 - ss_res / ss_tot if ss_tot else float("nan")
+    # intercept is the mean of log-time → exp() is the centroid brew time in
+    # seconds. We also use it to linearize the standardized βs back into a
+    # seconds-per-step read (Δt ≈ t_centroid · Δlog t), so the practical column
+    # stays intuitive even though the fit itself is multiplicative.
+    centroid_s = math.exp(beta[0])
 
     # 0.05 mirrors kGrindStep in model_math.hpp — the dial increment the user
     # actually turns. For grind, "per 1 unit" extrapolates wildly outside the
@@ -168,16 +199,51 @@ def ols_block(shots):
         ("P",     1.0,   "per +1 hPa"),
         ("grind", 0.05,  "per +0.05 step"),
     ]
-    print(f"  intercept (actual brew seconds at climate centroid):  {beta[0]:+.2f} s")
+    print(f"  intercept (predicted brew time at climate centroid):  {centroid_s:.1f} s  (log {beta[0]:+.2f})")
     print(f"  {'feature':<7} {'std':>6} {'β/1σ':>7}   {'practical reading':<20}")
     for (name, step, descr), b_std, sx in zip(features, beta[1:], std_X):
         if sx == 0:
             print(f"  {name:<7} {sx:>6.2f} {b_std:>+7.2f}   (zero variance — skipped)")
             continue
-        b_per_step = (b_std / sx) * step
-        print(f"  {name:<7} {sx:>6.2f} {b_std:>+7.2f}   {descr:<14} → {b_per_step:+6.2f} s")
-    print(f"  R²: {r2:.2f}   n={len(rows)}")
-    print("  (signs more reliable than magnitudes at small n; correlated regressors mean OLS splits credit roughly.)")
+        # Δlog t per step → Δseconds at the centroid time (local linearization).
+        b_per_step_s = centroid_s * (b_std / sx) * step
+        print(f"  {name:<7} {sx:>6.2f} {b_std:>+7.2f}   {descr:<14} → {b_per_step_s:+6.2f} s")
+    print(f"  R² (log space): {r2:.2f}   n={len(fit['rows'])}")
+    print("  (signs more reliable than magnitudes at small n; correlated regressors mean OLS splits credit roughly. seconds read is a local linearization at the centroid; the fit is multiplicative.)")
+
+
+def out_of_band_block(shots):
+    """Reproduce the device's out-of-band tip decision on the logged shots,
+    using the log-time OLS proxy above. Flags shots that were confident
+    (conf ≥ TIP_CONF_GATE) yet missed the prediction by more than the
+    multiplicative band — i.e. the ones the firmware would have tipped on."""
+    fit = _logtime_fit(shots)
+    if fit is None:
+        print("(skipping — need ≥5 rows for a fit)")
+        return
+    rows, y, yhat = fit["rows"], fit["y"], fit["yhat"]
+    pred_s = np.exp(yhat)
+    actual_s = np.array([s.ts for s in rows], dtype=float)
+    log_resid = y - yhat
+    band = math.log(TIP_BAND_RATIO)
+    rms = math.sqrt((log_resid ** 2).mean())
+    print(f"  log-residual RMS: {rms:.3f}  (≈ ±{(math.exp(rms) - 1) * 100:.0f}% typical miss)")
+    print(f"  tip gate: conf ≥ {TIP_CONF_GATE} AND actual/predicted beyond "
+          f"{TIP_BAND_RATIO:.2f}× (or {1 / TIP_BAND_RATIO:.2f}×)")
+    flagged = [(s, actual_s[i], pred_s[i])
+               for i, s in enumerate(rows)
+               if s.conf >= TIP_CONF_GATE and abs(log_resid[i]) > band]
+    if not flagged:
+        print("  shots the device would flag out-of-band:  none")
+    else:
+        print(f"  shots the device would flag out-of-band:  {len(flagged)}")
+        print(f"    {'idx':>4} {'actual':>7} {'pred':>7} {'ratio':>6} {'conf':>5}  dir")
+        for s, a, p in flagged:
+            ratio = a / p
+            print(f"    {s.idx:>4} {a:>6.0f}s {p:>6.1f}s {ratio:>5.2f}x {s.conf:>5}  "
+                  f"{'long' if ratio > 1 else 'fast'}")
+    print("  (in-sample fit, so a lone outlier is partly self-fit — the device judges each shot")
+    print("   against the model trained WITHOUT it, so it may flag a borderline shot this misses.)")
 
 
 def sugg_calib_block(shots):
@@ -227,8 +293,10 @@ def report(shots):
         temp_bin_block(ps)
         print("\n[correlation matrix (Pearson r), non-NaN rows only]")
         corr_block(ps)
-        print("\n[OLS: actual_time_s ~ T + H + P + grind   (standardized)]")
+        print("\n[OLS: log(actual_time_s) ~ T + H + P + grind   (standardized, mirrors firmware)]")
         ols_block(ps)
+        print("\n[out-of-band check (reproduces the device tip decision)]")
+        out_of_band_block(ps)
         print("\n[suggestion calibration]")
         sugg_calib_block(ps)
         print("\n[confidence buckets]")

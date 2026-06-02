@@ -158,4 +158,27 @@ Suggestion suggest_for_preset(uint8_t preset_id) {
                  static_cast<float>(p.target_time_s));
 }
 
+ShotAssessment assess_shot(const storage::ShotRecord& rec) {
+  const ShotAssessment none = {ShotVerdict::InBand, std::nanf("")};
+  if (s_lock == nullptr || rec.preset_id >= presets::kMaxPresets) return none;
+
+  Guard g;
+  if (!g.ok) return none;
+
+  // Judge against the CURRENT fit for this preset — the caller (on_submit) runs
+  // us before model::refit(), so s_fits still holds the model that produced the
+  // suggestion the user saw, not one already updated with this shot. We predict
+  // at the shot's own grind + climate and compare to its actual time; the
+  // recorded confidence gates whether classify_shot says anything at all.
+  const PresetFit& f = s_fits[rec.preset_id];
+  const ClimateInput c{rec.temp_c, rec.humidity_pct, rec.pressure_hpa};
+  const float grind  = rec.user_grind;
+  const float actual = static_cast<float>(rec.actual_time_s);
+
+  return ShotAssessment{
+      classify_shot(f, c, grind, actual, rec.confidence_pct),
+      predict_time_s(f, c, grind),
+  };
+}
+
 }  // namespace espressopost::model

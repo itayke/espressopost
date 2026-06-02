@@ -10,6 +10,11 @@ on boot. Independent of the on-device Bayesian model: if the *sign* of any
 coefficient here disagrees with what the device is doing, that's a real
 divergence worth investigating.
 
+The OLS regresses `log(brew time)`, matching the transform the firmware fits
+(`model_math.cpp`), and an out-of-band block replays the device's shot-tip gate
+on the logged shots. Both are plain-OLS proxies for the device's ridge+phantom
+fit — close in sign and rough magnitude, not bit-exact.
+
 ### Install
 
 Only depends on numpy:
@@ -36,13 +41,15 @@ Per preset (one section each):
 
 - **Climate spread** — range, mean, std of T / H / P; range/mean/std of the
   dialed grind. Quick "did I actually pull across enough climate yet?" check.
-- **By temperature bin** — mean grind, sugg, t_d, stars for cool / mid / hot
+- **By temperature bin** — mean grind, sugg, t_s, stars for cool / mid / hot
   bins. Often the most directly readable signal.
 - **Correlation matrix** — Pearson r across all numeric fields, restricted
   to rows that have a non-NaN suggestion. The `r(grind, sugg)` cell tells
   you how well the model and your dialing agree.
-- **OLS** — `time_delta ~ T + H + P + grind`, standardized. See "Reading
-  the OLS block" below.
+- **OLS** — `log(actual_time_s) ~ T + H + P + grind`, standardized. See
+  "Reading the OLS block" below.
+- **Out-of-band check** — replays the device's tip gate on the logged shots.
+  See "Reading the out-of-band block" below.
 - **Suggestion calibration** — mean / std / max of `(sugg − grind)` over
   shots that had a recorded suggestion.
 - **Confidence buckets** — mean `|sugg − grind|` per conf tier, on shots
@@ -50,22 +57,56 @@ Per preset (one section each):
 
 ### Reading the OLS block
 
-Two β columns are printed per feature:
+The fit is on `log(brew time)`, so the response is multiplicative. The header
+line reports the **intercept as a time** — `exp(mean log-time)`, the predicted
+brew seconds at the climate centroid — with the raw log intercept in
+parentheses.
 
-- **`β/1σ`** — standardized coefficient: seconds of `time_delta` per one
-  standard deviation change in that feature. Compare magnitudes across
-  features to see which one carries the most weight in the fit.
-- **`practical reading`** — the same β converted to natural units:
-  `per +1 °C`, `per +1 %`, `per +1 hPa`, `per +0.05 grind step`. Quote this
-  one to humans. Grind uses the dial step (`kGrindStep` from
-  `model_math.hpp`) rather than per-unit so the number doesn't extrapolate
-  outside the typically narrow dialed range.
+Per feature:
+
+- **`β/1σ`** — standardized coefficient: change in *log* brew time per one
+  standard deviation of that feature. Compare magnitudes across features to
+  see which carries the most weight; the sign is what to cross-check against
+  the device.
+- **`practical reading`** — the β linearized back into **seconds at the
+  centroid** (`Δt ≈ t_centroid · Δlog t`) in natural units: `per +1 °C`,
+  `per +1 %`, `per +1 hPa`, `per +0.05 grind step`. Quote this one to humans.
+  Grind uses the dial step (`kGrindStep` from `model_math.hpp`) rather than
+  per-unit so the number doesn't extrapolate outside the typically narrow
+  dialed range. It's a *local* linearization — accurate near the centroid,
+  not for big excursions.
+
+R² is reported in log space (it's the fit's own residual share, not a
+seconds-space figure).
 
 At small n (< ~30 shots), trust **signs** more than **magnitudes** —
 correlated regressors (climate axes covary, and you dial differently
 in different climates) let OLS split credit somewhat arbitrarily. The
 device's Bayesian fit handles this better; this tool is the
 sanity-check counterpart, not a replacement.
+
+### Reading the out-of-band block
+
+This replays the device's shot-tip decision on your logged shots. It fits the
+same log-time OLS, predicts each shot's brew time, and flags the ones the
+firmware would tip on — **confident _and_ off-prediction**:
+
+- **gate** — `conf ≥ TIP_CONF_GATE` (80) AND actual/predicted beyond
+  `TIP_BAND_RATIO` (1.40×) or its reciprocal (0.71×). Both constants mirror
+  `model_math.cpp`; change them there and here together.
+- **`log-residual RMS`** — typical miss size, also shown as a ± percentage.
+- **flagged table** — `idx`, actual vs predicted seconds, ratio, conf, and
+  direction (`long` / `fast`).
+
+Two caveats baked into the footer:
+
+- It's an **in-sample** fit, so a lone outlier partly fits itself — its
+  predicted time here is pulled toward the outlier, shrinking the residual.
+  The device judges each shot against a model trained *without* it
+  (assessment runs before the refit), so it can flag a borderline shot this
+  block misses.
+- Plain OLS, no ridge/phantoms, so the predicted seconds approximate the
+  device's but won't match exactly.
 
 ## `svg_to_lvgl.py`
 

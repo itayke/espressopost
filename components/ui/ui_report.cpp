@@ -330,9 +330,17 @@ lv_obj_t* s_submit_btn     = nullptr;
 lv_obj_t* s_submit_label   = nullptr;
 lv_obj_t* s_cancel_btn     = nullptr;
 
-// Toast (transient):
-lv_obj_t* s_toast_label         = nullptr;
-lv_timer_t* s_toast_timer       = nullptr;
+// Popup — one reusable centered card that backs both the transient toast
+// (0 buttons, auto-dismiss) and the out-of-band tip (1 dismiss button), and is
+// ready for a future confirm dialog (2 buttons + input-blocking scrim). Widgets
+// are built once in build_popup() and reconfigured per show_popup() call.
+lv_obj_t*     s_popup_scrim       = nullptr;  // full-screen click-eater + dim, shown only when a popup asks for it
+lv_obj_t*     s_popup_card        = nullptr;  // centered card container
+lv_obj_t*     s_popup_body        = nullptr;  // wrapping body label
+lv_obj_t*     s_popup_btn[2]      = {nullptr, nullptr};
+lv_obj_t*     s_popup_btn_lbl[2]  = {nullptr, nullptr};
+lv_event_cb_t s_popup_btn_cb[2]   = {nullptr, nullptr};  // per-show action, invoked after the card hides
+lv_timer_t*   s_popup_timer       = nullptr;  // auto-dismiss timer (0-button popups only)
 
 // Presets screen (Mode::Presets) — the view (title + 3×3 grid + Back) lives in
 // ui_presets.cpp. ui_report only keeps the group handle (set in start_report
@@ -819,19 +827,207 @@ void switch_mode(Mode target) {
 }
 
 // ---------------------------------------------------------------------------
-// Toast.
+// Popup — reusable centered card (toast / tip / future confirm dialog).
 // ---------------------------------------------------------------------------
-void hide_toast(lv_timer_t* t) {
-  lv_obj_add_flag(s_toast_label, LV_OBJ_FLAG_HIDDEN);
-  lv_timer_delete(t);
-  s_toast_timer = nullptr;
+// Geometry + colors for the card. Kept local to the popup since nothing else
+// references them; the button colors borrow the existing action palette so the
+// popup reads as part of the same UI.
+constexpr int32_t  kPopupCardW      = 320;  // fixed width; height tracks content
+constexpr int32_t  kPopupPad        =  22;
+constexpr int32_t  kPopupGap        =  16;  // body→button-row gap
+constexpr int32_t  kPopupBtnGap     =  14;  // gap between two buttons
+constexpr uint32_t kToastDismissMs  = 1500; // auto-dismiss for the 0-button toast
+const lv_color_t kColorPopupCardBg         = COLOR(0x161616);
+const lv_color_t kColorPopupBorder         = kColorMuted3;
+const lv_color_t kColorPopupBtnNeutral     = kColorText;    // acknowledge / cancel
+const lv_color_t kColorPopupBtnDestructive = kColorCancel;  // delete / discard
+
+enum class PopupBtnStyle { Neutral, Destructive };
+
+struct PopupButton {
+  const char*   text;
+  PopupBtnStyle style;
+  lv_event_cb_t on_tap;  // invoked after the card hides; nullptr = dismiss only
+};
+
+struct PopupConfig {
+  const char* body;
+  uint32_t    auto_dismiss_ms;  // 0 = stay until a button is tapped
+  bool        scrim;            // block + dim the screen behind the card
+  uint8_t     n_buttons;        // 0..2
+  PopupButton buttons[2];
+};
+
+void hide_popup() {
+  if (s_popup_timer) { lv_timer_delete(s_popup_timer); s_popup_timer = nullptr; }
+  lv_obj_add_flag(s_popup_card, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_add_flag(s_popup_scrim, LV_OBJ_FLAG_HIDDEN);
 }
 
+void popup_timer_cb(lv_timer_t*) { hide_popup(); }
+
+// Both buttons share one trampoline each: capture the per-show action, dismiss
+// the card first (so the action can open another screen cleanly), then run it.
+void popup_btn_tapped(int idx, lv_event_t* e) {
+  const lv_event_cb_t cb = s_popup_btn_cb[idx];
+  hide_popup();
+  if (cb) cb(e);
+}
+void popup_btn0_cb(lv_event_t* e) { popup_btn_tapped(0, e); }
+void popup_btn1_cb(lv_event_t* e) { popup_btn_tapped(1, e); }
+
+void show_popup(const PopupConfig& cfg) {
+  lv_label_set_text(s_popup_body, cfg.body);
+
+  for (int i = 0; i < 2; ++i) {
+    if (i < cfg.n_buttons) {
+      const PopupButton& b = cfg.buttons[i];
+      const lv_color_t c = (b.style == PopupBtnStyle::Destructive)
+                               ? kColorPopupBtnDestructive
+                               : kColorPopupBtnNeutral;
+      lv_label_set_text(s_popup_btn_lbl[i], b.text);
+      lv_obj_set_style_border_color(s_popup_btn[i], c, LV_PART_MAIN);
+      lv_obj_set_style_text_color(s_popup_btn_lbl[i], c, LV_PART_MAIN);
+      s_popup_btn_cb[i] = b.on_tap;
+      lv_obj_remove_flag(s_popup_btn[i], LV_OBJ_FLAG_HIDDEN);
+    } else {
+      s_popup_btn_cb[i] = nullptr;
+      lv_obj_add_flag(s_popup_btn[i], LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+  // Collapse the whole button row (the buttons' shared parent) for a 0-button
+  // toast so it doesn't leave an empty gap below the body text.
+  lv_obj_t* row = lv_obj_get_parent(s_popup_btn[0]);
+  if (cfg.n_buttons == 0) lv_obj_add_flag(row, LV_OBJ_FLAG_HIDDEN);
+  else                    lv_obj_remove_flag(row, LV_OBJ_FLAG_HIDDEN);
+
+  if (cfg.scrim) {
+    lv_obj_move_foreground(s_popup_scrim);
+    lv_obj_remove_flag(s_popup_scrim, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_add_flag(s_popup_scrim, LV_OBJ_FLAG_HIDDEN);
+  }
+  lv_obj_move_foreground(s_popup_card);  // always above the scrim (and the UI)
+  lv_obj_remove_flag(s_popup_card, LV_OBJ_FLAG_HIDDEN);
+
+  if (s_popup_timer) { lv_timer_delete(s_popup_timer); s_popup_timer = nullptr; }
+  if (cfg.auto_dismiss_ms > 0) {
+    s_popup_timer = lv_timer_create(popup_timer_cb, cfg.auto_dismiss_ms, nullptr);
+  }
+}
+
+// Back-compat shim: the old transient "toast" is just a 0-button, auto-dismiss,
+// no-scrim popup. Callers that only want a quick status line keep using this.
 void show_toast(const char* text) {
-  lv_label_set_text(s_toast_label, text);
-  lv_obj_remove_flag(s_toast_label, LV_OBJ_FLAG_HIDDEN);
-  if (s_toast_timer) lv_timer_delete(s_toast_timer);
-  s_toast_timer = lv_timer_create(hide_toast, 1500, nullptr);
+  show_popup(PopupConfig{text, kToastDismissMs, /*scrim=*/false, 0, {}});
+}
+
+// Build the popup widget tree once (called from start_report, topmost in
+// z-order). show_popup() only flips visibility / text / colors afterward.
+void build_popup(lv_obj_t* scr) {
+  // Scrim: full-screen click-eater + dim behind the card. Hidden unless a
+  // popup asks for it (confirm dialogs); toast/tip leave it hidden so the UI
+  // behind stays live and non-modal.
+  s_popup_scrim = lv_obj_create(scr);
+  lv_obj_set_size(s_popup_scrim, kScreen, kScreen);
+  lv_obj_set_pos(s_popup_scrim, 0, 0);
+  lv_obj_set_style_bg_color(s_popup_scrim, kColorBg, LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(s_popup_scrim, LV_OPA_50, LV_PART_MAIN);
+  lv_obj_set_style_border_width(s_popup_scrim, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(s_popup_scrim, 0, LV_PART_MAIN);
+  lv_obj_set_style_radius(s_popup_scrim, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(s_popup_scrim, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(s_popup_scrim, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_flag(s_popup_scrim, LV_OBJ_FLAG_HIDDEN);
+
+  // Card: centered, fixed width, height tracks content. Vertical flex stacks
+  // the wrapping body label over the button row.
+  s_popup_card = lv_obj_create(scr);
+  lv_obj_set_width(s_popup_card, kPopupCardW);
+  lv_obj_set_height(s_popup_card, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_color(s_popup_card, kColorPopupCardBg, LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(s_popup_card, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_radius(s_popup_card, kPopupPad, LV_PART_MAIN);
+  lv_obj_set_style_border_color(s_popup_card, kColorPopupBorder, LV_PART_MAIN);
+  lv_obj_set_style_border_width(s_popup_card, 2, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(s_popup_card, kPopupPad, LV_PART_MAIN);
+  lv_obj_set_style_pad_row(s_popup_card, kPopupGap, LV_PART_MAIN);
+  lv_obj_set_style_shadow_width(s_popup_card, 0, LV_PART_MAIN);
+  lv_obj_set_flex_flow(s_popup_card, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(s_popup_card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+  lv_obj_clear_flag(s_popup_card, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_align(s_popup_card, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_add_flag(s_popup_card, LV_OBJ_FLAG_HIDDEN);
+
+  s_popup_body = lv_label_create(s_popup_card);
+  lv_obj_set_width(s_popup_body, kPopupCardW - 2 * kPopupPad);
+  lv_label_set_long_mode(s_popup_body, LV_LABEL_LONG_WRAP);
+  // Amber body — carries over the old toast's accent and reads as "attention"
+  // for the out-of-band tip.
+  lv_obj_set_style_text_color(s_popup_body, kColorToast, LV_PART_MAIN);
+  lv_obj_set_style_text_font(s_popup_body, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_text_align(s_popup_body, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+
+  // Button row — up to two outline pills (same idiom as the Cancel/Submit
+  // pills); each hides when unused, and the whole row hides for 0-button toasts.
+  lv_obj_t* row = lv_obj_create(s_popup_card);
+  lv_obj_set_size(row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+  lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(row, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(row, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_column(row, kPopupBtnGap, LV_PART_MAIN);
+  lv_obj_set_style_shadow_width(row, 0, LV_PART_MAIN);
+  lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+  lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+
+  const lv_event_cb_t btn_cbs[2] = {popup_btn0_cb, popup_btn1_cb};
+  for (int i = 0; i < 2; ++i) {
+    lv_obj_t* b = lv_button_create(row);
+    lv_obj_set_size(b, kPostBtnW, kPostBtnH);
+    lv_obj_set_style_radius(b, kPostBtnH / 2, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(b, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_shadow_width(b, 0, LV_PART_MAIN);
+    lv_obj_set_style_border_width(b, kPostBtnStroke, LV_PART_MAIN);
+    lv_obj_set_style_border_opa(b, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_ext_click_area(b, kPostBtnExtClick);
+    lv_obj_add_event_cb(b, btn_cbs[i], LV_EVENT_CLICKED, nullptr);
+    lv_obj_t* lbl = lv_label_create(b);
+    lv_obj_set_style_text_font(lbl, &lv_font_montserrat_24, LV_PART_MAIN);
+    lv_obj_center(lbl);
+    s_popup_btn[i]     = b;
+    s_popup_btn_lbl[i] = lbl;
+    lv_obj_add_flag(b, LV_OBJ_FLAG_HIDDEN);
+  }
+}
+
+// Out-of-band tip: a 1-button ("Got it") informational popup shown after a
+// saved shot whose actual time defied a confident prediction. Direction-aware
+// copy with the actual-vs-expected numbers; the cause list stays a menu (we
+// don't claim which one), matching the diagnostic, non-prescriptive intent.
+void show_out_of_band_tip(const model::ShotAssessment& a, uint8_t actual_s) {
+  const int pred = static_cast<int>(std::lround(a.predicted_time_s));
+  char body[160];
+  if (a.verdict == model::ShotVerdict::RanLong) {
+    std::snprintf(body, sizeof(body),
+                  "Pull ran long — %us vs ~%ds expected.\n"
+                  "Check dose, grind, or backflush.",
+                  static_cast<unsigned>(actual_s), pred);
+  } else {  // RanShort
+    std::snprintf(body, sizeof(body),
+                  "Pull ran fast — %us vs ~%ds expected.\n"
+                  "Possible channeling or coarse grind.",
+                  static_cast<unsigned>(actual_s), pred);
+  }
+  PopupConfig cfg{};
+  cfg.body            = body;
+  cfg.auto_dismiss_ms = 0;      // stays until acknowledged
+  cfg.scrim           = false;  // non-modal; the UI behind stays live
+  cfg.n_buttons       = 1;
+  cfg.buttons[0]      = PopupButton{"Got it", PopupBtnStyle::Neutral, nullptr};
+  show_popup(cfg);
 }
 
 // ---------------------------------------------------------------------------
@@ -979,11 +1175,25 @@ void on_submit(lv_event_t*) {
     return;
   }
 
-  char buf[24];
-  std::snprintf(buf, sizeof(buf), "Saved #%u",
-                static_cast<unsigned>(storage::shot_count()));
-  show_toast(buf);
+  // Judge this shot against the CURRENT fit — must happen BEFORE refit() folds
+  // it in, so it's measured against the model that produced the suggestion the
+  // user saw. Conservative + confidence-gated inside model::assess_shot.
+  const model::ShotAssessment assessment = model::assess_shot(rec);
+
   switch_mode(Mode::Idle);
+
+  // Out-of-band shots get the diagnostic tip (stays until acknowledged); normal
+  // shots get the usual transient "Saved #N" toast. Shown after the mode swap
+  // so the popup card foregrounds above the swap block.
+  if (assessment.verdict == model::ShotVerdict::InBand) {
+    char buf[24];
+    std::snprintf(buf, sizeof(buf), "Saved #%u",
+                  static_cast<unsigned>(storage::shot_count()));
+    show_toast(buf);
+  } else {
+    show_out_of_band_tip(assessment, rec.actual_time_s);
+  }
+
   // New data point — refit and refresh so the arrow reflects what we just
   // learned the next climate tick (cheap on our data volumes; inline keeps
   // UI deterministic vs deferring to a background task).
@@ -2738,12 +2948,6 @@ void start_report() {
   // back to the grid, Save → persist + back to the grid.
   s_edit_group = preset_edit::build(scr, on_edit_cancel_tap, on_edit_save_tap);
 
-  s_toast_label = lv_label_create(scr);
-  lv_obj_set_style_text_color(s_toast_label, kColorToast, LV_PART_MAIN);
-  lv_obj_set_style_text_font(s_toast_label, &lv_font_montserrat_14, LV_PART_MAIN);
-  lv_obj_align(s_toast_label, LV_ALIGN_TOP_MID, 0, 30);
-  lv_obj_add_flag(s_toast_label, LV_OBJ_FLAG_HIDDEN);
-
   // Mode-swap input block — full-screen transparent click-eater, hidden until a
   // cross-fade brings it to the foreground (see animate_mode_swap). Clickable so
   // it intercepts taps rather than passing them through to the fading groups.
@@ -2756,6 +2960,10 @@ void start_report() {
   lv_obj_clear_flag(s_swap_block, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(s_swap_block, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_flag(s_swap_block, LV_OBJ_FLAG_HIDDEN);
+
+  // Popup (toast / tip / future confirm) — built last so its scrim + card sit
+  // topmost in z-order, above even the mode-swap block. show_popup() reveals it.
+  build_popup(scr);
 
   // Seed grind value from per-preset NVS; clamp in case older firmware stored
   // something outside the new ring's range.

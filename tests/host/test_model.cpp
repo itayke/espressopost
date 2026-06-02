@@ -71,10 +71,13 @@ std::vector<FitSample> synth_grind_slope(int n,
   return out;
 }
 
-// De-standardize a fitted β_g back to grinder-dial units (∂y/∂g in real
-// space). Used by tests that want to compare against the synthetic slope.
+// De-standardize a fitted β_g back to a LOCAL seconds-per-dial-unit slope at
+// the fit's centroid. The model regresses LOG time, so β_g·std_y/std_g is
+// ∂(log t)/∂g; multiplying by the centroid time exp(mean_y) gives the familiar
+// ∂t/∂g (chain rule at the mean) the synthetic fixtures were written against.
+// Sign is preserved (exp > 0), so direction tests are unaffected.
 float real_grind_slope(const PresetFit& f) {
-  return f.beta[0] * f.std_y / f.std_g;
+  return std::exp(f.mean_y) * f.beta[0] * f.std_y / f.std_g;
 }
 
 }  // namespace
@@ -384,14 +387,15 @@ TEST_CASE("real-data: quality-weighted target converges to baseline when all sho
 
 TEST_CASE("real-data: target that exactly matches mean_y returns the centroid grind",
           "[real-data]") {
-  // Sanity probe — if you set the target equal to mean_y (the weighted mean
-  // brew time across real + phantom shots), target_y_z = 0, so the solver
-  // should suggest exactly mean_g. Isolates "what does the model think is
-  // the centroid?" from any climate extrapolation effect.
+  // Sanity probe — set the target to exp(mean_y). mean_y is the weighted mean
+  // of LOG brew time, so exp(mean_y) is the geometric-mean brew time in
+  // seconds; passing it makes target_y_z = 0, so the solver should suggest
+  // exactly mean_g modulo the climate term. Isolates "what does the model think
+  // is the centroid?" from any climate extrapolation effect.
   PresetFit f = fit(kRealShots, kRealN);
   REQUIRE(f.valid);
 
-  Suggestion s = suggest(f, kLiveClimate, /*target=*/f.mean_y);
+  Suggestion s = suggest(f, kLiveClimate, /*target=*/std::exp(f.mean_y));
   INFO("mean_y=" << f.mean_y << "  mean_g=" << f.mean_g
        << "  suggested=" << s.grind
        << "  T_z=" << (kLiveClimate.temp_c - f.mean_T) / f.std_T);
@@ -510,4 +514,98 @@ TEST_CASE("real-data: target = recent-shots quality-weighted mean (last 3)",
   // With the recent-only target, suggestion should be noticeably higher
   // (coarser) than the all-shots baseline.
   REQUIRE(std::isfinite(s.grind));
+}
+
+// -----------------------------------------------------------------------------
+// predict_time_s() — forward evaluation (log model → seconds)
+// -----------------------------------------------------------------------------
+
+TEST_CASE("predict_time_s recovers the training brew time at the centroid",
+          "[predict]") {
+  // Shots centered on kTestTargetS (30s) at g_center under kTypicalClimate, so
+  // predicting at that same operating point should land near 30s.
+  auto shots = synth_grind_slope(/*n=*/30, 5.5f, 1.0f, -2.0f, kTypicalClimate,
+                                 /*noise=*/0.5f);
+  PresetFit f = fit(shots.data(), shots.size());
+  REQUIRE(f.valid);
+  const float p = predict_time_s(f, kTypicalClimate, 5.5f);
+  INFO("predicted=" << p);
+  REQUIRE(p > 26.0f);
+  REQUIRE(p < 34.0f);
+}
+
+TEST_CASE("predict_time_s is monotone: finer grind → longer predicted time",
+          "[predict]") {
+  auto shots = synth_grind_slope(30, 5.5f, 1.0f, -2.0f, kTypicalClimate, 0.5f);
+  PresetFit f = fit(shots.data(), shots.size());
+  REQUIRE(f.valid);
+  REQUIRE(predict_time_s(f, kTypicalClimate, 5.0f)
+        > predict_time_s(f, kTypicalClimate, 6.0f));
+}
+
+TEST_CASE("predict_time_s returns NaN for an invalid fit", "[predict]") {
+  PresetFit f = fit(nullptr, 0);
+  REQUIRE(std::isnan(predict_time_s(f, kTypicalClimate, 5.5f)));
+}
+
+// -----------------------------------------------------------------------------
+// classify_shot() — out-of-band tip gating (confidence gate × log-ratio band)
+// -----------------------------------------------------------------------------
+
+TEST_CASE("classify_shot flags a long shot only when confident", "[classify]") {
+  auto shots = synth_grind_slope(30, 5.5f, 1.0f, -2.0f, kTypicalClimate, 0.5f);
+  PresetFit f = fit(shots.data(), shots.size());
+  REQUIRE(f.valid);
+  const float pred = predict_time_s(f, kTypicalClimate, 5.5f);  // ~30s
+  const float long_shot = pred * 1.8f;  // well past the 1.4x band
+
+  // Confident + far out of band → flagged long.
+  REQUIRE(classify_shot(f, kTypicalClimate, 5.5f, long_shot, 95)
+          == ShotVerdict::RanLong);
+  // Same deviation, low confidence → suppressed by the gate.
+  REQUIRE(classify_shot(f, kTypicalClimate, 5.5f, long_shot, 50)
+          == ShotVerdict::InBand);
+}
+
+TEST_CASE("classify_shot stays quiet inside the band even at full confidence",
+          "[classify]") {
+  auto shots = synth_grind_slope(30, 5.5f, 1.0f, -2.0f, kTypicalClimate, 0.5f);
+  PresetFit f = fit(shots.data(), shots.size());
+  const float pred = predict_time_s(f, kTypicalClimate, 5.5f);
+  // ±~20% — inside the 1.4x (≈±40%) band either way.
+  REQUIRE(classify_shot(f, kTypicalClimate, 5.5f, pred * 1.2f, 95)
+          == ShotVerdict::InBand);
+  REQUIRE(classify_shot(f, kTypicalClimate, 5.5f, pred * 0.85f, 95)
+          == ShotVerdict::InBand);
+}
+
+TEST_CASE("classify_shot flags a fast shot as RanShort", "[classify]") {
+  auto shots = synth_grind_slope(30, 5.5f, 1.0f, -2.0f, kTypicalClimate, 0.5f);
+  PresetFit f = fit(shots.data(), shots.size());
+  const float pred = predict_time_s(f, kTypicalClimate, 5.5f);
+  REQUIRE(classify_shot(f, kTypicalClimate, 5.5f, pred * 0.5f, 95)
+          == ShotVerdict::RanShort);
+}
+
+TEST_CASE("classify_shot suppresses on an invalid fit regardless of deviation",
+          "[classify]") {
+  PresetFit f = fit(nullptr, 0);
+  REQUIRE(classify_shot(f, kTypicalClimate, 5.5f, 999.0f, 95)
+          == ShotVerdict::InBand);
+}
+
+TEST_CASE("classify_shot: the real 53s outlier reads as RanLong at high conf",
+          "[classify][real-data]") {
+  // Reproduces the user's shot #32: grind 5.10 at mid climate, but the pull ran
+  // 53s — well over the model's expectation. Fit the 7-shot fixture, predict at
+  // that operating point, and confirm a 53s actual at the recorded conf=95
+  // trips the long-shot tip while the prediction itself stays plausible.
+  PresetFit f = fit(kRealShots, kRealN);
+  REQUIRE(f.valid);
+  const ClimateInput climate = {22.97f, 42.35f, 1004.85f};
+  const float pred = predict_time_s(f, climate, 5.10f);
+  INFO("predicted=" << pred << "s vs actual 53s");
+  REQUIRE(pred > 20.0f);
+  REQUIRE(pred < 45.0f);
+  REQUIRE(classify_shot(f, climate, 5.10f, 53.0f, 95) == ShotVerdict::RanLong);
 }

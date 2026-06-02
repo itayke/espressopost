@@ -5,6 +5,8 @@
 #include "esp_err.h"
 #include "model_math.hpp"  // pulls in Suggestion + the rest of the pure-math types
 
+namespace espressopost::storage { struct ShotRecord; }
+
 namespace espressopost::model {
 
 // IDF-bound API. The pure math (fit + suggest, defined in model_math.hpp) is
@@ -37,5 +39,23 @@ void refit();
 //   - posterior predictive variance is above the display threshold
 //   - climate sensor hasn't reported yet (timestamp_us == 0)
 Suggestion suggest_for_preset(uint8_t preset_id);
+
+// Result of comparing a just-finished shot against what the model predicted for
+// it — drives the out-of-band tip on the Report screen. `predicted_time_s` is
+// the model's expected brew time in seconds (NaN if there was no usable fit),
+// handy for the tip copy ("53s vs ~33s expected").
+struct ShotAssessment {
+  ShotVerdict verdict;
+  float       predicted_time_s;
+};
+
+// Assess a just-appended shot against the CURRENT fits. MUST be called BEFORE
+// refit(), so the fits still reflect the model that produced the suggestion the
+// user saw — the shot is judged against what the model knew *before* it was
+// added, not after. Reads the fit for rec.preset_id under the same lock as
+// refit(), using the record's own grind + climate + recorded confidence.
+// Returns {InBand, NaN} when there's no usable fit or the model wasn't
+// confident (see model_math::classify_shot for the gating).
+ShotAssessment assess_shot(const storage::ShotRecord& rec);
 
 }  // namespace espressopost::model
