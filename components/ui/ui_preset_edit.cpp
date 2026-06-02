@@ -44,6 +44,12 @@ constexpr int32_t kBrewCenterY   = 340;
 constexpr int32_t kCaptionDY     = 46;   // caption top above each stepper center
 constexpr int32_t kStepperValueExtClick = 28;  // hit area around the "--"/value
 
+// Down-arrow between the two weight steppers — the readout's "→" glyph rotated
+// vertical, centered between the In and Out rows. Marks the In → Out flow.
+constexpr int32_t kWeightArrowW = 12;
+constexpr int32_t kWeightArrowH = 16;
+constexpr int32_t kWeightArrowY = (kInCenterY + kOutCenterY) / 2 - 12;  // row midpoint
+
 // Color swatches — two vertical columns (5 each) down the left/right edges,
 // flanking the steppers. Straight columns down the sides leave the whole height
 // for the swatches, so they can run bigger than a single bottom row. The column
@@ -87,6 +93,7 @@ const lv_color_t kColorSaveDisabled = kColorMuted3;
 const lv_color_t kColorEditTitle    = kColorText;
 const lv_color_t kColorCaption      = COLOR(0xB0B0B0);  // small all-caps headers
 const lv_color_t kColorSwatchSel    = COLOR(0xFFFFFF);  // outline on the chosen swatch
+const lv_color_t kColorWeightArrow  = kColorCaption;    // In→Out flow arrow
 
 // Shared value font for every editor readout (Weight In/Out + brew time).
 const lv_font_t* const kEditValueFont = &lv_font_montserrat_36;
@@ -106,23 +113,34 @@ lv_obj_t* s_save_btn    = nullptr;
 presets::Preset s_loaded        = {};   // the slot's prior data (zeros if empty)
 bool            s_loaded_active = false;
 int             s_color_idx     = -1;   // selected palette index, -1 = none
+bool            s_dirty         = false;  // a field changed since load → Save armed
 
-// 10 swatches + 9 chrome (title, 3 captions, 3 stepper rows, 2 pills).
-lv_obj_t* s_fade[kNumSwatches + 9] = {};
+// 10 swatches + 10 chrome (title, 3 captions, 3 stepper rows, In→Out arrow,
+// 2 pills).
+lv_obj_t* s_fade[kNumSwatches + 10] = {};
 int       s_fade_n = 0;
 
 // ---- Helpers --------------------------------------------------------------
-// Save lights only once a color is chosen AND all three steppers are set — both
-// the outline AND the "Save ›" label recolor (the label was tinted to the
-// disabled grey at build time, so it has to follow).
+// Save lights only once the form is complete (a color chosen AND all three
+// steppers set) AND something has actually changed since load — so editing an
+// existing preset keeps Save dark until the first edit. Both the outline AND the
+// "Save ›" label recolor (the label was tinted to the disabled grey at build
+// time, so it has to follow).
 void refresh_save_enabled() {
   if (s_save_btn == nullptr) return;
-  const bool ready = (s_color_idx >= 0) && s_in.touched && s_out.touched &&
-                     s_time.touched;
+  const bool ready = s_dirty && (s_color_idx >= 0) && s_in.touched &&
+                     s_out.touched && s_time.touched;
   const lv_color_t c = ready ? kColorSaveEnabled : kColorSaveDisabled;
   lv_obj_set_style_border_color(s_save_btn, c, LV_PART_MAIN);
   lv_obj_t* lbl = lv_obj_get_child(s_save_btn, 0);
   if (lbl) lv_obj_set_style_text_color(lbl, c, LV_PART_MAIN);
+}
+
+// Any edit (a stepper tap or a swatch pick) arms Save. Wired as the steppers'
+// on_change and called from the swatch handler.
+void mark_dirty() {
+  s_dirty = true;
+  refresh_save_enabled();
 }
 
 // Tint the "PRESET N" title to the chosen swatch (or the neutral title color
@@ -161,7 +179,7 @@ void on_swatch_tap(lv_event_t* e) {
       lv_obj_get_user_data(static_cast<lv_obj_t*>(lv_event_get_target(e)))));
   s_color_idx = idx;
   apply_swatch_visuals();
-  refresh_save_enabled();
+  mark_dirty();
 }
 
 // Map a stored color back to its palette index, or -1 if it isn't one of ours
@@ -224,6 +242,44 @@ void build_weight_stepper(lv_obj_t* parent, StepperState* st, const char* captio
   *out_row = row;
 }
 
+// Short downward arrow (the readout's right-arrow rotated vertical): a stem plus
+// a V head opening down, centered on (kCenter, kWeightArrowY). Custom lv_line
+// strokes (house style), so it fades cleanly with the rest.
+lv_obj_t* build_weight_arrow(lv_obj_t* parent) {
+  constexpr int32_t kStroke = 3;
+  constexpr float   midX    = kWeightArrowW / 2.0f;  // LV_USE_FLOAT is on
+  // Static so the vertex buffers outlive the call — lv_line keeps the pointer.
+  static lv_point_precise_t stem_pts[] = {
+      {midX, 0},
+      {midX, kWeightArrowH - 4},
+  };
+  static lv_point_precise_t head_pts[] = {
+      {2,                 kWeightArrowH - 4},
+      {midX,              kWeightArrowH - 1},
+      {kWeightArrowW - 2, kWeightArrowH - 4},
+  };
+
+  lv_obj_t* c = lv_obj_create(parent);
+  lv_obj_set_size(c, kWeightArrowW, kWeightArrowH);
+  lv_obj_set_style_bg_opa(c, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(c, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(c, 0, LV_PART_MAIN);
+  lv_obj_clear_flag(c, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_clear_flag(c, LV_OBJ_FLAG_SCROLLABLE);
+
+  auto stroke = [&](const lv_point_precise_t* pts, uint32_t n) {
+    lv_obj_t* line = lv_line_create(c);
+    lv_line_set_points(line, pts, n);
+    lv_obj_set_style_line_color(line, kColorWeightArrow, LV_PART_MAIN);
+    lv_obj_set_style_line_width(line, kStroke, LV_PART_MAIN);
+    lv_obj_set_style_line_rounded(line, true, LV_PART_MAIN);
+  };
+  stroke(stem_pts, 2);
+  stroke(head_pts, 3);
+  lv_obj_align(c, LV_ALIGN_TOP_MID, 0, kWeightArrowY - kWeightArrowH / 2);
+  return c;
+}
+
 }  // namespace
 
 lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_cancel, lv_event_cb_t on_save) {
@@ -248,7 +304,7 @@ lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_cancel, lv_event_cb_t on_save) {
   s_in.min  = kDoseMin;   s_in.max  = kDoseMax;   s_in.unit  = 'g';
   s_out.min = kYieldMin;  s_out.max = kYieldMax;  s_out.unit = 'g';
   s_time.min = kBrewTimeMin; s_time.max = kBrewTimeMax; s_time.unit = 's';
-  s_in.on_change = s_out.on_change = s_time.on_change = refresh_save_enabled;
+  s_in.on_change = s_out.on_change = s_time.on_change = mark_dirty;
 
   lv_obj_t* in_cap;   lv_obj_t* in_row;
   lv_obj_t* out_cap;  lv_obj_t* out_row;
@@ -256,6 +312,7 @@ lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_cancel, lv_event_cb_t on_save) {
   build_weight_stepper(group, &s_in,   "WEIGHT IN",  kInCenterY,   &in_cap,   &in_row);
   build_weight_stepper(group, &s_out,  "WEIGHT OUT", kOutCenterY,  &out_cap,  &out_row);
   build_weight_stepper(group, &s_time, "BREW TIME",  kBrewCenterY, &brew_cap, &brew_row);
+  lv_obj_t* flow_arrow = build_weight_arrow(group);
 
   // Color swatches — two vertical columns (left = 0..4, right = 5..9), each
   // centered vertically on screen at kSwatchPitch spacing. Left column hugs
@@ -296,6 +353,7 @@ lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_cancel, lv_event_cb_t on_save) {
   s_fade[s_fade_n++] = s_title;
   s_fade[s_fade_n++] = in_cap;
   s_fade[s_fade_n++] = in_row;
+  s_fade[s_fade_n++] = flow_arrow;
   s_fade[s_fade_n++] = out_cap;
   s_fade[s_fade_n++] = out_row;
   s_fade[s_fade_n++] = brew_cap;
@@ -335,6 +393,10 @@ void load(uint8_t slot) {
   // Color: match the stored accent to a swatch (active slots always match).
   s_color_idx = s_loaded_active ? palette_index_of(s_loaded.color) : -1;
   apply_swatch_visuals();
+
+  // Fresh form — Save stays dark until the first edit (an existing preset loads
+  // complete + valid, so without this it would arm immediately).
+  s_dirty = false;
   refresh_save_enabled();
 }
 
@@ -352,6 +414,7 @@ bool gather(presets::Preset* out) {
   p.target_time_s = s_time.value;
   p.color         = kPalette[s_color_idx];
   *out = p;
+  s_dirty = false;  // committed — disarm Save until the next edit
   return true;
 }
 
