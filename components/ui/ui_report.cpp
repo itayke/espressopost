@@ -435,7 +435,7 @@ struct ArrowState {
 constexpr int32_t kCursorWidget            = 20;
 constexpr int32_t kCursorArrowHalfBase     = 10;
 constexpr int32_t kCursorArrowHeight       = 24;
-constexpr int32_t kCursorTipGap            = 15;
+constexpr int32_t kCursorTipGap            = 17;
 constexpr int32_t kSuggestionArrowHalfBase = 6;
 constexpr int32_t kSuggestionArrowHeight   = 14;
 constexpr int32_t kSuggestionArrowTipGap   = 0;
