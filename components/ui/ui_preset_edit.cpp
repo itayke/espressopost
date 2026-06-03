@@ -84,16 +84,16 @@ constexpr int32_t kDeleteBtnBottomInset = kBtnBottomInset + (kPostBtnH - kDelete
 // Palette — 10 distinct hues kept off max intensity (AMOLED burn-in / matches
 // the kColorText grey at the end). gather() stores the chosen entry verbatim.
 constexpr uint32_t kPalette[kNumSwatches] = {
-    0xC88036,  // amber
-    0xE07055,  // coral
-    0xCC4444,  // red
-    0xC056A0,  // magenta
-    0x8060C0,  // violet
-    0x60A8E0,  // blue
-    0x40A0A0,  // teal
-    0x5AA85A,  // green
-    0x9CB84A,  // lime
-    0xE0E0E0,  // light grey (the seeded default)
+    0xE0E0E0,  // default
+    0xD4B358,
+    0xC08A4E,
+    0x8C6239,
+    0x5C3A21, 
+    0xAF3C1F,
+    0xC056A0,
+    0x8060C0,
+    0x40A0A0,
+    0x9CB84A,
 };
 
 // Action-pill colors — own consts (Cancel = warm "undo", Save borrows the
