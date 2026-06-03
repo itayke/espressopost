@@ -450,6 +450,87 @@ uint32_t shot_count() {
   return static_cast<uint32_t>(st.st_size / sizeof(ShotRecord));
 }
 
+uint32_t shot_count_for_preset(uint8_t preset_id) {
+  if (!s_mounted) return 0;
+
+  Guard g;
+  if (!g.ok) return 0;
+
+  FILE* f = std::fopen(kShotsPath, "rb");
+  if (!f) return 0;  // no shots yet — not an error
+
+  uint32_t n = 0;
+  ShotRecord r = {};
+  while (std::fread(&r, sizeof(r), 1, f) == 1) {
+    if (r.preset_id == preset_id && !(r.flags & kFlagTombstone)) ++n;
+  }
+  std::fclose(f);
+  return n;
+}
+
+esp_err_t purge_preset_shots(uint8_t preset_id) {
+  if (!s_mounted) return ESP_ERR_INVALID_STATE;
+
+  Guard g;
+  if (!g.ok) return ESP_ERR_TIMEOUT;
+
+  struct stat st = {};
+  if (stat(kShotsPath, &st) != 0 || st.st_size == 0) return ESP_OK;  // nothing logged
+
+  FILE* in = std::fopen(kShotsPath, "rb");
+  if (!in) {
+    ESP_LOGE(kTag, "purge: open %s for read failed", kShotsPath);
+    return ESP_FAIL;
+  }
+
+  // Same temp-file-then-rename safety as the migrations: build the survivors in
+  // shots.bin.tmp and only swap it in once the whole file is rewritten.
+  unlink(kShotsTmpPath);
+  FILE* out = std::fopen(kShotsTmpPath, "wb");
+  if (!out) {
+    std::fclose(in);
+    ESP_LOGE(kTag, "purge: open %s for write failed", kShotsTmpPath);
+    return ESP_FAIL;
+  }
+
+  size_t kept = 0, dropped = 0;
+  ShotRecord r = {};
+  while (std::fread(&r, sizeof(r), 1, in) == 1) {
+    if (r.preset_id == preset_id) { ++dropped; continue; }
+    if (std::fwrite(&r, 1, sizeof(r), out) != sizeof(r)) {
+      ESP_LOGE(kTag, "purge: short write");
+      std::fclose(in);
+      std::fclose(out);
+      unlink(kShotsTmpPath);
+      return ESP_FAIL;
+    }
+    ++kept;
+  }
+  std::fflush(out);
+  const int outfd = fileno(out);
+  if (outfd >= 0) fsync(outfd);
+  std::fclose(out);
+  std::fclose(in);
+
+  if (dropped == 0) {
+    unlink(kShotsTmpPath);  // nothing matched — leave the original untouched
+    return ESP_OK;
+  }
+
+  // Renaming an empty temp file (kept == 0) is fine: shots.bin becomes 0 bytes,
+  // which shot_count() reads as an empty log.
+  if (std::rename(kShotsTmpPath, kShotsPath) != 0) {
+    ESP_LOGE(kTag, "purge: rename failed");
+    unlink(kShotsTmpPath);
+    return ESP_FAIL;
+  }
+
+  ESP_LOGW(kTag, "purged %u shots for preset %u (%u kept)",
+           static_cast<unsigned>(dropped), static_cast<unsigned>(preset_id),
+           static_cast<unsigned>(kept));
+  return ESP_OK;
+}
+
 size_t read_shots(ShotRecord* out, size_t max) {
   if (!s_mounted || out == nullptr || max == 0) return 0;
 

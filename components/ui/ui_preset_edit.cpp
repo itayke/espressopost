@@ -38,9 +38,9 @@ constexpr int32_t kBrewTimeDef = 30;    // seeded so the first tap shows 30s
 // must clear the bottom pills (pill tops at ~y392).
 constexpr int32_t kStepperBtnDX  = 86;   // discs ±this from row center
 constexpr int32_t kStepperHalfH  = (kPostBtnH + 2 * kPostBtnExtClick) / 2;
-constexpr int32_t kInCenterY     = 120;
-constexpr int32_t kOutCenterY    = 230;
-constexpr int32_t kBrewCenterY   = 340;
+constexpr int32_t kInCenterY     = 118;
+constexpr int32_t kOutCenterY    = 222;
+constexpr int32_t kBrewCenterY   = 326;
 constexpr int32_t kCaptionDY     = 46;   // caption top above each stepper center
 constexpr int32_t kStepperValueExtClick = 28;  // hit area around the "--"/value
 
@@ -48,7 +48,7 @@ constexpr int32_t kStepperValueExtClick = 28;  // hit area around the "--"/value
 // vertical, centered between the In and Out rows. Marks the In → Out flow.
 constexpr int32_t kWeightArrowW = 12;
 constexpr int32_t kWeightArrowH = 16;
-constexpr int32_t kWeightArrowY = (kInCenterY + kOutCenterY) / 2 - 12;  // row midpoint
+constexpr int32_t kWeightArrowY = (kInCenterY + kOutCenterY) / 2 - 14;  // row midpoint
 
 // Color swatches — two vertical columns (5 each) down the left/right edges,
 // flanking the steppers. Straight columns down the sides leave the whole height
@@ -63,21 +63,23 @@ constexpr int32_t kSwatchPitch   = 60;    // vertical center-to-center
 constexpr int32_t kSwatchColX    = 70;    // left column center x (right mirrors)
 constexpr int32_t kSwatchSelStroke = 2;   // white outline on the chosen swatch
 
-// Bottom actions — a circular ✕ Cancel disc + a snug Save › pill, paired at
-// center with a small gap (narrow buttons clear the round edge cleanly).
-constexpr int32_t kBtnBottomInset = 16;
+// Bottom actions — a row of [ 🗑 trash | ✕ Cancel | Save › ], centered as one
+// block with even gaps. The trash disc only shows for an existing slot (load()
+// toggles it and re-centers the row via layout_bottom_row): with the trash the
+// block is all three, without it Cancel/Save center as a pair. kBtnBottomInset is
+// raised enough that the wider three-button block still clears the round bottom
+// arc.
+constexpr int32_t kBtnBottomInset = 26;
 constexpr int32_t kCancelBtnDiam  = kPostBtnH;  // circular ✕ disc
 constexpr int32_t kSaveBtnW       = 110;        // just wide enough for "Save ›"
-constexpr int32_t kBtnGap         = 12;         // between Cancel and Save
+constexpr int32_t kBtnGap         = 12;         // between adjacent bottom buttons
 
-// Delete affordance — a small circular trash disc top-right, beside the title.
+// Delete affordance — a small circular trash disc at the bottom, left of Cancel.
 // Built once; load() shows it only for an existing (active) slot, since a fresh
-// slot has nothing to delete. Tucked into the right of the top arc, clear of the
-// centered title and above the WEIGHT IN caption. ui_report owns the CLICKED
-// handler (the confirm popup + the actual clear).
-constexpr int32_t kDeleteBtnDiam = 44;
-constexpr int32_t kDeleteBtnDX   = 96;   // center x, right of the centered title
-constexpr int32_t kDeleteBtnY    = 26;   // top inset — clears the arc
+// slot has nothing to delete. ui_report owns the CLICKED handler (the confirm
+// popup + the actual clear).
+constexpr int32_t kDeleteBtnDiam = kPostBtnH;
+constexpr int32_t kDeleteBtnBottomInset = kBtnBottomInset + (kPostBtnH - kDeleteBtnDiam) / 2;
 
 // Palette — 10 distinct hues kept off max intensity (AMOLED burn-in / matches
 // the kColorText grey at the end). gather() stores the chosen entry verbatim.
@@ -99,7 +101,7 @@ constexpr uint32_t kPalette[kNumSwatches] = {
 const lv_color_t kColorCancel       = COLOR(0xE07055);
 const lv_color_t kColorSaveEnabled  = COLOR(0x60A8E0);
 const lv_color_t kColorSaveDisabled = kColorMuted3;
-const lv_color_t kColorDelete       = COLOR(0xCC4444);  // trash disc — red, distinct from coral Cancel
+const lv_color_t kColorDelete       = COLOR(0x5A1207);  // trash disc
 const lv_color_t kColorEditTitle    = kColorText;
 const lv_color_t kColorCaption      = COLOR(0xB0B0B0);  // small all-caps headers
 const lv_color_t kColorSwatchSel    = COLOR(0xFFFFFF);  // outline on the chosen swatch
@@ -118,6 +120,7 @@ lv_obj_t* s_title       = nullptr;
 lv_obj_t* s_swatch[kNumSwatches] = {};
 int32_t   s_swatch_cx[kNumSwatches] = {};
 int32_t   s_swatch_cy[kNumSwatches] = {};
+lv_obj_t* s_cancel_btn  = nullptr;
 lv_obj_t* s_save_btn    = nullptr;
 lv_obj_t* s_delete_btn  = nullptr;
 
@@ -291,10 +294,11 @@ lv_obj_t* build_weight_arrow(lv_obj_t* parent) {
   return c;
 }
 
-// Outline trash disc top-right. Same chrome as the bottom pills (transparent fill
-// + red stroke + centered glyph), just circular and smaller. CLICKED → the
-// injected on_delete; load() toggles its visibility per slot.
-lv_obj_t* build_delete_btn(lv_obj_t* parent, lv_event_cb_t on_delete) {
+// Outline trash disc for the bottom row. Same chrome as the bottom pills
+// (transparent fill + red stroke + centered glyph), just circular and smaller.
+// Placed at `dx` along the bottom arc (left of Cancel). CLICKED → the injected
+// on_delete; load() toggles its visibility per slot.
+lv_obj_t* build_delete_btn(lv_obj_t* parent, lv_event_cb_t on_delete, int32_t dx) {
   lv_obj_t* b = lv_button_create(parent);
   lv_obj_set_size(b, kDeleteBtnDiam, kDeleteBtnDiam);
   lv_obj_set_style_radius(b, kDeleteBtnDiam / 2, LV_PART_MAIN);
@@ -303,7 +307,7 @@ lv_obj_t* build_delete_btn(lv_obj_t* parent, lv_event_cb_t on_delete) {
   lv_obj_set_style_border_color(b, kColorDelete, LV_PART_MAIN);
   lv_obj_set_style_border_width(b, kPostBtnStroke, LV_PART_MAIN);
   lv_obj_set_style_border_opa(b, LV_OPA_COVER, LV_PART_MAIN);
-  lv_obj_align(b, LV_ALIGN_TOP_MID, kDeleteBtnDX, kDeleteBtnY);
+  lv_obj_align(b, LV_ALIGN_BOTTOM_MID, dx, -kDeleteBtnBottomInset);
   lv_obj_set_ext_click_area(b, kPostBtnExtClick);
   lv_obj_add_event_cb(b, on_delete, LV_EVENT_CLICKED, nullptr);
   lv_obj_t* lbl = lv_label_create(b);
@@ -312,6 +316,24 @@ lv_obj_t* build_delete_btn(lv_obj_t* parent, lv_event_cb_t on_delete) {
   lv_label_set_text(lbl, LV_SYMBOL_TRASH);
   lv_obj_center(lbl);
   return b;
+}
+
+// Position the bottom row for the current button set. With the trash present the
+// block is [ trash | Cancel | Save ]; without it (a fresh slot has nothing to
+// delete) Cancel/Save center as a pair, so they don't sit skewed around an empty
+// trash slot. Called from load() once the slot's active state is known.
+void layout_bottom_row(bool with_delete) {
+  const int32_t lead  = with_delete ? kDeleteBtnDiam + kBtnGap : 0;
+  const int32_t row_w = lead + kCancelBtnDiam + kBtnGap + kSaveBtnW;
+  const int32_t left  = -row_w / 2;  // block's left edge, from screen center
+  if (with_delete) {
+    lv_obj_align(s_delete_btn, LV_ALIGN_BOTTOM_MID, left + kDeleteBtnDiam / 2,
+                 -kDeleteBtnBottomInset);
+  }
+  lv_obj_align(s_cancel_btn, LV_ALIGN_BOTTOM_MID, left + lead + kCancelBtnDiam / 2,
+               -kBtnBottomInset);
+  lv_obj_align(s_save_btn, LV_ALIGN_BOTTOM_MID, row_w / 2 - kSaveBtnW / 2,
+               -kBtnBottomInset);
 }
 
 }  // namespace
@@ -371,21 +393,19 @@ lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_cancel, lv_event_cb_t on_save,
   }
   apply_swatch_visuals();  // sizes + centers them (none selected yet)
 
-  // Bottom actions — ✕ disc (left) + Save › pill (right), centered as a pair with
-  // a kBtnGap gap. The dx offsets keep the combined [disc | gap | pill] block
-  // centered on screen despite the two differing widths.
-  const int32_t cancel_dx = -(kBtnGap + kSaveBtnW) / 2;
-  const int32_t save_dx   = (kCancelBtnDiam + kBtnGap) / 2;
-  lv_obj_t* cancel_btn =
-      build_pill(group, kCancelBtnDiam, kColorCancel, LV_SYMBOL_CLOSE,
-                 on_cancel, LV_ALIGN_BOTTOM_MID, cancel_dx);
+  // Bottom actions — [ 🗑 trash | ✕ Cancel | Save › ]. layout_bottom_row() owns
+  // the dx offsets and reserves the trash slot only when it's shown, so build
+  // here at a placeholder dx and lay out for real below / on each load().
+  s_cancel_btn = build_pill(group, kCancelBtnDiam, kColorCancel, LV_SYMBOL_CLOSE,
+                            on_cancel, LV_ALIGN_BOTTOM_MID, 0);
   s_save_btn = build_pill(group, kSaveBtnW, kColorSaveDisabled,
                           "Save " LV_SYMBOL_RIGHT, on_save,
-                          LV_ALIGN_BOTTOM_MID, save_dx);
+                          LV_ALIGN_BOTTOM_MID, 0);
 
   // Trash disc — hidden until load() decides (only existing slots can delete).
-  s_delete_btn = build_delete_btn(group, on_delete);
+  s_delete_btn = build_delete_btn(group, on_delete, 0);
   lv_obj_add_flag(s_delete_btn, LV_OBJ_FLAG_HIDDEN);
+  layout_bottom_row(false);  // default to the no-trash pair; load() re-lays out
 
   // Fade set — every visible widget.
   s_fade_n = 0;
@@ -398,7 +418,7 @@ lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_cancel, lv_event_cb_t on_save,
   s_fade[s_fade_n++] = brew_cap;
   s_fade[s_fade_n++] = brew_row;
   for (int i = 0; i < kNumSwatches; ++i) s_fade[s_fade_n++] = s_swatch[i];
-  s_fade[s_fade_n++] = cancel_btn;
+  s_fade[s_fade_n++] = s_cancel_btn;
   s_fade[s_fade_n++] = s_save_btn;
   s_fade[s_fade_n++] = s_delete_btn;
 
@@ -431,9 +451,11 @@ void load(uint8_t slot) {
   stepper_refresh(&s_time);
 
   // Trash disc only makes sense for an existing slot — a brand-new one has
-  // nothing to delete yet.
+  // nothing to delete yet. Re-center the bottom row to match (reserving the trash
+  // slot only when it's shown).
   if (s_loaded_active) lv_obj_remove_flag(s_delete_btn, LV_OBJ_FLAG_HIDDEN);
   else                 lv_obj_add_flag(s_delete_btn, LV_OBJ_FLAG_HIDDEN);
+  layout_bottom_row(s_loaded_active);
 
   // Color: match the stored accent to a swatch (active slots always match).
   s_color_idx = s_loaded_active ? palette_index_of(s_loaded.color) : -1;

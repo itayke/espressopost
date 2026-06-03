@@ -341,6 +341,7 @@ lv_obj_t*     s_popup_btn[2]      = {nullptr, nullptr};
 lv_obj_t*     s_popup_btn_lbl[2]  = {nullptr, nullptr};
 lv_event_cb_t s_popup_btn_cb[2]   = {nullptr, nullptr};  // per-show action, invoked after the card hides
 lv_timer_t*   s_popup_timer       = nullptr;  // auto-dismiss timer (0-button popups only)
+bool          s_popup_click_outside = true;   // current popup: tapping the scrim dismisses (no action)
 
 // Presets screen (Mode::Presets) — the view (title + 3×3 grid + Back) lives in
 // ui_presets.cpp. ui_report only keeps the group handle (set in start_report
@@ -836,7 +837,7 @@ constexpr int32_t  kPopupCardW      = 320;  // fixed width; height tracks conten
 constexpr int32_t  kPopupPad        =  22;
 constexpr int32_t  kPopupGap        =  16;  // body→button-row gap
 constexpr int32_t  kPopupBtnGap     =  14;  // gap between two buttons
-constexpr uint32_t kToastDismissMs  = 1500; // auto-dismiss for the 0-button toast
+constexpr uint32_t kToastDismissMs  = 3000; // auto-dismiss for the 0-button toast
 const lv_color_t kColorPopupCardBg         = COLOR(0x161616);
 const lv_color_t kColorPopupBorder         = kColorMuted3;
 const lv_color_t kColorPopupBtnNeutral     = kColorText;    // acknowledge / cancel
@@ -856,6 +857,7 @@ struct PopupConfig {
   bool        scrim;            // block + dim the screen behind the card
   uint8_t     n_buttons;        // 0..2
   PopupButton buttons[2];
+  bool        click_outside = true;  // tap the scrim to dismiss with no action (scrimmed popups only)
 };
 
 void hide_popup() {
@@ -865,6 +867,13 @@ void hide_popup() {
 }
 
 void popup_timer_cb(lv_timer_t*) { hide_popup(); }
+
+// Tap on the scrim = tap outside the card. Dismiss with no action when the
+// current popup opted in (the default); otherwise the scrim just eats the tap so
+// the popup stays modal until a button is pressed.
+void popup_scrim_tapped(lv_event_t*) {
+  if (s_popup_click_outside) hide_popup();
+}
 
 // Both buttons share one trampoline each: capture the per-show action, dismiss
 // the card first (so the action can open another screen cleanly), then run it.
@@ -877,6 +886,7 @@ void popup_btn0_cb(lv_event_t* e) { popup_btn_tapped(0, e); }
 void popup_btn1_cb(lv_event_t* e) { popup_btn_tapped(1, e); }
 
 void show_popup(const PopupConfig& cfg) {
+  s_popup_click_outside = cfg.click_outside;
   lv_label_set_text(s_popup_body, cfg.body);
 
   for (int i = 0; i < 2; ++i) {
@@ -916,18 +926,20 @@ void show_popup(const PopupConfig& cfg) {
   }
 }
 
-// Back-compat shim: the old transient "toast" is just a 0-button, auto-dismiss,
-// no-scrim popup. Callers that only want a quick status line keep using this.
+// Quick status line: a 0-button popup that auto-dismisses after kToastDismissMs,
+// but also closes early on a tap outside its card (click_outside defaults true).
+// Scrimmed so the tap-outside has a catcher and the message reads as modal for
+// its brief life.
 void show_toast(const char* text) {
-  show_popup(PopupConfig{text, kToastDismissMs, /*scrim=*/false, 0, {}});
+  show_popup(PopupConfig{text, kToastDismissMs, /*scrim=*/true, 0, {}});
 }
 
 // Build the popup widget tree once (called from start_report, topmost in
 // z-order). show_popup() only flips visibility / text / colors afterward.
 void build_popup(lv_obj_t* scr) {
-  // Scrim: full-screen click-eater + dim behind the card. Hidden unless a
-  // popup asks for it (confirm dialogs); toast/tip leave it hidden so the UI
-  // behind stays live and non-modal.
+  // Scrim: full-screen click-eater + dim behind the card, and the catcher for
+  // tap-outside-to-dismiss. Shown for popups that ask for it (toast + confirm
+  // dialogs); the non-scrim tip leaves it hidden so the UI behind stays live.
   s_popup_scrim = lv_obj_create(scr);
   lv_obj_set_size(s_popup_scrim, kScreen, kScreen);
   lv_obj_set_pos(s_popup_scrim, 0, 0);
@@ -939,6 +951,8 @@ void build_popup(lv_obj_t* scr) {
   lv_obj_clear_flag(s_popup_scrim, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(s_popup_scrim, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_flag(s_popup_scrim, LV_OBJ_FLAG_HIDDEN);
+  // A scrim tap is a tap outside the card — dismiss when the popup opted in.
+  lv_obj_add_event_cb(s_popup_scrim, popup_scrim_tapped, LV_EVENT_CLICKED, nullptr);
 
   // Card: centered, fixed width, height tracks content. Vertical flex stacks
   // the wrapping body label over the button row.
@@ -957,6 +971,9 @@ void build_popup(lv_obj_t* scr) {
   lv_obj_set_flex_align(s_popup_card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                         LV_FLEX_ALIGN_CENTER);
   lv_obj_clear_flag(s_popup_card, LV_OBJ_FLAG_SCROLLABLE);
+  // Eat taps that land on the card (but off its buttons) so they don't fall
+  // through to the scrim below and dismiss a click-outside popup from inside.
+  lv_obj_add_flag(s_popup_card, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_align(s_popup_card, LV_ALIGN_CENTER, 0, 0);
   lv_obj_add_flag(s_popup_card, LV_OBJ_FLAG_HIDDEN);
 
@@ -966,7 +983,7 @@ void build_popup(lv_obj_t* scr) {
   // Amber body — carries over the old toast's accent and reads as "attention"
   // for the out-of-band tip.
   lv_obj_set_style_text_color(s_popup_body, kColorToast, LV_PART_MAIN);
-  lv_obj_set_style_text_font(s_popup_body, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_text_font(s_popup_body, &lv_font_montserrat_24, LV_PART_MAIN);
   lv_obj_set_style_text_align(s_popup_body, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
 
   // Button row — up to two outline pills (same idiom as the Cancel/Submit
@@ -1092,19 +1109,25 @@ void on_edit_save_tap(lv_event_t*) {
   switch_mode(Mode::Presets);
 }
 
-// Confirm button of the delete popup: drop the slot's blob and return to the
-// grid. clear() auto-advances the selection if the deleted slot was selected, so
-// re-push the center-line readout (it's behind the panel now, but correct when
-// idle reappears).
+// Confirm button of the delete popup: drop the slot's blob AND its saved posts,
+// then return to the grid. Purging the shots first keeps the deleted preset's
+// history from bleeding into a future preset that reuses the slot index; the
+// model is refit so its in-memory fits match the now-smaller log. clear()
+// auto-advances the selection if the deleted slot was selected, so re-push the
+// center-line readout (it's behind the panel now, but correct when idle
+// reappears).
 void confirm_delete_preset(lv_event_t*) {
+  storage::purge_preset_shots(s_edit_slot);
   presets::clear(s_edit_slot);
+  model::refit();
   refresh_preset_label();
   switch_mode(Mode::Presets);
 }
 
 // Editor trash — ask before deleting. The device always needs at least one
 // preset, so deleting the only remaining one is refused with a brief note rather
-// than a confirm. Both use the shared scrimmed popup.
+// than a confirm. The confirm warns when the slot has saved posts, since delete
+// takes those with it. Both use the shared scrimmed popup.
 void on_edit_delete_tap(lv_event_t*) {
   if (presets::count() <= 1) {
     PopupConfig info{};
@@ -1115,14 +1138,20 @@ void on_edit_delete_tap(lv_event_t*) {
     show_popup(info);
     return;
   }
-  char body[24];
-  std::snprintf(body, sizeof(body), "Delete PRESET %u?",
-                static_cast<unsigned>(s_edit_slot + 1));
+  const uint32_t posts = storage::shot_count_for_preset(s_edit_slot);
+  char body[96];
+  const int len = std::snprintf(body, sizeof(body), "Delete PRESET %u?",
+                                static_cast<unsigned>(s_edit_slot + 1));
+  if (posts > 0 && len > 0 && static_cast<size_t>(len) < sizeof(body)) {
+    std::snprintf(body + len, sizeof(body) - len,
+                  "\nThis will delete %u saved %s!",
+                  static_cast<unsigned>(posts), posts == 1 ? "post" : "posts");
+  }
   PopupConfig cfg{};
   cfg.body       = body;
   cfg.scrim      = true;
   cfg.n_buttons  = 2;
-  cfg.buttons[0] = PopupButton{"Keep",   PopupBtnStyle::Neutral,     nullptr};
+  cfg.buttons[0] = PopupButton{"Cancel", PopupBtnStyle::Neutral,     nullptr};
   cfg.buttons[1] = PopupButton{"Delete", PopupBtnStyle::Destructive, confirm_delete_preset};
   show_popup(cfg);
 }
@@ -1222,7 +1251,7 @@ void on_submit(lv_event_t*) {
   // so the popup card foregrounds above the swap block.
   if (assessment.verdict == model::ShotVerdict::InBand) {
     char buf[24];
-    std::snprintf(buf, sizeof(buf), "Saved #%u",
+    std::snprintf(buf, sizeof(buf), "Post #%u saved",
                   static_cast<unsigned>(storage::shot_count()));
     show_toast(buf);
   } else {

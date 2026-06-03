@@ -97,6 +97,21 @@ esp_err_t append_shot(const ShotRecord& record);
 // divides by sizeof(ShotRecord). Used by the UI to display "Saved #N".
 uint32_t shot_count();
 
+// Number of live (non-tombstoned) records tagged with `preset_id`. Scans the
+// log, so O(n) rather than the stat() trick shot_count() uses. The preset editor
+// reads this before a delete to warn how many saved posts the action will take
+// with it.
+uint32_t shot_count_for_preset(uint8_t preset_id);
+
+// Physically remove every record tagged with `preset_id` from the log (not a
+// tombstone — the bytes are gone). Rewrites the file via the same
+// temp-file-then-rename path the migrations use, so a power loss mid-purge
+// leaves the original log intact. A no-op success when nothing matches. Used
+// when a preset is deleted so its history doesn't bleed into a future preset
+// that reuses the slot index. The caller is responsible for a model::refit()
+// afterward.
+esp_err_t purge_preset_shots(uint8_t preset_id);
+
 // Bulk-load every record in the log into `out`. Returns the number of records
 // actually read; never exceeds `max`. Records arrive in the order they were
 // appended (chronological by submit time). Used by the model (Step 5) to fit
