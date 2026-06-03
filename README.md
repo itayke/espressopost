@@ -403,9 +403,9 @@ memory notes for design decisions already locked in.
     ├── rtc/                    PCF85063 driver: build-time seed + epoch_s() for ShotRecord
     ├── power/                  idle state machine: dim @ 30s, off @ 2min, wake on touch
     ├── cloud/                  Wi-Fi (SoftAP provisioning) + durable-queue shot upload to a Google Sheet
-    │   ├── include/cloud.hpp      IDF-bound API (init/start_provisioning/status/notify_new_shot)
-    │   ├── include/cloud_json.hpp pure JSON payload builder API (host-testable)
+    │   ├── include/cloud.hpp      public API (init/start_provisioning/status/notify_new_shot)
     │   ├── cloud.cpp              IDF glue: wifi_provisioning, NVS endpoint, serial console, sync task
+    │   ├── cloud_json.hpp         pure JSON payload builder API — internal (host test + cloud.cpp only)
     │   └── cloud_json.cpp         pure ShotJson → JSON serialization (no IDF)
     ├── model/                  per-preset Bayesian time model + suggested grind + confidence
     │   ├── include/model.hpp      IDF-bound API (init/refit/suggest_for_preset)

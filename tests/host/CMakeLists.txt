@@ -34,7 +34,7 @@ add_executable(test_cloud
 )
 
 target_include_directories(test_cloud PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../components/cloud/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../components/cloud
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party
 )
 
