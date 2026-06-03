@@ -7,6 +7,7 @@
 // boot — the UI will just refuse Submit and log the error.
 
 #include "climate.hpp"
+#include "cloud.hpp"
 #include "display.hpp"
 #include "model.hpp"
 #include "power.hpp"
@@ -73,6 +74,15 @@ extern "C" void app_main(void) {
   if (model_err != ESP_OK) {
     ESP_LOGW(kTag, "model unavailable (%s); suggestion row will stay hidden",
              esp_err_to_name(model_err));
+  }
+
+  // Cloud after NVS (presets), storage, and RTC are up: it reads the shot log
+  // to backfill and relies on stored WiFi creds + endpoint in NVS. Non-fatal —
+  // no network just means shots stay queued locally until the next connect.
+  const esp_err_t cloud_err = espressopost::cloud::init();
+  if (cloud_err != ESP_OK) {
+    ESP_LOGW(kTag, "cloud unavailable (%s); shots queue locally until WiFi",
+             esp_err_to_name(cloud_err));
   }
 
   // Power last — installs the idle watchdog after every other subsystem is

@@ -119,4 +119,12 @@ esp_err_t purge_preset_shots(uint8_t preset_id);
 // file is cheap and keeps the model agnostic of incremental update logic.
 size_t read_shots(ShotRecord* out, size_t max);
 
+// Like read_shots, but starts at the 0-based record index `from` (skips the
+// first `from` records). Returns the number actually read; never exceeds `max`.
+// Used by cloud sync to read only the records above its NVS high-water mark
+// rather than re-reading the whole log each backfill pass. Index-based paging is
+// safe because the log is append-only and records are never physically removed
+// (deletion is the kFlagTombstone flag), so a record's index is stable for life.
+size_t read_shots_from(uint32_t from, ShotRecord* out, size_t max);
+
 }  // namespace espressopost::storage

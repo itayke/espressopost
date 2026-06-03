@@ -11,3 +11,4 @@ if [[ ! -d build ]]; then
 fi
 cmake --build build >/dev/null
 ./build/test_model "$@"
+./build/test_cloud "$@"

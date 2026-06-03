@@ -157,6 +157,11 @@ esp_err_t init_lvgl() {
   s_lvgl_disp = lv_display_create(board::kLcdHRes, board::kLcdVRes);
   if (s_lvgl_disp == nullptr) return ESP_ERR_NO_MEM;
 
+  // Draw buffers MUST be internal DMA RAM: the CO5300 QSPI panel's SPI master
+  // DMA can't source color data from PSRAM (panel_io_spi_tx_color rejects it).
+  // Internal headroom for these comes from keeping LVGL's own allocator pool in
+  // PSRAM (see lv_port_mem.c / LV_USE_CUSTOM_MALLOC) — without that, the pool +
+  // these buffers + the Wi-Fi stack don't all fit in internal RAM.
   s_draw_buf_a = heap_caps_malloc(kDrawBufBytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
   s_draw_buf_b = heap_caps_malloc(kDrawBufBytes, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
   if (s_draw_buf_a == nullptr || s_draw_buf_b == nullptr) {

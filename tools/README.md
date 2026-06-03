@@ -3,6 +3,10 @@
 Host-side scripts that don't run on the device. Keep them dependency-light
 and runnable straight from a checkout — no virtualenv ceremony.
 
+`cloud_apps_script.md` is the exception: not a script to run here but the Google
+Apps Script + deploy steps for the cloud-sync sink (the Sheet the device POSTs
+shots to). See that file when setting up or rotating the cloud endpoint.
+
 ## `analyze_shots.py`
 
 Descriptive trend analysis of `storage: dump[…]` lines that the device prints

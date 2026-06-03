@@ -5,6 +5,7 @@ idf_component_register(
         "."
     REQUIRES
         climate
+        cloud
         display
         model
         power

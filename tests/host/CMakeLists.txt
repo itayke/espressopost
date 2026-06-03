@@ -25,5 +25,23 @@ if(NOT MSVC)
     target_compile_options(test_model PRIVATE -Wall -Wextra -Wpedantic -Wno-sign-compare)
 endif()
 
+# Pure JSON serializer from the cloud component. Same deal — cloud_json.cpp has
+# zero IDF includes by design, so it builds straight here. Separate binary
+# because Catch2's CATCH_CONFIG_MAIN can define main() in only one TU.
+add_executable(test_cloud
+    test_cloud_json.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../components/cloud/cloud_json.cpp
+)
+
+target_include_directories(test_cloud PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../components/cloud/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+)
+
+if(NOT MSVC)
+    target_compile_options(test_cloud PRIVATE -Wall -Wextra -Wpedantic -Wno-sign-compare)
+endif()
+
 enable_testing()
 add_test(NAME model_unit COMMAND test_model)
+add_test(NAME cloud_unit COMMAND test_cloud)

@@ -2,6 +2,8 @@ idf_component_register(
     SRCS
         "ui_report.cpp"
         "ui_bar.cpp"
+        "ui_connections.cpp"
+        "ui_menu.cpp"
         "ui_preset_readout.cpp"
         "ui_presets.cpp"
         "ui_preset_edit.cpp"
@@ -12,6 +14,7 @@ idf_component_register(
         lvgl__lvgl
         display
         climate
+        cloud
         model
         presets
         rtc

@@ -21,6 +21,17 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # --- LittleFS (registry component will pull this in once added) ---
 # Placeholder: enable explicitly when storage component lands.
 
+# --- Cloud sync: WiFi (STA) + TLS to the Google Apps Script Web App ---
+# WiFi was not enabled before this milestone. The LWIP-in-PSRAM hook above was
+# left on in anticipation. The certificate bundle is what lets esp_http_client
+# validate script.google.com and the script.googleusercontent.com host its
+# /exec redirect lands on without pinning a single cert; the FULL bundle
+# includes the Google/GTS roots.
+CONFIG_ESP_WIFI_ENABLED=y
+CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+
 # --- Logging ---
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_LOG_COLORS=y
@@ -44,13 +55,16 @@ CONFIG_LV_FONT_MONTSERRAT_24=y
 CONFIG_LV_FONT_MONTSERRAT_36=y
 CONFIG_LV_FONT_MONTSERRAT_46=y
 
-# --- LVGL memory pool ---
-# LVGL allocates every widget, style, and the glyph cache from its own fixed
-# pool. The default 64 KB is too tight once all the screens coexist (idle +
-# post + the 3×3 Presets grid of readouts + the preset editor's bars / swatches
-# / pills): exhausting the pool corrupts allocations and hangs the draw (a bad
-# glyph blits forever). 128 KB leaves comfortable headroom for more screens.
-CONFIG_LV_MEM_SIZE_KILOBYTES=128
+# --- LVGL memory: custom allocator backed by PSRAM (components/display/lv_port_mem.c) ---
+# LVGL's pool, style data, and image/snapshot buffers are CPU-only (never DMA'd
+# to the panel — the final pixels land in display.cpp's internal draw buffers),
+# so they live in PSRAM. This is mandatory now that Wi-Fi is enabled: the CO5300
+# QSPI panel can only DMA color data from INTERNAL RAM, so the two ~46 KB draw
+# buffers must stay internal, and a 128 KB internal LVGL pool + those buffers +
+# the Wi-Fi stack no longer fit in internal RAM. Custom malloc removes the fixed
+# pool entirely (allocations grow into the 8 MB PSRAM as needed), which also
+# lifts the old per-screen pool-exhaustion ceiling.
+CONFIG_LV_USE_CUSTOM_MALLOC=y
 
 # --- LVGL extra modules ---
 # Snapshot bakes the rotated-number ring into a single 466×466 RGB565 sprite

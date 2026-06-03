@@ -1,5 +1,7 @@
 #include "ui.hpp"
 #include "ui_bar.hpp"
+#include "ui_connections.hpp"
+#include "ui_menu.hpp"
 #include "ui_preset_edit.hpp"
 #include "ui_preset_readout.hpp"
 #include "ui_presets.hpp"
@@ -11,6 +13,7 @@
 #include <cstdio>
 
 #include "climate.hpp"
+#include "cloud.hpp"
 #include "display.hpp"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -167,8 +170,8 @@ const lv_color_t kColorSubmitDisabled = kColorMuted3;
 // only the center widgets swap. Presets is a full-panel mode (everything hides)
 // reached from Idle via the Menu button — see the section-swap engine below.
 // ---------------------------------------------------------------------------
-enum class Mode { Idle, Post, Presets, Edit };
-constexpr int kModeCount = 4;
+enum class Mode { Idle, Post, Menu, Presets, Edit, Connections };
+constexpr int kModeCount = 6;
 Mode s_mode = Mode::Idle;
 
 // One row per mode in the swap registry (s_views, populated once the group
@@ -343,6 +346,14 @@ lv_event_cb_t s_popup_btn_cb[2]   = {nullptr, nullptr};  // per-show action, inv
 lv_timer_t*   s_popup_timer       = nullptr;  // auto-dismiss timer (0-button popups only)
 bool          s_popup_click_outside = true;   // current popup: tapping the scrim dismisses (no action)
 
+// Menu screen (Mode::Menu) — the hub the idle Menu button opens; its view (title
+// + entry pills + Back) lives in ui_menu.cpp. ui_report keeps the group handle.
+lv_obj_t* s_menu_group = nullptr;
+
+// Connections screen (Mode::Connections) — WiFi/cloud status + Connect; view in
+// ui_connections.cpp. Reached from the Menu hub.
+lv_obj_t* s_connections_group = nullptr;
+
 // Presets screen (Mode::Presets) — the view (title + 3×3 grid + Back) lives in
 // ui_presets.cpp. ui_report only keeps the group handle (set in start_report
 // from presets_screen::build) to show/hide it across the mode swap.
@@ -366,10 +377,14 @@ Mode s_swap_to   = Mode::Idle;
 // via fade_widgets(). The engine just iterates them (skipping any HIDDEN widget).
 lv_obj_t* s_idle_fade[16]      = {};
 int       s_idle_fade_n        = 0;
+lv_obj_t* const* s_menu_fade    = nullptr;
+int       s_menu_fade_n         = 0;
 lv_obj_t* const* s_presets_fade = nullptr;
 int       s_presets_fade_n     = 0;
 lv_obj_t* const* s_edit_fade    = nullptr;
 int       s_edit_fade_n        = 0;
+lv_obj_t* const* s_connections_fade = nullptr;
+int       s_connections_fade_n      = 0;
 // No-op anim target: drives the swap's two-phase timing independently of which
 // section widgets are visible, so the phase callbacks fire after exactly one
 // kModeSwapFadeMs regardless of how many widgets actually faded.
@@ -759,25 +774,33 @@ void reset_post_form() {
 const ModeView s_views[kModeCount] = {
     /*Idle*/    {&s_idle_group,    &s_climate_anim,  nullptr,         nullptr},
     /*Post*/    {&s_post_group,    &s_post_anim,     reset_post_form, reset_post_form},
-    // Presets / Edit use the section-swap engine, not animate_mode_swap — only
-    // their `group` is consumed (by apply_mode, to hide it at boot). `anim`/hooks
-    // are never read for these rows, so `anim` just mirrors `group`.
-    /*Presets*/ {&s_presets_group, &s_presets_group, nullptr,         nullptr},
-    /*Edit*/    {&s_edit_group,    &s_edit_group,    nullptr,         nullptr},
+    // Menu / Presets / Edit / Connections use the section-swap engine, not
+    // animate_mode_swap — only their `group` is consumed (by apply_mode, to hide
+    // it at boot). `anim`/hooks are never read for these rows, so `anim` just
+    // mirrors `group`.
+    /*Menu*/        {&s_menu_group,        &s_menu_group,        nullptr, nullptr},
+    /*Presets*/     {&s_presets_group,     &s_presets_group,     nullptr, nullptr},
+    /*Edit*/        {&s_edit_group,        &s_edit_group,        nullptr, nullptr},
+    /*Connections*/ {&s_connections_group, &s_connections_group, nullptr, nullptr},
 };
 
 // Full-panel modes drive the per-section fade engine (vs the Idle↔Post climate
 // swap). Their fade set + group bookkeeping are addressed by mode below.
-bool is_panel_mode(Mode m) { return m == Mode::Presets || m == Mode::Edit; }
+bool is_panel_mode(Mode m) {
+  return m == Mode::Menu || m == Mode::Presets || m == Mode::Edit ||
+         m == Mode::Connections;
+}
 
-// The section-fade set for a mode (Idle participates as the Presets edge's other
+// The section-fade set for a mode (Idle participates as the Menu edge's other
 // side). Post never section-swaps, so it returns empty.
 lv_obj_t* const* mode_fade(Mode m, int* n) {
   switch (m) {
-    case Mode::Idle:    *n = s_idle_fade_n;    return s_idle_fade;
-    case Mode::Presets: *n = s_presets_fade_n; return s_presets_fade;
-    case Mode::Edit:    *n = s_edit_fade_n;    return s_edit_fade;
-    default:            *n = 0;                return nullptr;
+    case Mode::Idle:        *n = s_idle_fade_n;        return s_idle_fade;
+    case Mode::Menu:        *n = s_menu_fade_n;        return s_menu_fade;
+    case Mode::Presets:     *n = s_presets_fade_n;     return s_presets_fade;
+    case Mode::Edit:        *n = s_edit_fade_n;        return s_edit_fade;
+    case Mode::Connections: *n = s_connections_fade_n; return s_connections_fade;
+    default:                *n = 0;                    return nullptr;
   }
 }
 
@@ -1071,11 +1094,26 @@ void on_cancel_tap(lv_event_t*) {
 
 void on_menu_tap(lv_event_t*) {
   if (s_mode != Mode::Idle) return;  // Menu only lives on the idle center line
-  switch_mode(Mode::Presets);
+  switch_mode(Mode::Menu);
 }
 
+// Menu hub entries → sub-screens; Menu Back → Idle.
+void on_menu_presets_tap(lv_event_t*)     { switch_mode(Mode::Presets); }
+void on_menu_connections_tap(lv_event_t*) { switch_mode(Mode::Connections); }
+void on_menu_back_tap(lv_event_t*)        { switch_mode(Mode::Idle); }
+
+// Presets Back now returns to the Menu hub (Idle → Menu → Presets).
 void on_back_tap(lv_event_t*) {
-  switch_mode(Mode::Idle);
+  switch_mode(Mode::Menu);
+}
+
+// Connections: Back → Menu; Connect kicks ESPTouch v2 provisioning, then a
+// refresh so the status line flips to "listening…" immediately (the visible-mode
+// timer keeps it live thereafter).
+void on_connections_back_tap(lv_event_t*) { switch_mode(Mode::Menu); }
+void on_connections_connect_tap(lv_event_t*) {
+  cloud::start_provisioning();
+  connections_screen::refresh();
 }
 
 // Tapping a Presets grid slot opens its editor. The slot's 0-based id rides in
@@ -1238,6 +1276,11 @@ void on_submit(lv_event_t*) {
     show_toast("save failed");
     return;
   }
+
+  // Nudge the cloud sync task — the new record is durable on disk now. Lock-free
+  // (just sets an event-group bit), so it's safe from the LVGL task and a no-op
+  // when WiFi/endpoint aren't configured.
+  cloud::notify_new_shot();
 
   // Judge this shot against the CURRENT fit — must happen BEFORE refit() folds
   // it in, so it's measured against the model that produced the suggestion the
@@ -2095,8 +2138,10 @@ void hide_panel(Mode m) {
       lv_obj_add_flag(s_idle_group, LV_OBJ_FLAG_HIDDEN);
       lv_obj_add_flag(s_grinder_group, LV_OBJ_FLAG_HIDDEN);
       break;
-    case Mode::Presets: lv_obj_add_flag(s_presets_group, LV_OBJ_FLAG_HIDDEN); break;
-    case Mode::Edit:    lv_obj_add_flag(s_edit_group, LV_OBJ_FLAG_HIDDEN); break;
+    case Mode::Menu:        lv_obj_add_flag(s_menu_group, LV_OBJ_FLAG_HIDDEN); break;
+    case Mode::Presets:     lv_obj_add_flag(s_presets_group, LV_OBJ_FLAG_HIDDEN); break;
+    case Mode::Edit:        lv_obj_add_flag(s_edit_group, LV_OBJ_FLAG_HIDDEN); break;
+    case Mode::Connections: lv_obj_add_flag(s_connections_group, LV_OBJ_FLAG_HIDDEN); break;
     default: break;
   }
 }
@@ -2112,6 +2157,9 @@ void show_panel(Mode m) {
       lv_obj_remove_flag(s_idle_group, LV_OBJ_FLAG_HIDDEN);
       lv_obj_remove_flag(s_grinder_group, LV_OBJ_FLAG_HIDDEN);
       break;
+    case Mode::Menu:
+      lv_obj_remove_flag(s_menu_group, LV_OBJ_FLAG_HIDDEN);
+      break;
     case Mode::Presets:
       presets_screen::refresh();
       lv_obj_remove_flag(s_presets_group, LV_OBJ_FLAG_HIDDEN);
@@ -2119,6 +2167,10 @@ void show_panel(Mode m) {
     case Mode::Edit:
       preset_edit::load(s_edit_slot);
       lv_obj_remove_flag(s_edit_group, LV_OBJ_FLAG_HIDDEN);
+      break;
+    case Mode::Connections:
+      connections_screen::refresh();
+      lv_obj_remove_flag(s_connections_group, LV_OBJ_FLAG_HIDDEN);
       break;
     default: break;
   }
@@ -2207,10 +2259,14 @@ void on_humidity_tap(lv_event_t*) {
 // 1 Hz tick: refresh climate readouts + nudge the model so the arrow tracks
 // ambient drift without the user touching anything.
 void update_climate_strip(lv_timer_t*) {
-  // The climate strip + suggestion live under the idle/grinder groups, both
-  // hidden while the Presets screen owns the panel — skip the refresh (and its
-  // redraws) until we're back on a mode that shows them.
-  if (s_mode == Mode::Presets) return;
+  // The climate strip + suggestion live under the idle/grinder groups, hidden
+  // whenever a full-panel mode owns the screen — skip their refresh (and its
+  // redraws) there. The Connections panel piggybacks on this 1 Hz tick to keep
+  // its WiFi/sync status live while it's visible.
+  if (is_panel_mode(s_mode)) {
+    if (s_mode == Mode::Connections) connections_screen::refresh();
+    return;
+  }
   refresh_climate_tiles();
   refresh_suggestion();
 }
@@ -3003,15 +3059,21 @@ void start_report() {
   build_grinder(scr);
   build_idle_group(scr);
   build_post_group(scr);
-  // Presets group sits above the idle/post groups in z-order but stays hidden
-  // until the Menu button opens it; built after them so it overlays cleanly. Its
-  // Back pill is wired to on_back_tap (returns to Idle); each slot to on_slot_tap
-  // (opens the editor).
+  // Menu hub sits above the idle/post groups in z-order; the idle Menu button
+  // opens it. Its entries navigate to Presets / Connections; Back → Idle.
+  s_menu_group = menu_screen::build(scr, on_menu_back_tap, on_menu_presets_tap,
+                                    on_menu_connections_tap);
+  // Presets group overlays, reached from the Menu hub; Back → Menu, each slot →
+  // on_slot_tap (opens the editor).
   s_presets_group = presets_screen::build(scr, on_back_tap, on_slot_tap);
   // Edit group overlays the Presets grid (reached by tapping a slot); Cancel →
   // back to the grid, Save → persist + back to the grid, trash → confirm + clear.
   s_edit_group = preset_edit::build(scr, on_edit_cancel_tap, on_edit_save_tap,
                                     on_edit_delete_tap);
+  // Connections group, reached from the Menu hub; Back → Menu, Connect kicks
+  // ESPTouch v2 provisioning.
+  s_connections_group = connections_screen::build(scr, on_connections_back_tap,
+                                                  on_connections_connect_tap);
 
   // Mode-swap input block — full-screen transparent click-eater, hidden until a
   // cross-fade brings it to the foreground (see animate_mode_swap). Clickable so
@@ -3071,10 +3133,12 @@ void start_report() {
                       s_suggested_label}) {
     s_idle_fade[s_idle_fade_n++] = w;
   }
-  s_presets_fade = presets_screen::fade_widgets(&s_presets_fade_n);
-  s_edit_fade    = preset_edit::fade_widgets(&s_edit_fade_n);
+  s_menu_fade        = menu_screen::fade_widgets(&s_menu_fade_n);
+  s_presets_fade     = presets_screen::fade_widgets(&s_presets_fade_n);
+  s_edit_fade        = preset_edit::fade_widgets(&s_edit_fade_n);
+  s_connections_fade = connections_screen::fade_widgets(&s_connections_fade_n);
 
-  apply_mode();  // s_mode starts Idle; hides post + presets + edit groups
+  apply_mode();  // s_mode starts Idle; hides every non-idle group
 
   // LVGL allocates every widget + style + the glyph cache from one fixed pool
   // (CONFIG_LV_MEM_SIZE_KILOBYTES). All screens are now built, so this is the

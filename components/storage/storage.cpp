@@ -546,4 +546,27 @@ size_t read_shots(ShotRecord* out, size_t max) {
   return n;
 }
 
+size_t read_shots_from(uint32_t from, ShotRecord* out, size_t max) {
+  if (!s_mounted || out == nullptr || max == 0) return 0;
+
+  Guard g;
+  if (!g.ok) return 0;
+
+  FILE* f = std::fopen(kShotsPath, "rb");
+  if (!f) return 0;  // no shots yet — not an error
+
+  // Seek past the first `from` records. A seek beyond EOF leaves the next read
+  // returning 0 records, which is the correct "nothing above the high-water
+  // mark" answer.
+  if (std::fseek(f, static_cast<long>(from) * sizeof(ShotRecord), SEEK_SET) != 0) {
+    std::fclose(f);
+    return 0;
+  }
+
+  size_t n = 0;
+  while (n < max && std::fread(&out[n], sizeof(ShotRecord), 1, f) == 1) ++n;
+  std::fclose(f);
+  return n;
+}
+
 }  // namespace espressopost::storage
