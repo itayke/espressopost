@@ -6,7 +6,8 @@ and learns a per-preset grind adjustment from local data. Offline-first.
 
 ## Status
 
-**Steps 1 – 5 (model v1) + idle policy + RTC + grind capture + ring UI.**
+**Steps 1 – 5 (model v1) + idle policy + RTC + grind capture + ring UI +
+cloud sync.**
 Display + capacitive touch up under LVGL 9 (round 466 × 466, 2-px-aligned
 partial redraws), 1 Hz BME280 read loop, an NVS-backed preset table (3
 defaults seeded on first boot, selection persistent across reboots, each
@@ -21,13 +22,17 @@ points at the model's recommended grind, so the user can see at a
 glance how far they are from it. Tapping **Post** swaps the center
 content for a time-delta stepper + 1–5 stars + Submit; the ring stays
 live so they can keep dialing. Submit appends a 40-byte v3 `ShotRecord`
-to LittleFS and returns to Idle. Tapping **Menu** swaps to the **Presets**
-screen — a "PRESETS" title over a 3×3 grid of slots (each showing
-`PRESET N` / `Xg → Yg` / `Zs` tinted in the preset's accent color, empty
-slots a bare outline) with a Back pill that returns to Idle; the mode
-swap fades each section individually rather than the whole screen. The
-grid is view-only for now — per-slot select/edit/color-pick is the next
-step. The grind value persists per preset
+to LittleFS and returns to Idle. Tapping **Menu** opens a **Menu** hub —
+a "MENU" title over **Presets** and **Connections** entry pills and a
+Back pill to Idle. **Presets** is a "PRESETS" title over a 3×3 grid of
+slots (each showing `PRESET N` / `Xg → Yg` / `Zs` tinted in the preset's
+accent color, empty slots a bare outline); it's view-only for now —
+per-slot select/edit/color-pick is the next step. **Connections** is the
+cloud-sync screen (Wi-Fi state, sync state, a Connect/Change-Wi-Fi pill
+that starts SoftAP provisioning, and a QR card carrying the provisioning
+descriptor — see the cloud paragraph below). Both screens Back to the
+Menu hub; every mode swap fades each section individually rather than the
+whole screen. The grind value persists per preset
 (NVS key `gN`); the model's recommendation lands in a separate
 `suggested_grind` field on the record. An idle watchdog dims the AMOLED 
 after 30 s and turns the panel off after 2 min; any touch wakes it
@@ -89,6 +94,29 @@ v2 → v3 (last byte repurposed as `yield_g`), v3 → v4 (28 B, appends a
 `storage: migrated N shots from v2 → v3` /
 `storage: migrated N shots from v3/v4 → v5` and the preset migration
 line, every step becomes a no-op forever.
+
+**Cloud sync (Wi-Fi + per-shot upload to a Google Sheet):** a
+`components/cloud/` service mirrors every saved shot into a Google Sheet
+via a Google Apps Script Web App. Wi-Fi credentials arrive over **SoftAP
+provisioning** (the `wifi_provisioning` manager, security1 + a
+proof-of-possession) — there is no network list or password field on the
+466 px screen; the phone app (Espressif's "ESP SoftAP Provisioning")
+carries those, and the Connections screen renders a scannable QR of the
+provisioning descriptor so the app can join the device's temporary AP
+without typing the SSID + PoP. Creds persist to flash and the device
+auto-reconnects on boot. Upload is a **durable queue + backfill**: a
+high-water mark in NVS tracks the last-uploaded record and a core-0
+background task uploads everything above it whenever Wi-Fi is up over TLS
+(cert bundle; Apps Script `ContentService` always answers HTTP 200, so
+success is gated on the response body containing `"ok":true`), so offline
+pulls, reboots, and the existing shot history all sync. The endpoint URL
+and shared token live in NVS, set over the serial console
+(`cloud set-url` / `cloud set-token`) — never reflashed, never in the
+source tree, never logged. `cloud::init()` is non-fatal (warn + continue
+like climate/rtc): no network just means shots stay queued locally. The
+JSON payload builder (`cloud_json.{hpp,cpp}`) is IDF-free and host-tested.
+The Apps Script and deploy steps ship under
+[`tools/cloud_apps_script.md`](tools/cloud_apps_script.md).
 
 The full build order lives in the kickoff brief. Each step ends in a
 runnable device state.
@@ -213,7 +241,7 @@ instead.
 
 ## What to verify on this build
 
-1. Boot log shows: `display: display + LVGL ready (466x466, 50-line partial buffer)`, `touch: CST9217 touch ready`, `storage: littlefs mounted at /littlefs (...KB used, N shots logged)`, `presets: 3 presets loaded, selected=N ("espresso")`, (if a BME280 is wired) `climate: BME280 ready at 0x76 on I2C1 (SDA=17 SCL=18 @ 400000 Hz)`, the RTC line — either `rtc: first boot (OS=1) — seeding from build time …` on a virgin chip, or `rtc: PCF85063 already set: 2026-MM-DD HH:MM:SS UTC (epoch …)` on subsequent boots — and `model: refit: N records on disk, M presets fit, K shots used in fits`.
+1. Boot log shows: `display: display + LVGL ready (466x466, 50-line partial buffer)`, `touch: CST9217 touch ready`, `storage: littlefs mounted at /littlefs (...KB used, N shots logged)`, `presets: 3 presets loaded, selected=N ("espresso")`, (if a BME280 is wired) `climate: BME280 ready at 0x76 on I2C1 (SDA=17 SCL=18 @ 400000 Hz)`, the RTC line — either `rtc: first boot (OS=1) — seeding from build time …` on a virgin chip, or `rtc: PCF85063 already set: 2026-MM-DD HH:MM:SS UTC (epoch …)` on subsequent boots — `model: refit: N records on disk, M presets fit, K shots used in fits`, and `cloud: init: <creds stored|no creds>, endpoint <set|unset>` followed by `cloud: sync task started (...)`.
 2. **Idle screen** shows, from the outer rim inward: a 0 – 30 grind ring
    with major-tick numerals (0, 1, …, 30), a static white down-arrow at
    6 o'clock pointing into the ring at the live dial value, and —
@@ -272,6 +300,21 @@ instead.
    `delta_from_y_center_s` signs in the `phantoms[]` array inside
    `fit()` in
    [`components/model/model_math.cpp`](components/model/model_math.cpp).
+10. **Cloud (optional, needs Wi-Fi + an Apps Script endpoint).** Menu →
+    **Connections**. Tap **Connect Wi-Fi**: a QR card appears and the
+    line reads `Wi-Fi: provisioning`; open the "ESP SoftAP Provisioning"
+    app, scan the QR (or join `PROV_XXXXXX` and enter the shown PoP), and
+    pick your network. On success the line flips to
+    `Wi-Fi: connected (-NN dBm)` (green) and the button relabels to
+    **Change Wi-Fi**; reboot and it auto-reconnects. With no endpoint yet
+    the sync line reads `Cloud: endpoint not set`. At the `esp>` serial
+    prompt run `cloud set-url <https-/exec-URL>` and
+    `cloud set-token <token>` (the token is never echoed), then `cloud
+    sync` — the existing shot history backfills into the Sheet and the
+    sync line tracks pending → synced. Submit a new shot and a row should
+    appear within seconds; pull the network and resubmit, then reconnect,
+    and the queued shots upload on their own. Deploy steps for the Sheet
+    are in [`tools/cloud_apps_script.md`](tools/cloud_apps_script.md).
 
 If any of these fail, the most likely culprits in order:
 
@@ -299,6 +342,18 @@ If any of these fail, the most likely culprits in order:
   than a BME280 is on the bus, or it's a BMP280 (chip id `0x58`,
   pressure + temp only — drop the humidity bits if you want to support
   it).
+- **Connections stays on `Wi-Fi: provisioning` / app can't find the
+  device:** the SoftAP only exists while a provisioning session is
+  active — re-tap Connect to restart it, and make sure the phone is on
+  the device's `PROV_XXXXXX` AP (not your home Wi-Fi) when entering
+  creds. `provisioning: credentials failed` in the log means a wrong
+  password or the chosen AP was out of range.
+- **`Wi-Fi: connected` but no rows in the Sheet:** check the `cloud:`
+  log — `upload failed: err=… http=…` points at the endpoint (a missing
+  `"ok":true` in the body usually means a token mismatch or a stale
+  `/exec` URL after redeploying the script; redeploy as a *new version*
+  and re-run `cloud set-url`). `endpoint unset` means the URL/token were
+  never set over serial.
 
 ## What's deliberately NOT here yet
 
@@ -319,6 +374,10 @@ If any of these fail, the most likely culprits in order:
   `α + β·grind + γ·grind² + climate + interactions`) and cross-preset
   pooling of climate slopes are deferred until the per-preset model is
   observed to overfit / underfit on real data.
+- Cloud extras beyond one-way shot upload: OTA (factory-only partition
+  today), BLE provisioning (SoftAP only), and bidirectional sync /
+  remote config pull / cloud-driven model retraining. The device pushes
+  shots up; nothing comes back down.
 
 Each is its own step in the brief's build order. See the project's
 memory notes for design decisions already locked in.
@@ -331,7 +390,7 @@ memory notes for design decisions already locked in.
 ├── partitions.csv              custom: nvs + factory (4 MB) + littlefs (~12 MB)
 ├── sdkconfig.defaults          PSRAM, flash, partition table, FreeRTOS tick
 ├── main/
-│   ├── app_main.cpp            display → touch → storage → presets → storage.finalize_migrations → climate → rtc → model → power → ui
+│   ├── app_main.cpp            display → touch → storage → presets → storage.finalize_migrations → climate → rtc → model → cloud → power → ui
 │   ├── board_pins.hpp          verbatim from Waveshare's reference repo
 │   ├── idf_component.yml       managed deps: lvgl, CO5300, CST9217, littlefs
 │   └── CMakeLists.txt
@@ -343,6 +402,11 @@ memory notes for design decisions already locked in.
     ├── presets/                NVS-backed Preset table + tap-to-cycle selection
     ├── rtc/                    PCF85063 driver: build-time seed + epoch_s() for ShotRecord
     ├── power/                  idle state machine: dim @ 30s, off @ 2min, wake on touch
+    ├── cloud/                  Wi-Fi (SoftAP provisioning) + durable-queue shot upload to a Google Sheet
+    │   ├── include/cloud.hpp      IDF-bound API (init/start_provisioning/status/notify_new_shot)
+    │   ├── include/cloud_json.hpp pure JSON payload builder API (host-testable)
+    │   ├── cloud.cpp              IDF glue: wifi_provisioning, NVS endpoint, serial console, sync task
+    │   └── cloud_json.cpp         pure ShotJson → JSON serialization (no IDF)
     ├── model/                  per-preset Bayesian time model + suggested grind + confidence
     │   ├── include/model.hpp      IDF-bound API (init/refit/suggest_for_preset)
     │   ├── include/model_math.hpp pure math API (FitSample, fit, suggest, Suggestion)
@@ -351,7 +415,9 @@ memory notes for design decisions already locked in.
     └── ui/                     screen build (Idle / Post / Presets modes) + mode registry
         ├── include/ui.hpp              public API (start_report)
         ├── ui_report.cpp              screen build + mode registry (switch_mode) + section-swap engine + refreshers + handlers
+        ├── ui_menu.{hpp,cpp}          Menu hub: "MENU" title + Presets / Connections entry pills + Back
         ├── ui_presets.{hpp,cpp}       Presets screen: "PRESETS" title + 3×3 slot grid + Back pill + menu/back glyphs
+        ├── ui_connections.{hpp,cpp}   Connections screen: Wi-Fi/sync status + Connect/Change pill + provisioning QR card
         ├── ui_preset_readout.{hpp,cpp} shared "PRESET N / Xg→Yg / Zs" readout (idle center line, post surface, grid slots)
         ├── ui_bar.{hpp,cpp}           generic scroll/momentum bar engine (grind dial is the only consumer)
         └── ui_theme.hpp               shared layout frame + base palette (mode-specific tuning stays in ui_report)
@@ -363,8 +429,9 @@ tests/
     ├── test_model.cpp             Catch2 cases
     └── third_party/catch.hpp      vendored Catch2 v2 single header
 
-tools/                             host-side scripts (see tools/README.md)
-└── analyze_shots.py               descriptive trend analysis of dump[] log lines
+tools/                             host-side scripts + docs (see tools/README.md)
+├── analyze_shots.py               descriptive trend analysis of dump[] log lines
+└── cloud_apps_script.md           Google Apps Script doPost + Sheet deploy steps for cloud sync
 ```
 
 The `grinder/` component is intentionally NOT scaffolded yet — it'll

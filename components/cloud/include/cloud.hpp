@@ -1,8 +1,9 @@
 #pragma once
 
-// Cloud sync service: connects to WiFi (credentials received over SmartConfig /
-// ESPTouch v2 — no network list or password field on the device) and mirrors
-// every saved shot into a Google Sheet via a Google Apps Script Web App. Upload
+// Cloud sync service: connects to WiFi (credentials received over SoftAP
+// provisioning — the wifi_provisioning manager; no network list or password
+// field on the device, the phone app carries those) and mirrors every saved
+// shot into a Google Sheet via a Google Apps Script Web App. Upload
 // is a durable queue + backfill: a high-water mark in NVS tracks the last
 // uploaded record, and a background task uploads everything above it whenever
 // WiFi is up, so offline pulls, reboots, and existing history all sync.
@@ -19,7 +20,7 @@ namespace espressopost::cloud {
 
 enum class WifiState : uint8_t {
   Disabled,      // no stored creds; idle until provisioning
-  Provisioning,  // ESPTouch v2 listening for creds
+  Provisioning,  // SoftAP up, waiting for creds from the phone app
   Connecting,    // associating / awaiting IP
   Connected,     // got an IP
   Failed,        // gave up reconnecting after repeated attempts
@@ -40,6 +41,10 @@ struct Status {
   int8_t    rssi_dbm;       // last AP RSSI, 0 if unknown
   esp_err_t last_error;     // last sync/HTTP error, ESP_OK if none
   bool      configured;     // endpoint URL + token both present in NVS
+  // SoftAP provisioning identity, populated only while wifi == Provisioning:
+  // the temporary AP to join and the PoP to enter in the phone app.
+  char      prov_ssid[24];
+  char      prov_pop[12];
 };
 
 // Bring up netif/event-loop/WiFi (STA), load the endpoint + HWM from NVS,
@@ -48,8 +53,8 @@ struct Status {
 // climate/rtc (warn + continue); shots just stay queued locally.
 esp_err_t init();
 
-// Begin / abort an ESPTouch v2 provisioning session (driven by a UI button or
-// the `cloud provision` console command).
+// Begin / abort a SoftAP provisioning session (driven by a UI button or the
+// `cloud provision` console command).
 esp_err_t start_provisioning();
 void      cancel_provisioning();
 

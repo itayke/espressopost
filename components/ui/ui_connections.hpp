@@ -3,7 +3,7 @@
 #include "lvgl.h"
 
 // Connections screen (the Mode::Connections view): shows WiFi + cloud-sync
-// status and a "Connect Wi-Fi" action that kicks off ESPTouch v2 provisioning.
+// status and a "Connect Wi-Fi" action that kicks off SoftAP provisioning.
 // Reached from the Menu hub. Like the other panel views, this module owns the
 // look + fade set; ui_report drives mode/navigation and injects the handlers,
 // and polls refresh() while the screen is visible so live status updates show.

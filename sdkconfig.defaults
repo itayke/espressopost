@@ -77,3 +77,8 @@ CONFIG_LV_USE_SNAPSHOT=y
 # FPU, the type stays 4 bytes either way, and svg_to_lvgl.py output + the
 # arrow-rotation math both want sub-pixel precision for clean strokes.
 CONFIG_LV_USE_FLOAT=y
+
+# QR code widget (bundled encoder) — the Connections screen renders the SoftAP
+# provisioning descriptor as a QR so the phone app can scan it instead of typing
+# the AP name + PoP. No external dependency; ships inside LVGL.
+CONFIG_LV_USE_QRCODE=y

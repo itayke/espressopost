@@ -1107,7 +1107,7 @@ void on_back_tap(lv_event_t*) {
   switch_mode(Mode::Menu);
 }
 
-// Connections: Back → Menu; Connect kicks ESPTouch v2 provisioning, then a
+// Connections: Back → Menu; Connect kicks SoftAP provisioning, then a
 // refresh so the status line flips to "listening…" immediately (the visible-mode
 // timer keeps it live thereafter).
 void on_connections_back_tap(lv_event_t*) { switch_mode(Mode::Menu); }
@@ -3071,7 +3071,7 @@ void start_report() {
   s_edit_group = preset_edit::build(scr, on_edit_cancel_tap, on_edit_save_tap,
                                     on_edit_delete_tap);
   // Connections group, reached from the Menu hub; Back → Menu, Connect kicks
-  // ESPTouch v2 provisioning.
+  // SoftAP provisioning.
   s_connections_group = connections_screen::build(scr, on_connections_back_tap,
                                                   on_connections_connect_tap);
 

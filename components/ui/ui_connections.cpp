@@ -4,6 +4,7 @@
 #include "ui_theme.hpp"
 
 #include <cstdio>
+#include <cstring>
 
 namespace espressopost::ui::connections_screen {
 namespace {
@@ -19,13 +20,19 @@ const lv_color_t kColorConnect = kColorText;
 const lv_color_t kColorBack    = kColorText;
 
 // ===== CONNECTIONS LAYOUT ===================================================
+// The QR card and the Connect pill share the mid-screen band but are never
+// shown together (QR only while provisioning, Connect otherwise), so their
+// vertical spans may overlap. The status lines sit above, the hint below.
 constexpr int32_t kTitleTopY          = 30;
-constexpr int32_t kWifiLineTopY       = 122;
-constexpr int32_t kSyncLineTopY       = 162;
-constexpr int32_t kHintLineTopY       = 200;
+constexpr int32_t kWifiLineTopY       = 92;
+constexpr int32_t kSyncLineTopY       = 132;
+constexpr int32_t kHintLineTopY       = 352;
 constexpr int32_t kConnectBtnW        = 224;
 constexpr int32_t kConnectBtnH        = 62;
-constexpr int32_t kConnectCenterDY    = 44;   // below the round center
+constexpr int32_t kConnectCenterDY    = 40;   // below the round center
+constexpr int32_t kQrSize             = 150;  // QR module area
+constexpr int32_t kQrPad              = 12;    // white quiet-zone border around it
+constexpr int32_t kQrCenterDY         = 4;
 constexpr int32_t kBackBtnW           = 132;
 constexpr int32_t kBackBtnH           = 56;
 constexpr int32_t kBackBtnBottomInset = 16;
@@ -35,7 +42,10 @@ lv_obj_t* s_title    = nullptr;
 lv_obj_t* s_wifi_lbl = nullptr;
 lv_obj_t* s_sync_lbl = nullptr;
 lv_obj_t* s_hint_lbl = nullptr;
-lv_obj_t* s_connect  = nullptr;
+lv_obj_t* s_connect     = nullptr;
+lv_obj_t* s_connect_lbl = nullptr;  // relabeled "Connect"/"Change" Wi-Fi by state
+lv_obj_t* s_qr_card  = nullptr;  // white quiet-zone panel behind the QR
+lv_obj_t* s_qr       = nullptr;  // shown only while provisioning
 lv_obj_t* s_back     = nullptr;
 lv_obj_t* s_fade[6]  = {};
 int       s_fade_n   = 0;
@@ -98,7 +108,7 @@ lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_back, lv_event_cb_t on_connect) 
   s_sync_lbl = build_status_line(group, kSyncLineTopY, &lv_font_montserrat_14, kColorHint);
   s_hint_lbl = build_status_line(group, kHintLineTopY, &lv_font_montserrat_14, kColorHint);
 
-  // Connect pill — kicks ESPTouch v2 provisioning via the injected handler.
+  // Connect pill — kicks SoftAP provisioning via the injected handler.
   s_connect = lv_button_create(group);
   lv_obj_set_size(s_connect, kConnectBtnW, kConnectBtnH);
   lv_obj_set_style_radius(s_connect, kConnectBtnH / 2, LV_PART_MAIN);
@@ -110,11 +120,31 @@ lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_back, lv_event_cb_t on_connect) 
   lv_obj_align(s_connect, LV_ALIGN_CENTER, 0, kConnectCenterDY);
   lv_obj_set_ext_click_area(s_connect, kPostBtnExtClick);
   lv_obj_add_event_cb(s_connect, on_connect, LV_EVENT_CLICKED, nullptr);
-  lv_obj_t* connect_lbl = lv_label_create(s_connect);
-  lv_obj_set_style_text_color(connect_lbl, kColorConnect, LV_PART_MAIN);
-  lv_obj_set_style_text_font(connect_lbl, &lv_font_montserrat_24, LV_PART_MAIN);
-  lv_label_set_text(connect_lbl, "Connect Wi-Fi");
-  lv_obj_center(connect_lbl);
+  s_connect_lbl = lv_label_create(s_connect);
+  lv_obj_set_style_text_color(s_connect_lbl, kColorConnect, LV_PART_MAIN);
+  lv_obj_set_style_text_font(s_connect_lbl, &lv_font_montserrat_24, LV_PART_MAIN);
+  lv_label_set_text(s_connect_lbl, "Connect Wi-Fi");
+  lv_obj_center(s_connect_lbl);
+
+  // QR card — a white panel (the quiet zone) holding the QR. Hidden until
+  // provisioning; refresh() swaps it in where the Connect pill sits and fills it
+  // with the SoftAP descriptor so the phone app can scan instead of typing.
+  s_qr_card = lv_obj_create(group);
+  lv_obj_set_size(s_qr_card, kQrSize + 2 * kQrPad, kQrSize + 2 * kQrPad);
+  lv_obj_set_style_bg_color(s_qr_card, lv_color_white(), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(s_qr_card, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_radius(s_qr_card, 8, LV_PART_MAIN);
+  lv_obj_set_style_border_width(s_qr_card, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(s_qr_card, kQrPad, LV_PART_MAIN);
+  lv_obj_clear_flag(s_qr_card, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_align(s_qr_card, LV_ALIGN_CENTER, 0, kQrCenterDY);
+  lv_obj_add_flag(s_qr_card, LV_OBJ_FLAG_HIDDEN);
+
+  s_qr = lv_qrcode_create(s_qr_card);
+  lv_qrcode_set_size(s_qr, kQrSize);
+  lv_qrcode_set_dark_color(s_qr, lv_color_black());
+  lv_qrcode_set_light_color(s_qr, lv_color_white());
+  lv_obj_center(s_qr);
 
   // Back pill — bottom-center, identical geometry to the other panels'.
   s_back = lv_button_create(group);
@@ -184,7 +214,40 @@ void refresh() {
   lv_label_set_text(s_wifi_lbl, wifi_txt);
   lv_obj_set_style_text_color(s_wifi_lbl, wifi_col, LV_PART_MAIN);
 
-  // Sync line.
+  const bool provisioning =
+      (st.wifi == cloud::WifiState::Provisioning && st.prov_ssid[0] != '\0');
+
+  // While provisioning, the QR card takes the mid-screen band (Connect pill +
+  // sync line hide); otherwise the Connect pill is shown and the QR hidden.
+  if (provisioning) {
+    // Encode Espressif's standard provisioning descriptor; the SoftAP app scans
+    // it to auto-fill the AP name + PoP. Only re-render when it changes (refresh
+    // runs ~1 Hz) to avoid re-encoding every tick.
+    char qr[96];
+    const int n = std::snprintf(qr, sizeof(qr),
+        "{\"ver\":\"v1\",\"name\":\"%s\",\"pop\":\"%s\",\"transport\":\"softap\"}",
+        st.prov_ssid, st.prov_pop);
+    static char s_qr_last[96] = {};
+    if (n > 0 && std::strcmp(qr, s_qr_last) != 0) {
+      lv_qrcode_update(s_qr, qr, static_cast<uint32_t>(n));
+      std::snprintf(s_qr_last, sizeof(s_qr_last), "%s", qr);
+    }
+    lv_obj_remove_flag(s_qr_card, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_connect, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_sync_lbl, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_add_flag(s_qr_card, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(s_connect, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_remove_flag(s_sync_lbl, LV_OBJ_FLAG_HIDDEN);
+    // Already on WiFi → the button re-provisions to switch networks, so label it
+    // honestly rather than implying it isn't connected.
+    lv_label_set_text(s_connect_lbl,
+                      st.wifi == cloud::WifiState::Connected ? "Disconnect"
+                                                             : "Connect Wi-Fi");
+    lv_obj_center(s_connect_lbl);
+  }
+
+  // Sync line (hidden while provisioning).
   char sync_buf[48];
   if (!st.configured) {
     lv_label_set_text(s_sync_lbl, "Cloud: endpoint not set");
@@ -199,13 +262,17 @@ void refresh() {
     lv_label_set_text(s_sync_lbl, sync_buf);
   }
 
-  // Hint line — what to do next, by state.
+  // Hint line — what to do next, by state. While provisioning it's the manual
+  // fallback (in case the user can't scan); otherwise it's the next step.
+  char hint_buf[96];
   const char* hint = "";
-  if (st.wifi == cloud::WifiState::Provisioning) {
-    hint = "Open the EspTouch app on your phone";
+  if (provisioning) {
+    std::snprintf(hint_buf, sizeof(hint_buf), "Scan in the app\nor join %s / PoP %s",
+                  st.prov_ssid, st.prov_pop);
+    hint = hint_buf;
   } else if (st.wifi == cloud::WifiState::Disabled ||
              st.wifi == cloud::WifiState::Failed) {
-    hint = "Tap Connect, then use the EspTouch app";
+    hint = "Tap Connect, then open ESP SoftAP Provisioning";
   } else if (st.wifi == cloud::WifiState::Connected && !st.configured) {
     hint = "Set endpoint over serial: cloud set-url / set-token";
   }

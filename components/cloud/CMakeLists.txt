@@ -11,6 +11,7 @@ idf_component_register(
         esp_http_client
         esp-tls
         mbedtls
+        wifi_provisioning
         nvs_flash
         console
         storage

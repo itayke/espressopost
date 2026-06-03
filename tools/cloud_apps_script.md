@@ -97,9 +97,12 @@ cloud set-token PUT-A-LONG-RANDOM-STRING-HERE
 cloud status          # shows wifi/sync state; token is never echoed back
 ```
 
-Then connect WiFi (Menu ▸ Connections ▸ Connect Wi-Fi, then the EspTouch app on
-your phone). Once online, the device backfills any unsynced shots and uploads
-each new one on submit. `cloud sync` forces an immediate attempt.
+Then connect WiFi: **Menu ▸ Connections ▸ Connect Wi-Fi**. The screen shows a
+temporary AP name (`PROV_xxxxxx`) and a PoP code; in the **ESP SoftAP
+Provisioning** app (Espressif, on the Play Store) join that AP, enter the PoP,
+and pick your network + password. Once online, the device backfills any unsynced
+shots and uploads each new one on submit. `cloud sync` forces an immediate
+attempt.
 
 ## Notes / gotchas
 

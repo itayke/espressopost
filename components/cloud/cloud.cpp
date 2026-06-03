@@ -9,10 +9,12 @@
 #include "esp_event.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_netif.h"
-#include "esp_smartconfig.h"
 #include "esp_wifi.h"
 #include "esp_wifi_default.h"
+#include "wifi_provisioning/manager.h"
+#include "wifi_provisioning/scheme_softap.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/semphr.h"
@@ -82,6 +84,14 @@ bool      s_provisioning = false;
 
 char s_url[kUrlMax]     = {};
 char s_token[kTokenMax] = {};
+
+// SoftAP provisioning identity, derived from the WiFi MAC at provisioning start
+// and shown on the Connections screen so the user can join the AP + enter the
+// PoP in the phone app. The PoP gates the security1 (curve25519+AES) handshake —
+// printing it on the device's own screen is the intended "proof of physical
+// access" pattern.
+char s_prov_ssid[24] = {};
+char s_prov_pop[12]  = {};
 
 // --- small locked accessors ---
 struct Lock {
@@ -298,12 +308,14 @@ void sync_task(void* /*arg*/) {
   }
 }
 
-// --- WiFi / SmartConfig events ---
+// --- WiFi / provisioning events ---
 
 void on_event(void* /*arg*/, esp_event_base_t base, int32_t id, void* data) {
   if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
-    // Fires once after esp_wifi_start(). Auto-connect only if creds are stored;
-    // an unprovisioned device sits idle until start_provisioning().
+    // Fires once after esp_wifi_start(). During provisioning the manager owns
+    // the connect sequence, so stay out of its way. Otherwise auto-connect only
+    // if creds are stored; an unprovisioned device sits idle until Connect.
+    { Lock l; if (s_provisioning) return; }
     if (has_stored_creds()) {
       set_wifi_state(WifiState::Connecting);
       esp_wifi_connect();
@@ -317,7 +329,7 @@ void on_event(void* /*arg*/, esp_event_base_t base, int32_t id, void* data) {
     { Lock l; s_rssi = 0; }
     bool prov; int retry;
     { Lock l; prov = s_provisioning; retry = ++s_wifi_retry; }
-    if (prov) return;  // SmartConfig is mid-handshake; let it drive reconnect
+    if (prov) return;  // provisioning manager is driving the connect
     if (retry <= kWifiMaxRetry) {
       set_wifi_state(WifiState::Connecting);
       esp_wifi_connect();
@@ -338,28 +350,34 @@ void on_event(void* /*arg*/, esp_event_base_t base, int32_t id, void* data) {
     return;
   }
 
-  if (base == SC_EVENT && id == SC_EVENT_GOT_SSID_PSWD) {
-    auto* evt = static_cast<smartconfig_event_got_ssid_pswd_t*>(data);
-    wifi_config_t cfg = {};
-    std::memcpy(cfg.sta.ssid, evt->ssid, sizeof(cfg.sta.ssid));
-    std::memcpy(cfg.sta.password, evt->password, sizeof(cfg.sta.password));
-    if (evt->bssid_set) {
-      cfg.sta.bssid_set = true;
-      std::memcpy(cfg.sta.bssid, evt->bssid, sizeof(cfg.sta.bssid));
+  if (base == WIFI_PROV_EVENT) {
+    switch (id) {
+      case WIFI_PROV_CRED_RECV:
+        ESP_LOGI(kTag, "provisioning: received WiFi credentials");
+        break;
+      case WIFI_PROV_CRED_FAIL:
+        ESP_LOGW(kTag, "provisioning: credentials failed (wrong password / AP not found)");
+        set_wifi_state(WifiState::Failed);
+        // Let the app retry without a reboot.
+        wifi_prov_mgr_reset_sm_state_on_failure();
+        break;
+      case WIFI_PROV_CRED_SUCCESS:
+        ESP_LOGI(kTag, "provisioning: credentials applied");
+        // GOT_IP can arrive before this event (STA connects mid-handshake) —
+        // don't clobber an already-Connected state back to Connecting, or we'd
+        // get stuck (no further GOT_IP fires to recover it).
+        { Lock l; if (s_wifi != WifiState::Connected) s_wifi = WifiState::Connecting; }
+        break;
+      case WIFI_PROV_END:
+        // Provisioning service done — tear down the AP + httpd. STA stays
+        // connected; IP_EVENT_STA_GOT_IP flips us to Connected.
+        wifi_prov_mgr_deinit();
+        { Lock l; s_provisioning = false; s_prov_ssid[0] = '\0'; s_prov_pop[0] = '\0'; }
+        ESP_LOGI(kTag, "provisioning finished");
+        break;
+      default:
+        break;
     }
-    ESP_LOGI(kTag, "got creds for SSID '%s' via SmartConfig", reinterpret_cast<char*>(cfg.sta.ssid));
-    esp_wifi_disconnect();
-    esp_wifi_set_config(WIFI_IF_STA, &cfg);
-    set_wifi_state(WifiState::Connecting);
-    { Lock l; s_wifi_retry = 0; }
-    esp_wifi_connect();
-    return;
-  }
-
-  if (base == SC_EVENT && id == SC_EVENT_SEND_ACK_DONE) {
-    esp_smartconfig_stop();
-    { Lock l; s_provisioning = false; }
-    ESP_LOGI(kTag, "SmartConfig done");
     return;
   }
 }
@@ -393,6 +411,10 @@ void print_status() {
               s_url[0] ? s_url : "(unset)",
               token_len ? "(set)" : "(unset)",
               esp_err_to_name(st.last_error));
+  if (st.wifi == WifiState::Provisioning && st.prov_ssid[0]) {
+    std::printf("  provisioning: join AP '%s', PoP '%s' in the app\n",
+                st.prov_ssid, st.prov_pop);
+  }
 }
 
 int cmd_cloud(int argc, char** argv) {
@@ -484,23 +506,46 @@ esp_err_t init() {
   load_config();
 
   // We are the first/only owner of the default event loop + netif today; guard
-  // creation against ESP_ERR_INVALID_STATE so a future second user is safe.
+  // creation against ESP_ERR_INVALID_STATE so a future second user is safe. Both
+  // STA and AP netifs are needed: the SoftAP scheme brings up a temporary AP
+  // during provisioning, STA is the normal connection.
   esp_err_t e = esp_netif_init();
   if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) return e;
   e = esp_event_loop_create_default();
   if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) return e;
   s_netif = esp_netif_create_default_wifi_sta();
+  esp_netif_create_default_wifi_ap();
 
   wifi_init_config_t wcfg = WIFI_INIT_CONFIG_DEFAULT();
   ESP_RETURN_ON_ERROR(esp_wifi_init(&wcfg), kTag, "wifi_init");
+  ESP_RETURN_ON_ERROR(esp_wifi_set_storage(WIFI_STORAGE_FLASH), kTag, "wifi_storage");
 
   esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &on_event, nullptr, nullptr);
   esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &on_event, nullptr, nullptr);
-  esp_event_handler_instance_register(SC_EVENT, ESP_EVENT_ANY_ID, &on_event, nullptr, nullptr);
+  esp_event_handler_instance_register(WIFI_PROV_EVENT, ESP_EVENT_ANY_ID, &on_event, nullptr, nullptr);
 
-  ESP_RETURN_ON_ERROR(esp_wifi_set_storage(WIFI_STORAGE_FLASH), kTag, "wifi_storage");
-  ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), kTag, "wifi_mode");
-  ESP_RETURN_ON_ERROR(esp_wifi_start(), kTag, "wifi_start");  // STA_START handler connects if creds stored
+  // Init the provisioning manager just to read whether STA creds already exist,
+  // then deinit it — we only spin the SoftAP service up on demand (the Connect
+  // button), not automatically at boot.
+  // Zero-init leaves scheme_event_handler = {NULL,NULL} (== WIFI_PROV_EVENT_
+  // HANDLER_NONE), which is what the SoftAP scheme wants (only BLE needs one).
+  wifi_prov_mgr_config_t prov_cfg = {};
+  prov_cfg.scheme = wifi_prov_scheme_softap;
+  ESP_RETURN_ON_ERROR(wifi_prov_mgr_init(prov_cfg), kTag, "prov_init");
+
+  bool provisioned = false;
+  wifi_prov_mgr_is_provisioned(&provisioned);
+  wifi_prov_mgr_deinit();
+
+  if (provisioned) {
+    // Stored creds → normal STA bring-up; STA_START handler issues connect().
+    ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), kTag, "wifi_mode");
+    ESP_RETURN_ON_ERROR(esp_wifi_start(), kTag, "wifi_start");
+    set_wifi_state(WifiState::Connecting);
+  } else {
+    // No creds: leave the radio idle until the user starts provisioning.
+    set_wifi_state(WifiState::Disabled);
+  }
 
   setup_console();
 
@@ -509,30 +554,65 @@ esp_err_t init() {
   if (s_task == nullptr) return ESP_ERR_NO_MEM;
 
   ESP_LOGI(kTag, "init: %s, endpoint %s",
-           has_stored_creds() ? "creds stored" : "no creds",
+           provisioned ? "creds stored" : "no creds",
            configured() ? "set" : "unset");
   return ESP_OK;
 }
 
+namespace {
+// Derive the SoftAP name + PoP from the WiFi MAC: deterministic (same code every
+// time for a given device), unique per device, and shown on the Connections
+// screen for the user to match in the app.
+void compute_prov_identity() {
+  uint8_t mac[6] = {};
+  esp_read_mac(mac, ESP_MAC_WIFI_STA);  // reads efuse; works even pre-wifi-start
+  Lock l;
+  std::snprintf(s_prov_ssid, sizeof(s_prov_ssid), "PROV_%02X%02X%02X",
+                mac[3], mac[4], mac[5]);
+  std::snprintf(s_prov_pop, sizeof(s_prov_pop), "%02X%02X%02X%02X",
+                mac[2], mac[3], mac[4], mac[5]);
+}
+}  // namespace
+
 esp_err_t start_provisioning() {
   if (s_events == nullptr) return ESP_ERR_INVALID_STATE;
   { Lock l; if (s_provisioning) return ESP_OK; s_provisioning = true; }
+
+  compute_prov_identity();  // fills s_prov_ssid / s_prov_pop
   set_wifi_state(WifiState::Provisioning);
 
-  ESP_RETURN_ON_ERROR(esp_smartconfig_set_type(SC_TYPE_ESPTOUCH_V2), kTag, "sc_type");
-  smartconfig_start_config_t cfg = SMARTCONFIG_START_CONFIG_DEFAULT();
-  const esp_err_t e = esp_smartconfig_start(&cfg);
-  if (e != ESP_OK) {
-    { Lock l; s_provisioning = false; }
-    set_wifi_state(has_stored_creds() ? WifiState::Connecting : WifiState::Disabled);
+  // (Re)init the manager — init() deinit'd it after the boot-time check. SoftAP
+  // scheme, security1 (curve25519 + AES) gated by the PoP. service_key=NULL →
+  // open provisioning AP (the security1 channel is what protects the exchange).
+  // Pass the persistent s_prov_* globals (not stack locals): the manager holds
+  // the PoP pointer for the whole session, and they stay valid + immutable until
+  // WIFI_PROV_END / cancel clears them after the manager is torn down.
+  wifi_prov_mgr_config_t prov_cfg = {};
+  prov_cfg.scheme = wifi_prov_scheme_softap;  // zero-init handler == HANDLER_NONE
+  esp_err_t e = wifi_prov_mgr_init(prov_cfg);
+  if (e == ESP_OK) {
+    e = wifi_prov_mgr_start_provisioning(WIFI_PROV_SECURITY_1,
+                                         /*pop=*/s_prov_pop, s_prov_ssid,
+                                         /*service_key=*/nullptr);
+    if (e != ESP_OK) wifi_prov_mgr_deinit();
   }
-  ESP_LOGI(kTag, "ESPTouch v2 provisioning started (%s)", esp_err_to_name(e));
-  return e;
+  if (e != ESP_OK) {
+    { Lock l; s_provisioning = false; s_prov_ssid[0] = '\0'; s_prov_pop[0] = '\0'; }
+    set_wifi_state(has_stored_creds() ? WifiState::Connecting : WifiState::Disabled);
+    ESP_LOGE(kTag, "provisioning start failed: %s", esp_err_to_name(e));
+    return e;
+  }
+  ESP_LOGI(kTag, "SoftAP provisioning started: join '%s' (PoP %s)", s_prov_ssid, s_prov_pop);
+  return ESP_OK;
 }
 
 void cancel_provisioning() {
   { Lock l; if (!s_provisioning) return; s_provisioning = false; }
-  esp_smartconfig_stop();
+  // Tear the manager down first (it may still be reading the PoP), then clear
+  // the identity strings.
+  wifi_prov_mgr_stop_provisioning();
+  wifi_prov_mgr_deinit();
+  { Lock l; s_prov_ssid[0] = '\0'; s_prov_pop[0] = '\0'; }
   set_wifi_state(is_connected() ? WifiState::Connected
                                 : (has_stored_creds() ? WifiState::Connecting
                                                       : WifiState::Disabled));
@@ -552,6 +632,8 @@ Status status() {
     st.rssi_dbm     = s_rssi;
     st.last_error   = s_last_error;
     st.configured   = (s_url[0] != '\0' && s_token[0] != '\0');
+    std::snprintf(st.prov_ssid, sizeof(st.prov_ssid), "%s", s_prov_ssid);
+    std::snprintf(st.prov_pop, sizeof(st.prov_pop), "%s", s_prov_pop);
     hwm             = s_hwm;
     xSemaphoreGive(s_mutex);
   }
