@@ -1685,18 +1685,15 @@ void refresh_climate_pressure(const climate::Reading& r) {
   }
   position_value_block(t, vbuf, /*inline*/"", newline_suf);
 
-  // Drive the gauge needle from pressure: ±1 inHg around 30.00 still pegs
-  // the dial at ±90°, but the curve is sqrt-shaped (|Δ|^0.5, sign preserved)
-  // so small deviations move the needle visibly — e.g. ±0.1 inHg lands at
-  // ~28° instead of the linear 9°. The mapping always uses inHg internally;
-  // the unit toggle is presentation-only, not physical, so the dial reads
-  // from the same source either way. Only invalidate when the rounded angle
-  // changes a visible amount, so the icon doesn't repaint on imperceptible
-  // drift.
+  // Drive the gauge needle from pressure: ±1 inHg around 30.00 pegs the dial
+  // at ±90°, mapped linearly (deviation in inHg × 90°). The mapping always
+  // uses inHg internally; the unit toggle is presentation-only, not physical,
+  // so the dial reads from the same source either way. Only invalidate when
+  // the rounded angle changes a visible amount, so the icon doesn't repaint on
+  // imperceptible drift.
   const float inhg     = climate::hpa_to_inhg(r.pressure_hpa);
   const float diff     = inhg - 30.0f;
-  const float curved   = std::copysign(std::sqrt(std::fabs(diff)), diff);
-  const float new_deg  = std::clamp(curved * 90.0f, -90.0f, 90.0f);
+  const float new_deg  = std::clamp(diff * 90.0f, -90.0f, 90.0f);
   if (std::fabs(new_deg - t.icon_state.dynamic) >= 1.0f) {
     t.icon_state.dynamic = new_deg;
     lv_obj_invalidate(t.icon);
