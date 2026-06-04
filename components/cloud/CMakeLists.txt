@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "cloud.cpp"
         "cloud_json.cpp"
+        "cloud_portal.cpp"
     INCLUDE_DIRS
         "include"
     REQUIRES
@@ -9,9 +10,9 @@ idf_component_register(
         esp_netif
         esp_event
         esp_http_client
+        esp_http_server
         esp-tls
         mbedtls
-        wifi_provisioning
         nvs_flash
         console
         storage

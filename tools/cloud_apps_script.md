@@ -5,8 +5,9 @@ Google Apps Script Web App, which appends one row per shot to a Sheet. This is
 the "simple Google cloud script into a sheet" sink — no server to run, no
 billing, just a bound script on a Sheet you own.
 
-The device holds the deployment URL + a shared token in NVS (set over the serial
-console — see below), never in the firmware source.
+The device holds the deployment URL + a shared token in NVS (entered in the
+captive-portal setup form, or over the serial console — see below), never in the
+firmware source.
 
 ## 1. Create the Sheet + script
 
@@ -89,26 +90,34 @@ the URL lives in NVS (set it again with the command below), not in firmware.
 
 ## 3. Point the device at it
 
-Over the serial console (`idf.py monitor`, prompt `esp>`):
+**Menu ▸ Connections ▸ Connect Wi-Fi.** The screen shows a Wi-Fi-join QR for a
+temporary setup network (`EP SETUP xxxxxx`). Scan it (the phone's camera offers "Join
+network") or join that open AP from Wi-Fi settings; the device's setup page opens
+automatically. The single form takes your **Wi-Fi network + password** *and* the
+**endpoint URL + token** below — paste the `/exec` URL and your `TOKEN`, submit,
+and the device connects, backfills any unsynced shots, and uploads each new one on
+submit. No app, no serial.
+
+```
+url:   https://script.google.com/macros/s/AKfy.../exec
+token: PUT-A-LONG-RANDOM-STRING-HERE
+```
+
+Serial fallback (`idf.py monitor`, prompt `esp>`) for recovery/headless setup:
 
 ```
 cloud set-url https://script.google.com/macros/s/AKfy.../exec
 cloud set-token PUT-A-LONG-RANDOM-STRING-HERE
 cloud status          # shows wifi/sync state; token is never echoed back
+cloud sync            # force an immediate upload attempt
 ```
-
-Then connect WiFi: **Menu ▸ Connections ▸ Connect Wi-Fi**. The screen shows a
-temporary AP name (`PROV_xxxxxx`) and a PoP code; in the **ESP SoftAP
-Provisioning** app (Espressif, on the Play Store) join that AP, enter the PoP,
-and pick your network + password. Once online, the device backfills any unsynced
-shots and uploads each new one on submit. `cloud sync` forces an immediate
-attempt.
 
 ## Notes / gotchas
 
 - **Why the token, not auth:** a Web App set to "Anyone" needs no OAuth from the
   device (which has no browser), so the shared token is the access control.
-  Rotate it by editing `TOKEN`, redeploying, and re-running `cloud set-token`.
+  Rotate it by editing `TOKEN`, redeploying, and re-submitting the setup form
+  (or `cloud set-token`).
 - **The 302 redirect:** Apps Script answers `/exec` with a 302 to
   `script.googleusercontent.com`; `doPost` runs on the first hop (with the body)
   and the device's HTTP client follows the redirect to read the result. The

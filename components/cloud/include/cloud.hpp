@@ -1,16 +1,19 @@
 #pragma once
 
-// Cloud sync service: connects to WiFi (credentials received over SoftAP
-// provisioning — the wifi_provisioning manager; no network list or password
-// field on the device, the phone app carries those) and mirrors every saved
-// shot into a Google Sheet via a Google Apps Script Web App. Upload
-// is a durable queue + backfill: a high-water mark in NVS tracks the last
-// uploaded record, and a background task uploads everything above it whenever
-// WiFi is up, so offline pulls, reboots, and existing history all sync.
+// Cloud sync service: connects to WiFi (credentials captured by an on-device
+// captive-portal web form — the device hosts its own SoftAP + setup page, so
+// there's no network list or password field on the 466px screen and no companion
+// app) and mirrors every saved shot into a Google Sheet via a Google Apps Script
+// Web App. Upload is a durable queue + backfill: a high-water mark in NVS tracks
+// the last uploaded record, and a background task uploads everything above it
+// whenever WiFi is up, so offline pulls, reboots, and existing history all sync.
+//
+// The captive-portal form also captures the endpoint URL + shared token, so the
+// whole device is configured from a phone browser; the serial console
+// (`cloud set-url`/`set-token`) remains as a recovery/headless fallback.
 //
 // Shaped like the climate component: non-fatal init(), a core-0 background task,
-// and a mutex-guarded status snapshot the UI reads. The endpoint URL + shared
-// token live in NVS, set over the serial console (`cloud set-url`/`set-token`).
+// and a mutex-guarded status snapshot the UI reads.
 
 #include <cstdint>
 
@@ -20,7 +23,7 @@ namespace espressopost::cloud {
 
 enum class WifiState : uint8_t {
   Disabled,      // no stored creds; idle until provisioning
-  Provisioning,  // SoftAP up, waiting for creds from the phone app
+  Provisioning,  // SoftAP + captive-portal form up, waiting for a submission
   Connecting,    // associating / awaiting IP
   Connected,     // got an IP
   Failed,        // gave up reconnecting after repeated attempts
@@ -41,10 +44,10 @@ struct Status {
   int8_t    rssi_dbm;       // last AP RSSI, 0 if unknown
   esp_err_t last_error;     // last sync/HTTP error, ESP_OK if none
   bool      configured;     // endpoint URL + token both present in NVS
-  // SoftAP provisioning identity, populated only while wifi == Provisioning:
-  // the temporary AP to join and the PoP to enter in the phone app.
+  char      net_ssid[33];   // network joined while wifi == Connected ("" otherwise)
+  // SoftAP name, populated only while wifi == Provisioning: the temporary setup
+  // network to join (shown as a Wi-Fi-join QR + text on the Connections screen).
   char      prov_ssid[24];
-  char      prov_pop[12];
 };
 
 // Bring up netif/event-loop/WiFi (STA), load the endpoint + HWM from NVS,
@@ -57,6 +60,11 @@ esp_err_t init();
 // `cloud provision` console command).
 esp_err_t start_provisioning();
 void      cancel_provisioning();
+
+// Drop the current connection and erase the stored Wi-Fi credentials so the
+// device won't auto-reconnect (state → Disabled). The cloud endpoint URL/token
+// are left intact. Driven by the Connections "Forget Network" control.
+void      forget();
 
 // Mutex-guarded snapshot for the UI. Cheap; safe to call from the LVGL task.
 Status status();

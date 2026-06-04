@@ -28,9 +28,11 @@ Back pill to Idle. **Presets** is a "PRESETS" title over a 3×3 grid of
 slots (each showing `PRESET N` / `Xg → Yg` / `Zs` tinted in the preset's
 accent color, empty slots a bare outline); it's view-only for now —
 per-slot select/edit/color-pick is the next step. **Connections** is the
-cloud-sync screen (Wi-Fi state, sync state, a Connect/Change-Wi-Fi pill
-that starts SoftAP provisioning, and a QR card carrying the provisioning
-descriptor — see the cloud paragraph below). Both screens Back to the
+cloud-sync screen (Wi-Fi state, sync state, a Connect/Reconfigure pill
+that starts captive-portal provisioning, a red Forget Network pill when
+connected, and a QR card carrying a Wi-Fi-join code for the setup
+network — see the cloud paragraph below).
+Both screens Back to the
 Menu hub; every mode swap fades each section individually rather than the
 whole screen. The grind value persists per preset
 (NVS key `gN`); the model's recommendation lands in a separate
@@ -97,24 +99,30 @@ line, every step becomes a no-op forever.
 
 **Cloud sync (Wi-Fi + per-shot upload to a Google Sheet):** a
 `components/cloud/` service mirrors every saved shot into a Google Sheet
-via a Google Apps Script Web App. Wi-Fi credentials arrive over **SoftAP
-provisioning** (the `wifi_provisioning` manager, security1 + a
-proof-of-possession) — there is no network list or password field on the
-466 px screen; the phone app (Espressif's "ESP SoftAP Provisioning")
-carries those, and the Connections screen renders a scannable QR of the
-provisioning descriptor so the app can join the device's temporary AP
-without typing the SSID + PoP. Creds persist to flash and the device
-auto-reconnects on boot. Upload is a **durable queue + backfill**: a
-high-water mark in NVS tracks the last-uploaded record and a core-0
-background task uploads everything above it whenever Wi-Fi is up over TLS
-(cert bundle; Apps Script `ContentService` always answers HTTP 200, so
-success is gated on the response body containing `"ok":true`), so offline
-pulls, reboots, and the existing shot history all sync. The endpoint URL
-and shared token live in NVS, set over the serial console
-(`cloud set-url` / `cloud set-token`) — never reflashed, never in the
-source tree, never logged. `cloud::init()` is non-fatal (warn + continue
-like climate/rtc): no network just means shots stay queued locally. The
-JSON payload builder (`cloud_json.{hpp,cpp}`) is IDF-free and host-tested.
+via a Google Apps Script Web App. Setup is a **captive-portal web form**
+the device hosts itself (`components/cloud/cloud_portal.{hpp,cpp}`): tap
+Connect and the device raises an open SoftAP, a DNS responder that points
+every lookup at itself, and an HTTP server. The Connections screen shows a
+standard Wi-Fi-join QR for that AP — the phone's native camera offers
+"Join network", and once joined the OS captive-portal check auto-opens the
+device's page (no companion app). One form captures the **Wi-Fi network +
+password + cloud endpoint URL + token** together (the network field is a
+dropdown of a live scan, with manual entry for hidden SSIDs); there is no
+network list or password field on the 466 px screen, and no serial step.
+Creds persist to flash and the device auto-reconnects on boot. The token
+crosses the local AP hop in cleartext — an accepted tradeoff for a short,
+user-initiated, on-prem setup window. Upload is a **durable queue +
+backfill**: a high-water mark in NVS tracks the last-uploaded record and a
+core-0 background task uploads everything above it whenever Wi-Fi is up
+over TLS (cert bundle; Apps Script `ContentService` always answers HTTP
+200, so success is gated on the response body containing `"ok":true`), so
+offline pulls, reboots, and the existing shot history all sync. The
+endpoint URL and shared token live in NVS — never reflashed, never in the
+source tree, never logged; the serial console (`cloud set-url` /
+`cloud set-token`) stays as a recovery/headless fallback. `cloud::init()`
+is non-fatal (warn + continue like climate/rtc): no network just means
+shots stay queued locally. The JSON payload builder
+(`cloud_json.{hpp,cpp}`) is IDF-free and host-tested.
 The Apps Script and deploy steps ship under
 [`tools/cloud_apps_script.md`](tools/cloud_apps_script.md).
 
@@ -301,20 +309,26 @@ instead.
    `fit()` in
    [`components/model/model_math.cpp`](components/model/model_math.cpp).
 10. **Cloud (optional, needs Wi-Fi + an Apps Script endpoint).** Menu →
-    **Connections**. Tap **Connect Wi-Fi**: a QR card appears and the
-    line reads `Wi-Fi: provisioning`; open the "ESP SoftAP Provisioning"
-    app, scan the QR (or join `PROV_XXXXXX` and enter the shown PoP), and
-    pick your network. On success the line flips to
-    `Wi-Fi: connected (-NN dBm)` (green) and the button relabels to
-    **Change Wi-Fi**; reboot and it auto-reconnects. With no endpoint yet
-    the sync line reads `Cloud: endpoint not set`. At the `esp>` serial
-    prompt run `cloud set-url <https-/exec-URL>` and
-    `cloud set-token <token>` (the token is never echoed), then `cloud
-    sync` — the existing shot history backfills into the Sheet and the
-    sync line tracks pending → synced. Submit a new shot and a row should
-    appear within seconds; pull the network and resubmit, then reconnect,
-    and the queued shots upload on their own. Deploy steps for the Sheet
-    are in [`tools/cloud_apps_script.md`](tools/cloud_apps_script.md).
+    **Connections**. Tap **Connect Wi-Fi**: a Wi-Fi-join QR card appears
+    and the line reads `Wi-Fi: listening…`. Scan the QR (the camera offers
+    "Join network") or join the open `EP SETUP XXXXXX` AP from Wi-Fi
+    settings; the setup page auto-pops — reliably on iOS, on some Android
+    skins via the "Sign in to network" notification (fallback: browse to
+    `192.168.4.1`). The form shows a dropdown of nearby networks: pick
+    yours, enter the password plus the Apps Script `/exec` URL and token,
+    and submit. The device shows "Connecting…", the setup AP disappears,
+    and the line flips to `Wi-Fi: <network name>` (green, with signal
+    strength on a line under it) and the button relabels to **Reconfigure**
+    — with a red **Forget Network** pill below it (drops the link + erases
+    the stored creds, behind a confirm). Reboot and it auto-reconnects with
+    no re-entry. The existing shot history backfills into the Sheet and the
+    sync line tracks pending → synced; submit a new shot and a row appears
+    within seconds. Wrong password → the device retries, then shows
+    `Wi-Fi: failed` so you can tap Connect and try again. Serial fallback
+    still works (`cloud set-url` / `set-token` / `status` at the `esp>`
+    prompt). Deploy
+    steps for the Sheet are in
+    [`tools/cloud_apps_script.md`](tools/cloud_apps_script.md).
 
 If any of these fail, the most likely culprits in order:
 
@@ -342,18 +356,20 @@ If any of these fail, the most likely culprits in order:
   than a BME280 is on the bus, or it's a BMP280 (chip id `0x58`,
   pressure + temp only — drop the humidity bits if you want to support
   it).
-- **Connections stays on `Wi-Fi: provisioning` / app can't find the
-  device:** the SoftAP only exists while a provisioning session is
-  active — re-tap Connect to restart it, and make sure the phone is on
-  the device's `PROV_XXXXXX` AP (not your home Wi-Fi) when entering
-  creds. `provisioning: credentials failed` in the log means a wrong
-  password or the chosen AP was out of range.
+- **Setup page won't pop after joining `EP SETUP XXXXXX`:** the SoftAP only
+  exists while setup is active (the screen reads `Wi-Fi: listening…`) —
+  re-tap Connect to restart it, and make sure the phone is actually on the
+  `EP SETUP XXXXXX` network. If the OS doesn't auto-open the page (some
+  Android skins), tap the "Sign in to network" notification or browse to
+  `192.168.4.1`. `provisioning: connect failed after N tries` in the log
+  means a wrong password or the chosen network was out of range; the screen
+  drops to `Wi-Fi: failed` — tap Connect to run setup again.
 - **`Wi-Fi: connected` but no rows in the Sheet:** check the `cloud:`
   log — `upload failed: err=… http=…` points at the endpoint (a missing
   `"ok":true` in the body usually means a token mismatch or a stale
   `/exec` URL after redeploying the script; redeploy as a *new version*
-  and re-run `cloud set-url`). `endpoint unset` means the URL/token were
-  never set over serial.
+  and re-submit the form, or re-run `cloud set-url`). `endpoint unset`
+  means the URL/token were never set.
 
 ## What's deliberately NOT here yet
 
@@ -375,9 +391,11 @@ If any of these fail, the most likely culprits in order:
   pooling of climate slopes are deferred until the per-preset model is
   observed to overfit / underfit on real data.
 - Cloud extras beyond one-way shot upload: OTA (factory-only partition
-  today), BLE provisioning (SoftAP only), and bidirectional sync /
-  remote config pull / cloud-driven model retraining. The device pushes
-  shots up; nothing comes back down.
+  today), a `/status` endpoint so the "Connecting…" page can show live
+  success/failure, an encrypted-token setup path (the cleartext local-AP
+  hop is accepted for now), and bidirectional sync / remote config pull /
+  cloud-driven model retraining. The device pushes shots up; nothing comes
+  back down.
 
 Each is its own step in the brief's build order. See the project's
 memory notes for design decisions already locked in.
@@ -402,9 +420,10 @@ memory notes for design decisions already locked in.
     ├── presets/                NVS-backed Preset table + tap-to-cycle selection
     ├── rtc/                    PCF85063 driver: build-time seed + epoch_s() for ShotRecord
     ├── power/                  idle state machine: dim @ 30s, off @ 2min, wake on touch
-    ├── cloud/                  Wi-Fi (SoftAP provisioning) + durable-queue shot upload to a Google Sheet
+    ├── cloud/                  Wi-Fi (captive-portal setup) + durable-queue shot upload to a Google Sheet
     │   ├── include/cloud.hpp      public API (init/start_provisioning/status/notify_new_shot)
-    │   ├── cloud.cpp              IDF glue: wifi_provisioning, NVS endpoint, serial console, sync task
+    │   ├── cloud.cpp              IDF glue: Wi-Fi lifecycle, NVS endpoint, serial console, sync task
+    │   ├── cloud_portal.{hpp,cpp} captive portal: SoftAP + DNS responder + HTTP setup form (Wi-Fi + endpoint)
     │   ├── cloud_json.hpp         pure JSON payload builder API — internal (host test + cloud.cpp only)
     │   └── cloud_json.cpp         pure ShotJson → JSON serialization (no IDF)
     ├── model/                  per-preset Bayesian time model + suggested grind + confidence
@@ -417,7 +436,7 @@ memory notes for design decisions already locked in.
         ├── ui_report.cpp              screen build + mode registry (switch_mode) + section-swap engine + refreshers + handlers
         ├── ui_menu.{hpp,cpp}          Menu hub: "MENU" title + Presets / Connections entry pills + Back
         ├── ui_presets.{hpp,cpp}       Presets screen: "PRESETS" title + 3×3 slot grid + Back pill + menu/back glyphs
-        ├── ui_connections.{hpp,cpp}   Connections screen: Wi-Fi/sync status + Connect/Change pill + provisioning QR card
+        ├── ui_connections.{hpp,cpp}   Connections screen: Wi-Fi/sync status + Connect/Reconfigure + Forget pills + Wi-Fi-join QR card
         ├── ui_preset_readout.{hpp,cpp} shared "PRESET N / Xg→Yg / Zs" readout (idle center line, post surface, grid slots)
         ├── ui_bar.{hpp,cpp}           generic scroll/momentum bar engine (grind dial is the only consumer)
         └── ui_theme.hpp               shared layout frame + base palette (mode-specific tuning stays in ui_report)

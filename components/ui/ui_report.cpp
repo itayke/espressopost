@@ -1110,10 +1110,35 @@ void on_back_tap(lv_event_t*) {
 // Connections: Back → Menu; Connect kicks SoftAP provisioning, then a
 // refresh so the status line flips to "listening…" immediately (the visible-mode
 // timer keeps it live thereafter).
-void on_connections_back_tap(lv_event_t*) { switch_mode(Mode::Menu); }
+void on_connections_back_tap(lv_event_t*) {
+  // While the setup portal is up the pill reads "Cancel": abort provisioning and
+  // stay on Connections (now showing the restored connection) rather than leaving.
+  if (cloud::status().wifi == cloud::WifiState::Provisioning) {
+    cloud::cancel_provisioning();
+    connections_screen::refresh();
+    return;
+  }
+  switch_mode(Mode::Menu);
+}
 void on_connections_connect_tap(lv_event_t*) {
   cloud::start_provisioning();
   connections_screen::refresh();
+}
+// Forget: confirm first (destructive — same idiom as deleting a preset),
+// then drop the link + erase the stored network. The cloud endpoint is kept.
+void confirm_forget_wifi(lv_event_t*) {
+  cloud::forget();
+  connections_screen::refresh();
+}
+void on_connections_forget_tap(lv_event_t*) {
+  PopupConfig cfg{};
+  cfg.body       = "Forget this Wi-Fi network?\nThe device will go offline until "
+                   "you set it up again.";
+  cfg.scrim      = true;
+  cfg.n_buttons  = 2;
+  cfg.buttons[0] = PopupButton{"Cancel", PopupBtnStyle::Neutral,     nullptr};
+  cfg.buttons[1] = PopupButton{"Forget", PopupBtnStyle::Destructive, confirm_forget_wifi};
+  show_popup(cfg);
 }
 
 // Tapping a Presets grid slot opens its editor. The slot's 0-based id rides in
@@ -3073,7 +3098,8 @@ void start_report() {
   // Connections group, reached from the Menu hub; Back → Menu, Connect kicks
   // SoftAP provisioning.
   s_connections_group = connections_screen::build(scr, on_connections_back_tap,
-                                                  on_connections_connect_tap);
+                                                  on_connections_connect_tap,
+                                                  on_connections_forget_tap);
 
   // Mode-swap input block — full-screen transparent click-eater, hidden until a
   // cross-fade brings it to the foreground (see animate_mode_swap). Clickable so

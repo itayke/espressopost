@@ -1,6 +1,7 @@
 #include "cloud.hpp"
 
 #include "cloud_json.hpp"
+#include "cloud_portal.hpp"
 #include "storage.hpp"
 
 #include "esp_check.h"
@@ -13,8 +14,6 @@
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "esp_wifi_default.h"
-#include "wifi_provisioning/manager.h"
-#include "wifi_provisioning/scheme_softap.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/semphr.h"
@@ -65,8 +64,9 @@ constexpr int      kWifiMaxRetry  = 6;       // app-level reconnect attempts
 constexpr size_t   kRespCapBytes  = 256;     // response prefix we keep to check "ok":true
 
 // Event-group bits driving the sync task.
-constexpr EventBits_t kBitGotIp   = 1u << 0;
-constexpr EventBits_t kBitNewShot = 1u << 1;
+constexpr EventBits_t kBitGotIp       = 1u << 0;
+constexpr EventBits_t kBitNewShot     = 1u << 1;
+constexpr EventBits_t kBitProvConnect = 1u << 2;  // form submitted: drop AP, connect STA
 
 // --- State (guarded by s_mutex unless noted). ---
 SemaphoreHandle_t  s_mutex  = nullptr;
@@ -80,18 +80,22 @@ esp_err_t s_last_error = ESP_OK;
 int8_t    s_rssi       = 0;
 uint32_t  s_hwm        = 0;
 int       s_wifi_retry = 0;
-bool      s_provisioning = false;
+bool      s_started      = false;  // esp_wifi_start() has been called
+bool      s_provisioning = false;  // captive portal (SoftAP + form) is up
+bool      s_prov_submitted = false;  // form submitted; STA connect attempt in flight
 
 char s_url[kUrlMax]     = {};
 char s_token[kTokenMax] = {};
 
-// SoftAP provisioning identity, derived from the WiFi MAC at provisioning start
-// and shown on the Connections screen so the user can join the AP + enter the
-// PoP in the phone app. The PoP gates the security1 (curve25519+AES) handshake —
-// printing it on the device's own screen is the intended "proof of physical
-// access" pattern.
+// SSID of the network the STA is joined to (captured at GOT_IP), for the
+// Connections status line. Cleared on disconnect.
+char s_net_ssid[33] = {};
+
+// SoftAP name, derived from the WiFi MAC at provisioning start and shown on the
+// Connections screen (as a Wi-Fi-join QR + text) so the user can join the
+// temporary setup network. No PoP: the captive-portal form is the channel, not
+// the security1 handshake the old wifi_provisioning manager used.
 char s_prov_ssid[24] = {};
-char s_prov_pop[12]  = {};
 
 // --- small locked accessors ---
 struct Lock {
@@ -286,8 +290,31 @@ void sync_task(void* /*arg*/) {
            static_cast<unsigned>(kSyncTaskStack), static_cast<int>(kSyncTaskCore));
   uint32_t backoff = kBackoffMinMs;
   for (;;) {
-    xEventGroupWaitBits(s_events, kBitGotIp | kBitNewShot,
-                        /*clear=*/pdTRUE, /*waitAll=*/pdFALSE, portMAX_DELAY);
+    const EventBits_t bits =
+        xEventGroupWaitBits(s_events, kBitGotIp | kBitNewShot | kBitProvConnect,
+                            /*clear=*/pdTRUE, /*waitAll=*/pdFALSE, portMAX_DELAY);
+    if (bits & kBitProvConnect) {
+      // Finalize provisioning off the httpd task: a portal client (the phone)
+      // still attached to the SoftAP pins the single radio to the AP channel and
+      // blocks the STA from associating to a home AP on another channel — so drop
+      // the AP first, then connect STA-only. The short delay lets the
+      // "Connecting…" response flush to the phone before httpd stops.
+      vTaskDelay(pdMS_TO_TICKS(600));
+      portal::stop();
+      esp_wifi_set_mode(WIFI_MODE_STA);
+      { Lock l; s_wifi_retry = 0; }
+      set_wifi_state(WifiState::Connecting);
+      // If the STA is already associated (re-provisioning, or the same SSID as a
+      // prior session), esp_wifi_connect() is a no-op and no fresh GOT_IP fires —
+      // we'd hang in Connecting. Drop the link first; the STA_DISCONNECTED
+      // handler (provisioning + submitted) then connects with the new creds.
+      wifi_ap_record_t cur;
+      if (esp_wifi_sta_get_ap_info(&cur) == ESP_OK) {
+        esp_wifi_disconnect();
+      } else {
+        esp_wifi_connect();
+      }
+    }
     // Drain everything above the HWM, retrying with backoff on failure, until
     // we're up to date or WiFi/endpoint goes away (then back to waiting).
     for (;;) {
@@ -326,10 +353,33 @@ void on_event(void* /*arg*/, esp_event_base_t base, int32_t id, void* data) {
   }
 
   if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
-    { Lock l; s_rssi = 0; }
-    bool prov; int retry;
-    { Lock l; prov = s_provisioning; retry = ++s_wifi_retry; }
-    if (prov) return;  // provisioning manager is driving the connect
+    { Lock l; s_rssi = 0; s_net_ssid[0] = '\0'; }
+    bool prov, submitted;
+    int  retry;
+    { Lock l; prov = s_provisioning; submitted = s_prov_submitted; retry = ++s_wifi_retry; }
+
+    if (prov) {
+      if (!submitted) return;  // AP up, no connect attempt yet — nothing to do
+      if (retry <= kWifiMaxRetry) {
+        // The first associate after the AP teardown often glitches; retry a few
+        // times before concluding the password/SSID is wrong.
+        esp_wifi_connect();
+        return;
+      }
+      // Give up. Clear provisioning so the screen shows Failed and the Connect
+      // button is live again (the portal/AP is already down by this point).
+      ESP_LOGW(kTag, "provisioning: connect failed after %d tries (wrong password / AP?)",
+               kWifiMaxRetry);
+      portal::stop();
+      esp_wifi_set_mode(WIFI_MODE_STA);
+      { Lock l; s_provisioning = false; s_prov_submitted = false; s_prov_ssid[0] = '\0'; }
+      set_wifi_state(WifiState::Failed);
+      return;
+    }
+
+    // Creds were erased (Forget) — settle to idle instead of reconnecting.
+    if (!has_stored_creds()) { set_wifi_state(WifiState::Disabled); return; }
+
     if (retry <= kWifiMaxRetry) {
       set_wifi_state(WifiState::Connecting);
       esp_wifi_connect();
@@ -342,42 +392,35 @@ void on_event(void* /*arg*/, esp_event_base_t base, int32_t id, void* data) {
 
   if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
     int8_t rssi = 0;
+    char   ssid[33] = {};
     wifi_ap_record_t ap;
-    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) rssi = ap.rssi;
-    { Lock l; s_wifi = WifiState::Connected; s_wifi_retry = 0; s_rssi = rssi; }
-    ESP_LOGI(kTag, "connected, rssi=%d", rssi);
-    xEventGroupSetBits(s_events, kBitGotIp);
-    return;
-  }
-
-  if (base == WIFI_PROV_EVENT) {
-    switch (id) {
-      case WIFI_PROV_CRED_RECV:
-        ESP_LOGI(kTag, "provisioning: received WiFi credentials");
-        break;
-      case WIFI_PROV_CRED_FAIL:
-        ESP_LOGW(kTag, "provisioning: credentials failed (wrong password / AP not found)");
-        set_wifi_state(WifiState::Failed);
-        // Let the app retry without a reboot.
-        wifi_prov_mgr_reset_sm_state_on_failure();
-        break;
-      case WIFI_PROV_CRED_SUCCESS:
-        ESP_LOGI(kTag, "provisioning: credentials applied");
-        // GOT_IP can arrive before this event (STA connects mid-handshake) —
-        // don't clobber an already-Connected state back to Connecting, or we'd
-        // get stuck (no further GOT_IP fires to recover it).
-        { Lock l; if (s_wifi != WifiState::Connected) s_wifi = WifiState::Connecting; }
-        break;
-      case WIFI_PROV_END:
-        // Provisioning service done — tear down the AP + httpd. STA stays
-        // connected; IP_EVENT_STA_GOT_IP flips us to Connected.
-        wifi_prov_mgr_deinit();
-        { Lock l; s_provisioning = false; s_prov_ssid[0] = '\0'; s_prov_pop[0] = '\0'; }
-        ESP_LOGI(kTag, "provisioning finished");
-        break;
-      default:
-        break;
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+      rssi = ap.rssi;
+      std::memcpy(ssid, ap.ssid,
+                  strnlen(reinterpret_cast<const char*>(ap.ssid), sizeof(ssid) - 1));
     }
+    bool was_provisioning;
+    {
+      Lock l;
+      s_wifi = WifiState::Connected;
+      s_wifi_retry = 0;
+      s_rssi = rssi;
+      std::memcpy(s_net_ssid, ssid, sizeof(s_net_ssid));
+      was_provisioning = s_provisioning;
+    }
+    ESP_LOGI(kTag, "connected, rssi=%d", rssi);
+    if (was_provisioning) {
+      // Provisioning succeeded. Tear the captive portal down here in the event
+      // task (never from the httpd task that served the form — it'd kill itself)
+      // and drop back to STA-only so the setup AP disappears.
+      portal::stop();
+      esp_wifi_set_mode(WIFI_MODE_STA);
+      Lock l;
+      s_provisioning = false;
+      s_prov_submitted = false;
+      s_prov_ssid[0] = '\0';
+    }
+    xEventGroupSetBits(s_events, kBitGotIp);
     return;
   }
 }
@@ -412,8 +455,8 @@ void print_status() {
               token_len ? "(set)" : "(unset)",
               esp_err_to_name(st.last_error));
   if (st.wifi == WifiState::Provisioning && st.prov_ssid[0]) {
-    std::printf("  provisioning: join AP '%s', PoP '%s' in the app\n",
-                st.prov_ssid, st.prov_pop);
+    std::printf("  provisioning: join open AP '%s', the setup page opens at "
+                "http://192.168.4.1/\n", st.prov_ssid);
   }
 }
 
@@ -507,7 +550,7 @@ esp_err_t init() {
 
   // We are the first/only owner of the default event loop + netif today; guard
   // creation against ESP_ERR_INVALID_STATE so a future second user is safe. Both
-  // STA and AP netifs are needed: the SoftAP scheme brings up a temporary AP
+  // STA and AP netifs are needed: the captive portal brings up a temporary AP
   // during provisioning, STA is the normal connection.
   esp_err_t e = esp_netif_init();
   if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) return e;
@@ -522,25 +565,15 @@ esp_err_t init() {
 
   esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &on_event, nullptr, nullptr);
   esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &on_event, nullptr, nullptr);
-  esp_event_handler_instance_register(WIFI_PROV_EVENT, ESP_EVENT_ANY_ID, &on_event, nullptr, nullptr);
 
-  // Init the provisioning manager just to read whether STA creds already exist,
-  // then deinit it — we only spin the SoftAP service up on demand (the Connect
-  // button), not automatically at boot.
-  // Zero-init leaves scheme_event_handler = {NULL,NULL} (== WIFI_PROV_EVENT_
-  // HANDLER_NONE), which is what the SoftAP scheme wants (only BLE needs one).
-  wifi_prov_mgr_config_t prov_cfg = {};
-  prov_cfg.scheme = wifi_prov_scheme_softap;
-  ESP_RETURN_ON_ERROR(wifi_prov_mgr_init(prov_cfg), kTag, "prov_init");
-
-  bool provisioned = false;
-  wifi_prov_mgr_is_provisioned(&provisioned);
-  wifi_prov_mgr_deinit();
-
+  // "Already provisioned?" is just "are STA creds stored?" — esp_wifi_get_config
+  // reads the FLASH-backed config and is valid after esp_wifi_init, before start.
+  const bool provisioned = has_stored_creds();
   if (provisioned) {
     // Stored creds → normal STA bring-up; STA_START handler issues connect().
     ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), kTag, "wifi_mode");
     ESP_RETURN_ON_ERROR(esp_wifi_start(), kTag, "wifi_start");
+    { Lock l; s_started = true; }
     set_wifi_state(WifiState::Connecting);
   } else {
     // No creds: leave the radio idle until the user starts provisioning.
@@ -560,62 +593,110 @@ esp_err_t init() {
 }
 
 namespace {
-// Derive the SoftAP name + PoP from the WiFi MAC: deterministic (same code every
-// time for a given device), unique per device, and shown on the Connections
-// screen for the user to match in the app.
+// Derive the SoftAP name from the WiFi MAC: deterministic (same code every time
+// for a given device), unique per device, shown on the Connections screen as a
+// Wi-Fi-join QR + text for the user to join.
 void compute_prov_identity() {
   uint8_t mac[6] = {};
   esp_read_mac(mac, ESP_MAC_WIFI_STA);  // reads efuse; works even pre-wifi-start
   Lock l;
-  std::snprintf(s_prov_ssid, sizeof(s_prov_ssid), "PROV_%02X%02X%02X",
+  std::snprintf(s_prov_ssid, sizeof(s_prov_ssid), "EP SETUP %02X%02X%02X",
                 mac[3], mac[4], mac[5]);
-  std::snprintf(s_prov_pop, sizeof(s_prov_pop), "%02X%02X%02X%02X",
-                mac[2], mac[3], mac[4], mac[5]);
+}
+
+// Called from the httpd task when the captive-portal form is submitted. Persist
+// the endpoint fields (a blank field means "keep the current value") and apply
+// the Wi-Fi creds, then signal the sync task to do the actual AP-teardown +
+// connect — we must NOT stop the portal or block from the httpd task it runs on.
+void on_portal_submit(const portal::Submission& s) {
+  if (s.url[0] != '\0')   persist_str(kNvsKeyUrl, s.url, s_url, sizeof(s_url));
+  if (s.token[0] != '\0') persist_str(kNvsKeyToken, s.token, s_token, sizeof(s_token));
+
+  // memcpy (not snprintf): the driver fields hold up to 32/64 bytes that need
+  // not be NUL-terminated, and sta is zero-init so any unused tail stays NUL.
+  wifi_config_t sta = {};
+  std::memcpy(sta.sta.ssid, s.ssid, strnlen(s.ssid, sizeof(sta.sta.ssid)));
+  std::memcpy(sta.sta.password, s.password,
+              strnlen(s.password, sizeof(sta.sta.password)));
+  esp_wifi_set_config(WIFI_IF_STA, &sta);  // persists to flash (storage = FLASH)
+
+  { Lock l; s_prov_submitted = true; s_wifi_retry = 0; }
+  set_wifi_state(WifiState::Connecting);
+  ESP_LOGI(kTag, "provisioning: applying creds for '%s'", s.ssid);
+  if (s_events) xEventGroupSetBits(s_events, kBitProvConnect);
 }
 }  // namespace
 
 esp_err_t start_provisioning() {
   if (s_events == nullptr) return ESP_ERR_INVALID_STATE;
-  { Lock l; if (s_provisioning) return ESP_OK; s_provisioning = true; }
+  { Lock l; if (s_provisioning) return ESP_OK; s_provisioning = true; s_prov_submitted = false; }
 
-  compute_prov_identity();  // fills s_prov_ssid / s_prov_pop
+  compute_prov_identity();  // fills s_prov_ssid
   set_wifi_state(WifiState::Provisioning);
 
-  // (Re)init the manager — init() deinit'd it after the boot-time check. SoftAP
-  // scheme, security1 (curve25519 + AES) gated by the PoP. service_key=NULL →
-  // open provisioning AP (the security1 channel is what protects the exchange).
-  // Pass the persistent s_prov_* globals (not stack locals): the manager holds
-  // the PoP pointer for the whole session, and they stay valid + immutable until
-  // WIFI_PROV_END / cancel clears them after the manager is torn down.
-  wifi_prov_mgr_config_t prov_cfg = {};
-  prov_cfg.scheme = wifi_prov_scheme_softap;  // zero-init handler == HANDLER_NONE
-  esp_err_t e = wifi_prov_mgr_init(prov_cfg);
+  // Bring the radio up in AP+STA: the SoftAP hosts the captive portal, and STA
+  // must be running too so the form's network scan works and the submitted creds
+  // can connect without another mode switch. STA is started once and left up.
+  esp_err_t e = esp_wifi_set_mode(WIFI_MODE_APSTA);
   if (e == ESP_OK) {
-    e = wifi_prov_mgr_start_provisioning(WIFI_PROV_SECURITY_1,
-                                         /*pop=*/s_prov_pop, s_prov_ssid,
-                                         /*service_key=*/nullptr);
-    if (e != ESP_OK) wifi_prov_mgr_deinit();
+    bool start_needed;
+    { Lock l; start_needed = !s_started; }
+    if (start_needed) {
+      e = esp_wifi_start();
+      if (e == ESP_OK) { Lock l; s_started = true; }
+    }
   }
+
+  // Prefill the form's URL field with the stored endpoint (never the token).
+  { Lock l; portal::set_prefill(s_url); }
+
+  if (e == ESP_OK) e = portal::start(s_prov_ssid, &on_portal_submit);
+
   if (e != ESP_OK) {
-    { Lock l; s_provisioning = false; s_prov_ssid[0] = '\0'; s_prov_pop[0] = '\0'; }
+    portal::stop();
+    { Lock l; s_provisioning = false; s_prov_submitted = false; s_prov_ssid[0] = '\0'; }
     set_wifi_state(has_stored_creds() ? WifiState::Connecting : WifiState::Disabled);
     ESP_LOGE(kTag, "provisioning start failed: %s", esp_err_to_name(e));
     return e;
   }
-  ESP_LOGI(kTag, "SoftAP provisioning started: join '%s' (PoP %s)", s_prov_ssid, s_prov_pop);
+  ESP_LOGI(kTag, "captive-portal provisioning started: join '%s'", s_prov_ssid);
   return ESP_OK;
 }
 
 void cancel_provisioning() {
-  { Lock l; if (!s_provisioning) return; s_provisioning = false; }
-  // Tear the manager down first (it may still be reading the PoP), then clear
-  // the identity strings.
-  wifi_prov_mgr_stop_provisioning();
-  wifi_prov_mgr_deinit();
-  { Lock l; s_prov_ssid[0] = '\0'; s_prov_pop[0] = '\0'; }
-  set_wifi_state(is_connected() ? WifiState::Connected
-                                : (has_stored_creds() ? WifiState::Connecting
-                                                      : WifiState::Disabled));
+  { Lock l; if (!s_provisioning) return; s_provisioning = false; s_prov_submitted = false; }
+  // Stop the portal (httpd + DNS) and drop the AP by returning to STA-only.
+  portal::stop();
+  esp_wifi_set_mode(WIFI_MODE_STA);
+  { Lock l; s_prov_ssid[0] = '\0'; }
+  // Ask the hardware, not s_wifi (which is Provisioning right now): provisioning
+  // is non-destructive, so the STA is usually still associated to the prior
+  // network and we just restore Connected. If the form's scan dropped the link,
+  // reconnect; if there were never creds, go idle.
+  wifi_ap_record_t cur;
+  if (esp_wifi_sta_get_ap_info(&cur) == ESP_OK) {
+    Lock l;
+    s_wifi = WifiState::Connected;
+    s_rssi = cur.rssi;
+  } else if (has_stored_creds()) {
+    { Lock l; s_wifi_retry = 0; }
+    set_wifi_state(WifiState::Connecting);
+    esp_wifi_connect();
+  } else {
+    set_wifi_state(WifiState::Disabled);
+  }
+}
+
+void forget() {
+  // Erase the stored STA creds first so the disconnect below settles to Disabled
+  // (the STA_DISCONNECTED handler only reconnects while creds exist). The cloud
+  // endpoint (NVS u/k) is intentionally left intact.
+  wifi_config_t empty = {};
+  esp_wifi_set_config(WIFI_IF_STA, &empty);
+  esp_wifi_disconnect();
+  { Lock l; s_wifi_retry = 0; s_rssi = 0; s_net_ssid[0] = '\0'; }
+  set_wifi_state(WifiState::Disabled);
+  ESP_LOGI(kTag, "forgot stored Wi-Fi credentials");
 }
 
 Status status() {
@@ -632,8 +713,8 @@ Status status() {
     st.rssi_dbm     = s_rssi;
     st.last_error   = s_last_error;
     st.configured   = (s_url[0] != '\0' && s_token[0] != '\0');
+    std::snprintf(st.net_ssid, sizeof(st.net_ssid), "%s", s_net_ssid);
     std::snprintf(st.prov_ssid, sizeof(st.prov_ssid), "%s", s_prov_ssid);
-    std::snprintf(st.prov_pop, sizeof(st.prov_pop), "%s", s_prov_pop);
     hwm             = s_hwm;
     xSemaphoreGive(s_mutex);
   }

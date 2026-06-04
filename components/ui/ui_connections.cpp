@@ -25,21 +25,24 @@ const lv_color_t kColorBack    = kColorText;
 // vertical spans may overlap. The status lines sit above, the hint below.
 constexpr int32_t kTitleTopY          = 30;
 constexpr int32_t kWifiLineTopY       = 92;
-constexpr int32_t kSyncLineTopY       = 132;
+constexpr int32_t kRssiLineTopY       = 124;  // small "-NN dBm" under the Wi-Fi name
+constexpr int32_t kSyncLineTopY       = 156;
 constexpr int32_t kHintLineTopY       = 352;
-constexpr int32_t kConnectBtnW        = 224;
+constexpr int32_t kConnectBtnW        = 244;
 constexpr int32_t kConnectBtnH        = 62;
-constexpr int32_t kConnectCenterDY    = 40;   // below the round center
+constexpr int32_t kConnectCenterDY    = 0;    // Reconfigure/Connect pill, screen center
+constexpr int32_t kForgetCenterDY     = 74;   // Forget pill, stacked below Reconfigure
 constexpr int32_t kQrSize             = 150;  // QR module area
 constexpr int32_t kQrPad              = 12;    // white quiet-zone border around it
 constexpr int32_t kQrCenterDY         = 4;
-constexpr int32_t kBackBtnW           = 132;
+constexpr int32_t kBackBtnW           = 142;  // +10 so "✕ Cancel" has ~5px side margin
 constexpr int32_t kBackBtnH           = 56;
 constexpr int32_t kBackBtnBottomInset = 16;
 // ===========================================================================
 
 lv_obj_t* s_title    = nullptr;
 lv_obj_t* s_wifi_lbl = nullptr;
+lv_obj_t* s_wifi_rssi = nullptr;  // small "-NN dBm" line, shown only when connected
 lv_obj_t* s_sync_lbl = nullptr;
 lv_obj_t* s_hint_lbl = nullptr;
 lv_obj_t* s_connect     = nullptr;
@@ -47,6 +50,9 @@ lv_obj_t* s_connect_lbl = nullptr;  // relabeled "Connect"/"Change" Wi-Fi by sta
 lv_obj_t* s_qr_card  = nullptr;  // white quiet-zone panel behind the QR
 lv_obj_t* s_qr       = nullptr;  // shown only while provisioning
 lv_obj_t* s_back     = nullptr;
+lv_obj_t* s_back_lbl     = nullptr;  // "Back" normally, "Cancel" while provisioning
+lv_obj_t* s_back_chevron = nullptr;  // hidden while the pill reads "Cancel"
+lv_obj_t* s_forget       = nullptr;  // red "Forget" button, shown only when connected
 lv_obj_t* s_fade[6]  = {};
 int       s_fade_n   = 0;
 
@@ -88,7 +94,8 @@ lv_obj_t* build_status_line(lv_obj_t* group, int32_t top_y, const lv_font_t* fon
 
 }  // namespace
 
-lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_back, lv_event_cb_t on_connect) {
+lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_back, lv_event_cb_t on_connect,
+                lv_event_cb_t on_forget) {
   lv_obj_t* group = lv_obj_create(scr);
   lv_obj_set_size(group, kScreen, kScreen);
   lv_obj_set_pos(group, 0, 0);
@@ -105,6 +112,8 @@ lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_back, lv_event_cb_t on_connect) 
   lv_obj_align(s_title, LV_ALIGN_TOP_MID, 0, kTitleTopY);
 
   s_wifi_lbl = build_status_line(group, kWifiLineTopY, &lv_font_montserrat_24, kColorHint);
+  s_wifi_rssi = build_status_line(group, kRssiLineTopY, &lv_font_montserrat_14, kColorHint);
+  lv_obj_add_flag(s_wifi_rssi, LV_OBJ_FLAG_HIDDEN);  // shown only when connected
   s_sync_lbl = build_status_line(group, kSyncLineTopY, &lv_font_montserrat_14, kColorHint);
   s_hint_lbl = build_status_line(group, kHintLineTopY, &lv_font_montserrat_14, kColorHint);
 
@@ -125,6 +134,28 @@ lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_back, lv_event_cb_t on_connect) 
   lv_obj_set_style_text_font(s_connect_lbl, &lv_font_montserrat_24, LV_PART_MAIN);
   lv_label_set_text(s_connect_lbl, "Connect Wi-Fi");
   lv_obj_center(s_connect_lbl);
+
+  // "Forget Network" — a red destructive pill (same geometry as Connect) stacked
+  // below it, shown by refresh() only while connected. Tapping it confirms via a
+  // popup, then drops the link and erases the stored network. A full pill is
+  // comfortably tappable; red + the confirm popup guard against mistakes.
+  s_forget = lv_button_create(group);
+  lv_obj_set_size(s_forget, kConnectBtnW, kConnectBtnH);
+  lv_obj_set_style_radius(s_forget, kConnectBtnH / 2, LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(s_forget, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_shadow_width(s_forget, 0, LV_PART_MAIN);
+  lv_obj_set_style_border_color(s_forget, kColorErr, LV_PART_MAIN);
+  lv_obj_set_style_border_width(s_forget, kPostBtnStroke, LV_PART_MAIN);
+  lv_obj_set_style_border_opa(s_forget, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_align(s_forget, LV_ALIGN_CENTER, 0, kForgetCenterDY);
+  lv_obj_set_ext_click_area(s_forget, kPostBtnExtClick);
+  lv_obj_add_event_cb(s_forget, on_forget, LV_EVENT_CLICKED, nullptr);
+  lv_obj_t* forget_lbl = lv_label_create(s_forget);
+  lv_obj_set_style_text_color(forget_lbl, kColorErr, LV_PART_MAIN);
+  lv_obj_set_style_text_font(forget_lbl, &lv_font_montserrat_24, LV_PART_MAIN);
+  lv_label_set_text(forget_lbl, "Forget Network");
+  lv_obj_center(forget_lbl);
+  lv_obj_add_flag(s_forget, LV_OBJ_FLAG_HIDDEN);
 
   // QR card — a white panel (the quiet zone) holding the QR. Hidden until
   // provisioning; refresh() swaps it in where the Connect pill sits and fills it
@@ -171,11 +202,11 @@ lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_back, lv_event_cb_t on_connect) 
                         LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
   lv_obj_clear_flag(back_row, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_clear_flag(back_row, LV_OBJ_FLAG_SCROLLABLE);
-  build_back_chevron(back_row, kColorBack);
-  lv_obj_t* back_lbl = lv_label_create(back_row);
-  lv_obj_set_style_text_color(back_lbl, kColorBack, LV_PART_MAIN);
-  lv_obj_set_style_text_font(back_lbl, &lv_font_montserrat_24, LV_PART_MAIN);
-  lv_label_set_text(back_lbl, "Back");
+  s_back_chevron = build_back_chevron(back_row, kColorBack);
+  s_back_lbl = lv_label_create(back_row);
+  lv_obj_set_style_text_color(s_back_lbl, kColorBack, LV_PART_MAIN);
+  lv_obj_set_style_text_font(s_back_lbl, &lv_font_montserrat_24, LV_PART_MAIN);
+  lv_label_set_text(s_back_lbl, "Back");
   lv_obj_center(back_row);
 
   s_fade_n = 0;
@@ -194,10 +225,11 @@ void refresh() {
   if (s_wifi_lbl == nullptr) return;
   const cloud::Status st = cloud::status();
 
-  // WiFi line — tinted by connection state.
+  // WiFi line — tinted by connection state. When connected, it names the network
+  // and the signal strength rides on a small line under it (s_wifi_rssi).
   const char* wifi_txt = "Wi-Fi: unknown";
   lv_color_t  wifi_col = kColorHint;
-  char wifi_buf[40];
+  char wifi_buf[48];
   switch (st.wifi) {
     case cloud::WifiState::Disabled:
       wifi_txt = "Wi-Fi: not set up"; wifi_col = kColorHint; break;
@@ -206,7 +238,8 @@ void refresh() {
     case cloud::WifiState::Connecting:
       wifi_txt = "Wi-Fi: connecting..."; wifi_col = kColorWarn; break;
     case cloud::WifiState::Connected:
-      std::snprintf(wifi_buf, sizeof(wifi_buf), "Wi-Fi: connected (%d dBm)", st.rssi_dbm);
+      std::snprintf(wifi_buf, sizeof(wifi_buf), "Wi-Fi: %s",
+                    st.net_ssid[0] ? st.net_ssid : "connected");
       wifi_txt = wifi_buf; wifi_col = kColorOk; break;
     case cloud::WifiState::Failed:
       wifi_txt = "Wi-Fi: failed"; wifi_col = kColorErr; break;
@@ -214,20 +247,29 @@ void refresh() {
   lv_label_set_text(s_wifi_lbl, wifi_txt);
   lv_obj_set_style_text_color(s_wifi_lbl, wifi_col, LV_PART_MAIN);
 
+  // Signal-strength sub-line: only meaningful while connected.
+  if (st.wifi == cloud::WifiState::Connected) {
+    char rssi_buf[16];
+    std::snprintf(rssi_buf, sizeof(rssi_buf), "%d dBm", st.rssi_dbm);
+    lv_label_set_text(s_wifi_rssi, rssi_buf);
+    lv_obj_remove_flag(s_wifi_rssi, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_add_flag(s_wifi_rssi, LV_OBJ_FLAG_HIDDEN);
+  }
+
   const bool provisioning =
       (st.wifi == cloud::WifiState::Provisioning && st.prov_ssid[0] != '\0');
 
   // While provisioning, the QR card takes the mid-screen band (Connect pill +
   // sync line hide); otherwise the Connect pill is shown and the QR hidden.
   if (provisioning) {
-    // Encode Espressif's standard provisioning descriptor; the SoftAP app scans
-    // it to auto-fill the AP name + PoP. Only re-render when it changes (refresh
-    // runs ~1 Hz) to avoid re-encoding every tick.
-    char qr[96];
-    const int n = std::snprintf(qr, sizeof(qr),
-        "{\"ver\":\"v1\",\"name\":\"%s\",\"pop\":\"%s\",\"transport\":\"softap\"}",
-        st.prov_ssid, st.prov_pop);
-    static char s_qr_last[96] = {};
+    // Standard Wi-Fi-join QR: the native camera offers "Join network", and once
+    // joined the OS captive-portal check auto-opens the device's setup form — no
+    // app. Open AP, so T:nopass and no password field. Only re-render on change
+    // (refresh runs ~1 Hz) to avoid re-encoding every tick.
+    char qr[64];
+    const int n = std::snprintf(qr, sizeof(qr), "WIFI:S:%s;T:nopass;;", st.prov_ssid);
+    static char s_qr_last[64] = {};
     if (n > 0 && std::strcmp(qr, s_qr_last) != 0) {
       lv_qrcode_update(s_qr, qr, static_cast<uint32_t>(n));
       std::snprintf(s_qr_last, sizeof(s_qr_last), "%s", qr);
@@ -235,22 +277,47 @@ void refresh() {
     lv_obj_remove_flag(s_qr_card, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_connect, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(s_sync_lbl, LV_OBJ_FLAG_HIDDEN);
+    // Bottom pill aborts the setup session rather than navigating: red "✕ Cancel"
+    // matching the Post-screen cancel pill, no back-chevron. The handler tears the
+    // portal down and restores Connected.
+    lv_label_set_text(s_back_lbl, LV_SYMBOL_CLOSE " Cancel");
+    lv_obj_set_style_text_color(s_back_lbl, kColorErr, LV_PART_MAIN);
+    lv_obj_set_style_border_color(s_back, kColorErr, LV_PART_MAIN);
+    lv_obj_add_flag(s_back_chevron, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_forget, LV_OBJ_FLAG_HIDDEN);
   } else {
     lv_obj_add_flag(s_qr_card, LV_OBJ_FLAG_HIDDEN);
     lv_obj_remove_flag(s_connect, LV_OBJ_FLAG_HIDDEN);
     lv_obj_remove_flag(s_sync_lbl, LV_OBJ_FLAG_HIDDEN);
-    // Already on WiFi → the button re-provisions to switch networks, so label it
-    // honestly rather than implying it isn't connected.
+    // Already on WiFi → the button re-opens the setup portal (switch network or
+    // add/repair the cloud endpoint), so "Reconfigure" rather than a label that
+    // implies it isn't connected or that it disconnects.
     lv_label_set_text(s_connect_lbl,
-                      st.wifi == cloud::WifiState::Connected ? "Disconnect"
+                      st.wifi == cloud::WifiState::Connected ? "Reconfigure"
                                                              : "Connect Wi-Fi");
     lv_obj_center(s_connect_lbl);
+    // Restore the normal navigation pill.
+    lv_label_set_text(s_back_lbl, "Back");
+    lv_obj_set_style_text_color(s_back_lbl, kColorBack, LV_PART_MAIN);
+    lv_obj_set_style_border_color(s_back, kColorBack, LV_PART_MAIN);
+    lv_obj_remove_flag(s_back_chevron, LV_OBJ_FLAG_HIDDEN);
+    // Forget only makes sense once there's a network to drop.
+    if (st.wifi == cloud::WifiState::Connected) {
+      lv_obj_remove_flag(s_forget, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(s_forget, LV_OBJ_FLAG_HIDDEN);
+    }
   }
 
   // Sync line (hidden while provisioning).
   char sync_buf[48];
   if (!st.configured) {
-    lv_label_set_text(s_sync_lbl, "Cloud: endpoint not set");
+    // When connected, the next step (add the endpoint) rides right under the
+    // status here rather than as a stranded bottom-of-screen hint.
+    lv_label_set_text(s_sync_lbl,
+                      st.wifi == cloud::WifiState::Connected
+                          ? "Cloud: endpoint not set\nTap Reconfigure to add it"
+                          : "Cloud: endpoint not set");
   } else if (st.pending_count == 0) {
     std::snprintf(sync_buf, sizeof(sync_buf), "Cloud: up to date (%u synced)",
                   static_cast<unsigned>(st.synced_count));
@@ -263,19 +330,20 @@ void refresh() {
   }
 
   // Hint line — what to do next, by state. While provisioning it's the manual
-  // fallback (in case the user can't scan); otherwise it's the next step.
+  // fallback (join from Wi-Fi settings if the QR scan isn't handy); otherwise the
+  // next step.
   char hint_buf[96];
   const char* hint = "";
   if (provisioning) {
-    std::snprintf(hint_buf, sizeof(hint_buf), "Scan in the app\nor join %s / PoP %s",
-                  st.prov_ssid, st.prov_pop);
+    std::snprintf(hint_buf, sizeof(hint_buf),
+                  "Scan to join, or pick Wi-Fi '%s'\nsetup opens automatically",
+                  st.prov_ssid);
     hint = hint_buf;
   } else if (st.wifi == cloud::WifiState::Disabled ||
              st.wifi == cloud::WifiState::Failed) {
-    hint = "Tap Connect, then open ESP SoftAP Provisioning";
-  } else if (st.wifi == cloud::WifiState::Connected && !st.configured) {
-    hint = "Set endpoint over serial: cloud set-url / set-token";
+    hint = "Tap Connect, then your phone's setup page opens";
   }
+  // (Connected-but-unconfigured guidance now lives on the sync line above.)
   lv_label_set_text(s_hint_lbl, hint);
 }
 
