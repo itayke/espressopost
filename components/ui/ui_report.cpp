@@ -1052,13 +1052,13 @@ void show_out_of_band_tip(const model::ShotAssessment& a, uint8_t actual_s) {
   char body[160];
   if (a.verdict == model::ShotVerdict::RanLong) {
     std::snprintf(body, sizeof(body),
-                  "Pull ran long — %us vs ~%ds expected.\n"
-                  "Check dose, grind, or backflush.",
+                  "Pull ran long - %us vs ~%ds expected.\n"
+                  "Check for over-tamp, or run backflush.",
                   static_cast<unsigned>(actual_s), pred);
   } else {  // RanShort
     std::snprintf(body, sizeof(body),
-                  "Pull ran fast — %us vs ~%ds expected.\n"
-                  "Possible channeling or coarse grind.",
+                  "Pull ran fast - %us vs ~%ds expected.\n"
+                  "Check for under-tamp or possible channeling.",
                   static_cast<unsigned>(actual_s), pred);
   }
   PopupConfig cfg{};
