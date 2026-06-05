@@ -13,6 +13,7 @@ Usage:
 """
 
 import argparse
+import datetime
 import math
 import re
 import sys
@@ -246,6 +247,54 @@ def out_of_band_block(shots):
     print("   against the model trained WITHOUT it, so it may flag a borderline shot this misses.)")
 
 
+def changepoint_block(shots, cut_epoch):
+    """Test whether shots after a known event behave like the pre-event model
+    predicts. Use this when a discrete physical change — a grinder dial
+    recalibration, a burr swap, a fresh bag of beans — may have shifted what the
+    logged numbers *mean*, so pooling across it smears two regimes into one.
+
+    Unlike recency-decay weighting (which blurs across the break), this cuts at
+    the date: it fits log(time) ~ T + H + P + grind on the pre-cut shots only,
+    then reports each post-cut shot's residual against that model. A consistent
+    one-sided residual is the fingerprint of a calibration shift — the post-cut
+    shots all run long (or all short) for the same dialed grind at matched
+    climate. Shots with rtc==0 (RTC never seeded) can't be placed on the
+    timeline and are dropped from this view only."""
+    dated = [s for s in shots if s.rtc > 0 and not math.isnan(s.grind)]
+    before = [s for s in dated if s.rtc < cut_epoch]
+    after = [s for s in dated if s.rtc >= cut_epoch]
+    if len(before) < 5 or not after:
+        print(f"  (need ≥5 pre-cut and ≥1 post-cut dated shots; "
+              f"have {len(before)} / {len(after)})")
+        return
+    Xb = np.array([[1.0, s.T, s.H, s.P, s.grind] for s in before])
+    yb = np.log(np.maximum([s.ts for s in before], MIN_BREW_S_FOR_LOG))
+    bb, *_ = np.linalg.lstsq(Xb, yb, rcond=None)
+    print(f"  pre-cut model trained on {len(before)} shots; "
+          f"{len(after)} post-cut shots tested")
+    print(f"    {'idx':>4} {'t_s':>5} {'T':>6} {'grind':>6} {'pred':>6} {'resid':>7}")
+    resid = []
+    for s in after:
+        pred = math.exp(bb @ np.array([1.0, s.T, s.H, s.P, s.grind]))
+        r = s.ts / pred - 1.0
+        resid.append(r)
+        print(f"    {s.idx:>4} {s.ts:>5} {s.T:>6.1f} {s.grind:>6.2f} "
+              f"{pred:>6.1f} {r * 100:>+6.0f}%")
+    resid = np.array(resid)
+    n_long = int((resid > 0).sum())
+    print(f"  median post-cut residual: {np.median(resid) * 100:+.0f}%   "
+          f"({n_long}/{len(resid)} run long)")
+    # Two-tailed sign test: P(all n on one side) = 2·0.5^n. All-one-sided at
+    # n≥4 (p ≤ 0.125) is the tell that the shift is real, not noise — model the
+    # two sides as separate calibration epochs rather than pooling them.
+    one_sided = max(n_long, len(resid) - n_long)
+    if one_sided == len(resid) and len(resid) >= 4:
+        p = 2 * 0.5 ** len(resid)
+        print(f"  → all {len(resid)} post-cut shots fall the same side "
+              f"(sign test p≈{p:.3f}): looks like a real changepoint. Treat "
+              f"pre/post as separate calibration epochs, not one pooled axis.")
+
+
 def sugg_calib_block(shots):
     deltas = np.array([s.sugg - s.grind for s in shots if not math.isnan(s.sugg)])
     if len(deltas) == 0:
@@ -277,7 +326,7 @@ def conf_calib_block(shots):
         print(f"{label:<14} {len(rows):>3} {ad:>20.3f}")
 
 
-def report(shots):
+def report(shots, cut_epoch=None):
     print("=== espressopost shot log analysis ===\n")
     kept = [s for s in shots if not s.excluded]
     if len(kept) < len(shots):
@@ -301,20 +350,37 @@ def report(shots):
         sugg_calib_block(ps)
         print("\n[confidence buckets]")
         conf_calib_block(ps)
+        if cut_epoch is not None:
+            print("\n[changepoint check (pre-cut model vs post-cut shots)]")
+            changepoint_block(ps, cut_epoch)
         print()
 
 
 def main():
     ap = argparse.ArgumentParser(description="Analyze espressopost dump[] log lines.")
     ap.add_argument("log", nargs="?", help="Path to a monitor log; reads stdin if omitted.")
+    ap.add_argument("--changepoint", metavar="DATE",
+                    help="Date of a known calibration event (YYYY-MM-DD, UTC) or "
+                         "raw rtc epoch seconds. Adds a per-preset block testing "
+                         "whether post-event shots run consistently off the "
+                         "pre-event model — the fingerprint of a dial/burr/bean "
+                         "change the pooled fit would otherwise smear.")
     args = ap.parse_args()
+
+    cut_epoch = None
+    if args.changepoint:
+        if args.changepoint.isdigit():
+            cut_epoch = int(args.changepoint)
+        else:
+            d = datetime.datetime.strptime(args.changepoint, "%Y-%m-%d")
+            cut_epoch = int(d.replace(tzinfo=datetime.timezone.utc).timestamp())
 
     stream = open(args.log) if args.log else sys.stdin
     shots = parse(stream)
     if not shots:
         print("No dump[] lines found.", file=sys.stderr)
         sys.exit(1)
-    report(shots)
+    report(shots, cut_epoch)
 
 
 if __name__ == "__main__":

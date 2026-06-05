@@ -39,6 +39,14 @@ idf.py monitor | tools/analyze_shots.py        # stdin
 It greps `dump[…]` lines itself, so feeding it a full monitor capture is
 fine.
 
+Pass `--changepoint DATE` to add a per-preset before/after block — see
+"Reading the changepoint block" below:
+
+```sh
+tools/analyze_shots.py monitor.log --changepoint 2026-05-31   # YYYY-MM-DD (UTC)
+tools/analyze_shots.py monitor.log --changepoint 1780084040   # or raw rtc epoch
+```
+
 ### What the output covers
 
 Per preset (one section each):
@@ -58,6 +66,10 @@ Per preset (one section each):
   shots that had a recorded suggestion.
 - **Confidence buckets** — mean `|sugg − grind|` per conf tier, on shots
   where conf was logged (conf-recording is recent — early shots all read 0).
+- **Changepoint check** *(only with `--changepoint`)* — fits the OLS on
+  pre-event shots and scores post-event shots against it, to catch a discrete
+  calibration shift (dial recalibration, burr swap, new beans). See "Reading
+  the changepoint block" below.
 
 ### Reading the OLS block
 
@@ -111,6 +123,30 @@ Two caveats baked into the footer:
   block misses.
 - Plain OLS, no ridge/phantoms, so the predicted seconds approximate the
   device's but won't match exactly.
+
+### Reading the changepoint block
+
+Only printed with `--changepoint DATE`. Use it when a *discrete physical event*
+— recalibrating the grinder dial, swapping burrs, opening a new bag — may have
+changed what the logged numbers mean. Unlike recency-decay weighting (which
+blurs smoothly across the break), this cuts at the date: it fits
+`log(time) ~ T + H + P + grind` on the **pre-event** shots only, then scores
+each **post-event** shot against that model.
+
+- **per-shot table** — `idx`, actual `t_s`, the climate/grind it was pulled at,
+  the pre-event model's `pred`, and the `resid` (`actual/pred − 1`).
+- **median residual + run-long count** — the headline. If the post-event shots
+  scatter around 0%, nothing shifted. If they pile up on one side, the same
+  dialed grind now brews systematically longer (or shorter) at matched climate.
+- **sign-test verdict** — when *all* n post-event shots fall the same side
+  (`p ≈ 2·0.5ⁿ`), the block calls it a real changepoint and recommends treating
+  pre/post as separate calibration epochs rather than one pooled grind axis.
+
+Caveats: shots with `rtc == 0` (RTC never seeded) have no timeline position and
+are dropped from this view, so the pre-event count can be lower than the
+preset's total. Needs ≥5 pre-event and ≥1 post-event dated shots. It's the same
+plain-OLS proxy as the other blocks — read the *sign and consistency*, not the
+exact percentage.
 
 ## `svg_to_lvgl.py`
 
