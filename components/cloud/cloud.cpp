@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <strings.h>  // strcasecmp (case-insensitive Location header match)
 
 namespace espressopost::cloud {
 namespace {
@@ -153,11 +154,17 @@ bool persist_str(const char* key, const char* val, char* dst, size_t dst_sz) {
 struct RespCtx {
   char   buf[kRespCapBytes];
   size_t len;
+  char   location[512];  // Location header of a redirect, captured to follow manually
 };
 
 esp_err_t http_event(esp_http_client_event_t* evt) {
-  if (evt->event_id == HTTP_EVENT_ON_DATA && evt->user_data != nullptr) {
-    auto* ctx = static_cast<RespCtx*>(evt->user_data);
+  auto* ctx = static_cast<RespCtx*>(evt->user_data);
+  if (ctx == nullptr) return ESP_OK;
+  if (evt->event_id == HTTP_EVENT_ON_HEADER) {
+    if (evt->header_key != nullptr && strcasecmp(evt->header_key, "Location") == 0) {
+      std::snprintf(ctx->location, sizeof(ctx->location), "%s", evt->header_value);
+    }
+  } else if (evt->event_id == HTTP_EVENT_ON_DATA) {
     if (ctx->len + 1 < sizeof(ctx->buf)) {
       size_t space = sizeof(ctx->buf) - 1 - ctx->len;
       size_t n = (static_cast<size_t>(evt->data_len) < space)
@@ -172,18 +179,20 @@ esp_err_t http_event(esp_http_client_event_t* evt) {
 
 // POST `body` to `url`. On transport success, writes the HTTP status code to
 // *out_status and the (truncated) response body into resp. Apps Script /exec
-// 302-redirects to script.googleusercontent.com; auto-redirect (default on)
-// follows it as a GET to fetch the result — doPost already ran with the body on
-// the first hop, so the body is delivered before the redirect. The cert bundle
-// covers both hosts.
+// answers with a 302 to a script.googleusercontent.com/macros/echo URL that
+// serves the doPost result and accepts only GET. We must follow it manually as a
+// GET: esp_http_client's auto-redirect preserves the POST method, so the echo
+// host rejects it with 405. doPost already ran with the body on the first hop, so
+// the echo URL holds the result. The cert bundle covers both hosts.
 esp_err_t http_post(const char* url, const std::string& body, int* out_status, RespCtx* resp) {
   esp_http_client_config_t cfg = {};
-  cfg.url               = url;
-  cfg.method            = HTTP_METHOD_POST;
-  cfg.timeout_ms        = kHttpTimeoutMs;
-  cfg.crt_bundle_attach = esp_crt_bundle_attach;
-  cfg.event_handler     = http_event;
-  cfg.user_data         = resp;
+  cfg.url                   = url;
+  cfg.method                = HTTP_METHOD_POST;
+  cfg.timeout_ms            = kHttpTimeoutMs;
+  cfg.crt_bundle_attach     = esp_crt_bundle_attach;
+  cfg.event_handler         = http_event;
+  cfg.user_data             = resp;
+  cfg.disable_auto_redirect = true;  // follow the 302 ourselves, as GET (see above)
 
   esp_http_client_handle_t c = esp_http_client_init(&cfg);
   if (c == nullptr) return ESP_FAIL;
@@ -191,8 +200,23 @@ esp_err_t http_post(const char* url, const std::string& body, int* out_status, R
   esp_http_client_set_header(c, "Content-Type", "application/json");
   esp_http_client_set_post_field(c, body.data(), static_cast<int>(body.size()));
 
-  const esp_err_t err = esp_http_client_perform(c);
-  if (err == ESP_OK) *out_status = esp_http_client_get_status_code(c);
+  esp_err_t err = esp_http_client_perform(c);
+  int status = (err == ESP_OK) ? esp_http_client_get_status_code(c) : 0;
+
+  // Follow a single redirect as GET. The 302 body is the throwaway redirect page,
+  // so reset resp before fetching the real result from the echo URL.
+  if (err == ESP_OK && (status == 301 || status == 302 || status == 303) &&
+      resp->location[0] != '\0') {
+    resp->len = 0;
+    resp->buf[0] = '\0';
+    esp_http_client_set_url(c, resp->location);
+    esp_http_client_set_method(c, HTTP_METHOD_GET);
+    esp_http_client_set_post_field(c, nullptr, 0);
+    err = esp_http_client_perform(c);
+    if (err == ESP_OK) status = esp_http_client_get_status_code(c);
+  }
+
+  if (err == ESP_OK) *out_status = status;
   esp_http_client_cleanup(c);
   return err;
 }
