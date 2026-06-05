@@ -32,6 +32,15 @@ CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=y
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
 
+# --- Console ---
+# The board's only USB port is the ESP32-S3 native USB-Serial-JTAG (no UART
+# bridge chip), so route the console there. With UART as primary the serial REPL
+# (the `cloud` commands in components/cloud) prints its prompt over the secondary
+# USB mirror but reads keystrokes from UART0's RX pin, which isn't wired to
+# anything — so input silently goes nowhere. Making USB-Serial-JTAG the primary
+# puts both log output and REPL input on the one port `idf.py monitor` attaches to.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
 # --- Logging ---
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_LOG_COLORS=y

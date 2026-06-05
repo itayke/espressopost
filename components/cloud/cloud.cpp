@@ -486,7 +486,7 @@ void print_status() {
 
 int cmd_cloud(int argc, char** argv) {
   if (argc < 2) {
-    std::printf("usage: cloud <set-url URL | set-token TOKEN | status | provision | sync>\n");
+    std::printf("usage: cloud <set-url URL | set-token TOKEN | status | provision | sync | resync>\n");
     return 0;
   }
   const char* sub = argv[1];
@@ -537,6 +537,18 @@ int cmd_cloud(int argc, char** argv) {
     return 0;
   }
 
+  // Rewind the high-water mark so every stored shot is re-uploaded from index 0.
+  // Use after clearing/recreating the destination sheet — the device otherwise
+  // only sends records above the HWM and would never re-offer the old ones. The
+  // Apps Script dedupes by index, so this is safe even if some rows still exist.
+  if (std::strcmp(sub, "resync") == 0) {
+    { Lock l; s_hwm = 0; }
+    persist_hwm(0);
+    if (s_events) xEventGroupSetBits(s_events, kBitNewShot);
+    std::printf("hwm reset to 0; re-uploading all records\n");
+    return 0;
+  }
+
   std::printf("unknown subcommand '%s'\n", sub);
   return 1;
 }
@@ -545,14 +557,18 @@ void setup_console() {
   esp_console_repl_t* repl = nullptr;
   esp_console_repl_config_t repl_cfg = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
   repl_cfg.prompt = "esp>";
-  esp_console_dev_uart_config_t uart_cfg = ESP_CONSOLE_DEV_UART_CONFIG_DEFAULT();
-  if (esp_console_new_repl_uart(&uart_cfg, &repl_cfg, &repl) != ESP_OK) {
+  // The board's only USB port is the ESP32-S3 native USB-Serial-JTAG (no UART
+  // bridge), so the REPL must read input from there — a UART0 REPL would print
+  // the prompt (mirrored to the secondary console) but never see keystrokes.
+  esp_console_dev_usb_serial_jtag_config_t hw_cfg =
+      ESP_CONSOLE_DEV_USB_SERIAL_JTAG_CONFIG_DEFAULT();
+  if (esp_console_new_repl_usb_serial_jtag(&hw_cfg, &repl_cfg, &repl) != ESP_OK) {
     ESP_LOGW(kTag, "console repl init failed; cloud serial commands unavailable");
     return;
   }
   const esp_console_cmd_t cmd = {
       .command = "cloud",
-      .help = "cloud sync: set-url/set-token/status/provision/sync",
+      .help = "cloud sync: set-url/set-token/status/provision/sync/resync",
       .hint = nullptr,
       .func = &cmd_cloud,
   };

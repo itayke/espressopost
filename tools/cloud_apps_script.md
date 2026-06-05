@@ -26,7 +26,7 @@ const SHEET = 'shots';
 // number — used to dedupe so a retried POST (e.g. a 200 lost in transit after
 // the device already advanced its high-water mark) can't double-write a row.
 const HEADERS = [
-  'index', 'epoch', 'boot_us', 'preset', 'time_s', 'stars', 'conf',
+  'index', 'epoch', 'datetime', 'boot_us', 'preset', 'time_s', 'stars', 'conf',
   'taste', 'anomaly', 'tombstone', 'temp_c', 'rh', 'hpa', 'grind', 'suggested',
 ];
 
@@ -54,8 +54,13 @@ function doPost(e) {
     let written = 0;
     (body.shots || []).forEach(function (s) {
       if (seen[s.index]) return;  // already have this record
+      // `datetime` is a real Date value derived from epoch (UTC instant; the sheet
+      // displays it in its own timezone). Blank when epoch is 0/missing — a shot
+      // logged before the RTC synced — so it reads empty, not 1970; `boot_us`
+      // remains the fallback ordering key for those. `epoch` stays the source of truth.
+      const dt = s.epoch ? new Date(s.epoch * 1000) : '';
       sh.appendRow([
-        s.index, s.epoch || '', s.boot_us, s.preset, s.time_s, s.stars, s.conf,
+        s.index, s.epoch || '', dt, s.boot_us, s.preset, s.time_s, s.stars, s.conf,
         (s.taste || []).join('|'),
         s.anomaly, s.tombstone,
         s.temp_c, s.rh, s.hpa, s.grind,
@@ -110,7 +115,13 @@ cloud set-url https://script.google.com/macros/s/AKfy.../exec
 cloud set-token PUT-A-LONG-RANDOM-STRING-HERE
 cloud status          # shows wifi/sync state; token is never echoed back
 cloud sync            # force an immediate upload attempt
+cloud resync          # rewind to index 0 and re-upload every shot (see below)
 ```
+
+If you clear or recreate the Sheet, the device won't re-send the old shots on its
+own — it tracks a **high-water mark** in NVS and only uploads records above it.
+Run `cloud resync` to rewind that mark to 0 and re-upload everything from scratch;
+the script's `index` dedupe means rows that still exist won't be duplicated.
 
 ## Notes / gotchas
 
@@ -127,6 +138,11 @@ cloud sync            # force an immediate upload attempt
   device treats a shot as uploaded only when the response body contains
   `"ok":true`. A `bad token` (still HTTP 200) leaves the high-water mark put and
   the device retries with backoff.
+- **The `datetime` column:** a human-readable mirror of `epoch`, written as a real
+  Date value (not a string) so it sorts, filters, and charts natively. It's
+  displayed in the **spreadsheet's** timezone — set it once under File ▸ Settings ▸
+  Time zone, then restyle the format anytime via Format ▸ Number without redeploying.
+  `epoch` stays the unambiguous UTC source of truth.
 - **Quotas:** Apps Script has daily script-runtime limits and cold-start latency
   (the device uses a 15 s timeout); the device batches up to 20 shots per POST
   to stay well under them.
