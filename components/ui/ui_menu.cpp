@@ -3,7 +3,9 @@
 #include "ui_theme.hpp"
 
 #include "rtc.hpp"
+#include "storage.hpp"
 
+#include <cstdio>   // snprintf
 #include <cstdlib>  // setenv
 #include <ctime>    // localtime_r, strftime, tzset
 
@@ -23,6 +25,7 @@ const lv_color_t kColorBack  = kColorText;
 // as more menu items land (the fade-set array below sizes for a few spares).
 constexpr int32_t kTitleTopY          = 30;
 constexpr int32_t kClockTopY          = 66;  // date/time line, just under the title
+constexpr int32_t kShotsTopY          = 90;  // "Total shots: N", under the date/time
 constexpr int32_t kEntryW             = 264;
 constexpr int32_t kEntryH             = 66;
 constexpr int32_t kEntryGap           = 22;
@@ -40,6 +43,7 @@ constexpr const char* kPosixTz = "EST5EDT,M3.2.0,M11.1.0";
 lv_obj_t*   s_group     = nullptr;
 lv_obj_t*   s_title     = nullptr;
 lv_obj_t*   s_clock     = nullptr;
+lv_obj_t*   s_shots     = nullptr;
 lv_timer_t* s_clock_tmr = nullptr;
 lv_obj_t* s_presets  = nullptr;
 lv_obj_t* s_conn     = nullptr;
@@ -47,19 +51,32 @@ lv_obj_t* s_back     = nullptr;
 lv_obj_t* s_fade[6]  = {};
 int       s_fade_n   = 0;
 
-// Refresh the date/time line from the RTC. Skipped while the menu is off-screen
-// so we don't poll the RTC over I²C every second when it can't be seen.
-void update_clock(lv_timer_t*) {
-  if (s_clock == nullptr) return;
+// Refresh the date/time + total-shots lines from the RTC and the shot log.
+// Skipped while the menu is off-screen so we don't poll the RTC over I²C every
+// second when it can't be seen.
+void update_info(lv_timer_t*) {
   if (s_group != nullptr && lv_obj_has_flag(s_group, LV_OBJ_FLAG_HIDDEN)) return;
-  const uint32_t e = rtc::epoch_s();
-  if (e == 0) { lv_label_set_text(s_clock, "clock not set"); return; }
-  const time_t t = static_cast<time_t>(e);
-  struct tm tm_local;
-  localtime_r(&t, &tm_local);
-  char buf[40];
-  strftime(buf, sizeof(buf), "%a %b %d   %H:%M", &tm_local);
-  lv_label_set_text(s_clock, buf);
+
+  if (s_clock != nullptr) {
+    const uint32_t e = rtc::epoch_s();
+    if (e == 0) {
+      lv_label_set_text(s_clock, "clock not set");
+    } else {
+      const time_t t = static_cast<time_t>(e);
+      struct tm tm_local;
+      localtime_r(&t, &tm_local);
+      char buf[40];
+      strftime(buf, sizeof(buf), "%a %b %d   %H:%M", &tm_local);
+      lv_label_set_text(s_clock, buf);
+    }
+  }
+
+  if (s_shots != nullptr) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "Total shots: %u",
+                  static_cast<unsigned>(storage::shot_count()));
+    lv_label_set_text(s_shots, buf);
+  }
 }
 
 // Left chevron "<" for the Back pill — mirrors the one in ui_presets so the Back
@@ -138,8 +155,15 @@ lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_back,
   lv_obj_set_style_text_color(s_clock, kColorTitle, LV_PART_MAIN);
   lv_obj_set_style_text_font(s_clock, &lv_font_montserrat_14, LV_PART_MAIN);
   lv_obj_align(s_clock, LV_ALIGN_TOP_MID, 0, kClockTopY);
-  update_clock(nullptr);  // paint immediately so it's right on first show
-  s_clock_tmr = lv_timer_create(update_clock, 1000, nullptr);
+
+  // Total-shots line under the clock — a quick at-a-glance count from the log.
+  s_shots = lv_label_create(group);
+  lv_obj_set_style_text_color(s_shots, kColorTitle, LV_PART_MAIN);
+  lv_obj_set_style_text_font(s_shots, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_align(s_shots, LV_ALIGN_TOP_MID, 0, kShotsTopY);
+
+  update_info(nullptr);  // paint immediately so both lines are right on first show
+  s_clock_tmr = lv_timer_create(update_info, 1000, nullptr);
 
   s_presets = build_entry(group, "Presets", kEntryFirstTopY, on_presets);
   s_conn    = build_entry(group, "Connections",
@@ -180,6 +204,7 @@ lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_back,
   s_fade_n = 0;
   s_fade[s_fade_n++] = s_title;
   s_fade[s_fade_n++] = s_clock;
+  s_fade[s_fade_n++] = s_shots;
   s_fade[s_fade_n++] = s_presets;
   s_fade[s_fade_n++] = s_conn;
   s_fade[s_fade_n++] = s_back;
