@@ -2,6 +2,7 @@
 
 #include "cloud_json.hpp"
 #include "cloud_portal.hpp"
+#include "rtc.hpp"
 #include "storage.hpp"
 
 #include "esp_check.h"
@@ -12,6 +13,7 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_netif_sntp.h"
 #include "esp_wifi.h"
 #include "esp_wifi_default.h"
 #include "freertos/FreeRTOS.h"
@@ -24,6 +26,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <strings.h>  // strcasecmp (case-insensitive Location header match)
+#include <sys/time.h>  // gettimeofday — read the SNTP-set clock to seed the RTC
 
 namespace espressopost::cloud {
 namespace {
@@ -68,6 +71,7 @@ constexpr size_t   kRespCapBytes  = 256;     // response prefix we keep to check
 constexpr EventBits_t kBitGotIp       = 1u << 0;
 constexpr EventBits_t kBitNewShot     = 1u << 1;
 constexpr EventBits_t kBitProvConnect = 1u << 2;  // form submitted: drop AP, connect STA
+constexpr EventBits_t kBitTimeSynced  = 1u << 3;  // SNTP got real UTC: push it to the RTC
 
 // --- State (guarded by s_mutex unless noted). ---
 SemaphoreHandle_t  s_mutex  = nullptr;
@@ -82,6 +86,7 @@ int8_t    s_rssi       = 0;
 uint32_t  s_hwm        = 0;
 int       s_wifi_retry = 0;
 bool      s_started      = false;  // esp_wifi_start() has been called
+bool      s_sntp_inited  = false;  // esp_netif_sntp_init() has run (once, on first GOT_IP)
 bool      s_provisioning = false;  // captive portal (SoftAP + form) is up
 bool      s_prov_submitted = false;  // form submitted; STA connect attempt in flight
 
@@ -309,14 +314,52 @@ BatchResult upload_batch() {
   return BatchResult::Ok;
 }
 
+// --- time sync (SNTP) ---
+
+// Called from the SNTP task once a server reply lands. The module has already
+// pushed the time into the system clock (settimeofday), so we just nudge the
+// sync task to copy it into the battery-backed RTC — done there to keep the
+// blocking I²C write off the lwip task.
+void on_sntp_sync(struct timeval* /*tv*/) {
+  if (s_events) xEventGroupSetBits(s_events, kBitTimeSynced);
+}
+
+// Bring up the SNTP client once, on the first GOT_IP. It then re-syncs itself
+// periodically and across reconnects, so this need only run a single time. The
+// build-time seed in rtc::init() is just a cold-boot floor; this is what makes
+// the clock actually correct (and self-healing) whenever WiFi is up.
+void start_sntp() {
+  if (s_sntp_inited) return;
+  esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+  cfg.sync_cb = on_sntp_sync;
+  if (esp_netif_sntp_init(&cfg) == ESP_OK) {
+    s_sntp_inited = true;
+    ESP_LOGI(kTag, "SNTP started (pool.ntp.org)");
+  } else {
+    ESP_LOGW(kTag, "SNTP init failed");
+  }
+}
+
 void sync_task(void* /*arg*/) {
   ESP_LOGI(kTag, "sync task started (stack %u, core %d)",
            static_cast<unsigned>(kSyncTaskStack), static_cast<int>(kSyncTaskCore));
   uint32_t backoff = kBackoffMinMs;
   for (;;) {
     const EventBits_t bits =
-        xEventGroupWaitBits(s_events, kBitGotIp | kBitNewShot | kBitProvConnect,
+        xEventGroupWaitBits(s_events,
+                            kBitGotIp | kBitNewShot | kBitProvConnect | kBitTimeSynced,
                             /*clear=*/pdTRUE, /*waitAll=*/pdFALSE, portMAX_DELAY);
+    if (bits & kBitTimeSynced) {
+      // SNTP set the system clock; copy it into the RTC so the time survives
+      // reboots and stamps shots correctly. Guard against a bogus pre-2024 value.
+      struct timeval tv = {};
+      gettimeofday(&tv, nullptr);
+      if (tv.tv_sec > 1700000000) {
+        const esp_err_t e = rtc::set_time(static_cast<uint32_t>(tv.tv_sec));
+        ESP_LOGI(kTag, "RTC set from SNTP: epoch=%ld (%s)",
+                 static_cast<long>(tv.tv_sec), esp_err_to_name(e));
+      }
+    }
     if (bits & kBitProvConnect) {
       // Finalize provisioning off the httpd task: a portal client (the phone)
       // still attached to the SoftAP pins the single radio to the AP channel and
@@ -433,6 +476,7 @@ void on_event(void* /*arg*/, esp_event_base_t base, int32_t id, void* data) {
       was_provisioning = s_provisioning;
     }
     ESP_LOGI(kTag, "connected, rssi=%d", rssi);
+    start_sntp();  // correct the clock now that we're online (idempotent)
     if (was_provisioning) {
       // Provisioning succeeded. Tear the captive portal down here in the event
       // task (never from the httpd task that served the form — it'd kill itself)

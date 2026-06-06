@@ -15,6 +15,7 @@ idf_component_register(
         mbedtls
         nvs_flash
         console
+        rtc
         storage
 )
 
