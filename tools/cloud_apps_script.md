@@ -14,12 +14,18 @@ firmware source.
 1. New Google Sheet (this becomes the log).
 2. **Extensions ▸ Apps Script** — opens a bound script project.
 3. Replace `Code.gs` with the script below.
-4. Set `TOKEN` to a long random string (this is the shared secret the device
-   sends; treat it like a password).
+4. Leave `TOKEN` as the device default below if you just want it working, or —
+   **recommended for real access control** — change it to a long random string
+   of your own (treat it like a password) and set the matching value on the
+   device via `cloud set-token` or the setup form. It must stay under 63
+   characters (the device's token field).
 
 ```js
 // Bound to the destination Sheet. Appends one row per posted shot.
-const TOKEN = 'PUT-A-LONG-RANDOM-STRING-HERE';   // must match `cloud set-token`
+// This is the device's built-in default token, so a fresh device syncs with
+// only the /exec URL entered. Recommended: replace it with your own long random
+// string (≤ 63 chars) and match it on the device — see step 4.
+const TOKEN = 'Espresso Post (c) 2026 Itay Keren';   // must match `cloud set-token`
 const SHEET = 'shots';
 
 // Column order written to the sheet. `index` is the device's absolute record

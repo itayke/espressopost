@@ -56,6 +56,12 @@ constexpr const char* kNvsKeyHwm    = "hwm";
 // --- Tunables (documented, in one place per house style). ---
 constexpr size_t   kUrlMax        = 160;     // Apps Script /exec URL fits in ~120
 constexpr size_t   kTokenMax      = 64;
+// Default shared token, so a fresh device syncs with only the /exec URL set —
+// the token is the sole other input and most users keep the default. It's a soft
+// gate, not a secret (it ships in firmware and crosses the AP hop in cleartext);
+// override it via `cloud set-token` / the portal and match it in the Apps Script
+// for real access control. Must fit in kTokenMax-1 chars. See cloud_apps_script.md.
+constexpr const char* kDefaultToken = "Espresso Post (c) 2026 Itay Keren";
 constexpr size_t   kBatchSize     = 20;      // records per POST
 constexpr uint32_t kSyncTaskStack = 12288;   // mbedTLS handshake needs the headroom
 constexpr UBaseType_t kSyncTaskPrio = 3;     // same as climate
@@ -123,12 +129,16 @@ bool has_stored_creds() {
 }
 
 void load_config() {
+  // Seed the default token first so it stands whether NVS has no cloud namespace
+  // yet (fresh device) or just no stored token; a user-set token overrides below.
+  std::snprintf(s_token, sizeof(s_token), "%s", kDefaultToken);
   nvs_handle_t h;
   if (nvs_open(kNvsNamespace, NVS_READONLY, &h) != ESP_OK) return;
   size_t len = sizeof(s_url);
   if (nvs_get_str(h, kNvsKeyUrl, s_url, &len) != ESP_OK) s_url[0] = '\0';
   len = sizeof(s_token);
-  if (nvs_get_str(h, kNvsKeyToken, s_token, &len) != ESP_OK) s_token[0] = '\0';
+  if (nvs_get_str(h, kNvsKeyToken, s_token, &len) != ESP_OK)
+    std::snprintf(s_token, sizeof(s_token), "%s", kDefaultToken);
   uint32_t hwm = 0;
   if (nvs_get_u32(h, kNvsKeyHwm, &hwm) == ESP_OK) s_hwm = hwm;
   nvs_close(h);

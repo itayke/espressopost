@@ -223,7 +223,7 @@ std::string build_form_html() {
        "<input name=url type=url value=\"";
   append_escaped(h, s_prefill_url);
   h += "\" placeholder=\"https://script.google.com/.../exec\">"
-       "<label>Token <small>(leave blank to keep current)</small></label>"
+       "<label>Token <small>(optional - leave blank to keep current)</small></label>"
        "<input name=token autocomplete=off>"
        "<button type=submit>Connect</button>"
        "</form></div></body></html>";

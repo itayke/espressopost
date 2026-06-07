@@ -106,9 +106,12 @@ every lookup at itself, and an HTTP server. The Connections screen shows a
 standard Wi-Fi-join QR for that AP — the phone's native camera offers
 "Join network", and once joined the OS captive-portal check auto-opens the
 device's page (no companion app). One form captures the **Wi-Fi network +
-password + cloud endpoint URL + token** together (the network field is a
+password + cloud endpoint URL** together (the network field is a
 dropdown of a live scan, with manual entry for hidden SSIDs); there is no
-network list or password field on the 466 px screen, and no serial step.
+network list or password field on the 466 px screen, and no serial step. The
+shared token has a built-in default (matched in the Apps Script), so only the
+`/exec` URL is strictly required — the form's token field is optional, for users
+who set their own.
 Creds persist to flash and the device auto-reconnects on boot. The token
 crosses the local AP hop in cleartext — an accepted tradeoff for a short,
 user-initiated, on-prem setup window. Upload is a **durable queue +
@@ -117,9 +120,10 @@ core-0 background task uploads everything above it whenever Wi-Fi is up
 over TLS (cert bundle; Apps Script `ContentService` always answers HTTP
 200, so success is gated on the response body containing `"ok":true`), so
 offline pulls, reboots, and the existing shot history all sync. The
-endpoint URL and shared token live in NVS — never reflashed, never in the
-source tree, never logged; the serial console (`cloud set-url` /
-`cloud set-token`) stays as a recovery/headless fallback. `cloud::init()`
+endpoint URL and any user-set token live in NVS — never reflashed, never in
+the source tree, never logged (the token's built-in *default* does ship in
+firmware, since it's a soft gate rather than a secret); the serial console
+(`cloud set-url` / `cloud set-token`) stays as a recovery/headless fallback. `cloud::init()`
 is non-fatal (warn + continue like climate/rtc): no network just means
 shots stay queued locally. The JSON payload builder
 (`cloud_json.{hpp,cpp}`) is IDF-free and host-tested.
