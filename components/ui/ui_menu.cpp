@@ -28,8 +28,8 @@ constexpr int32_t kClockTopY          = 66;  // date/time line, just under the t
 constexpr int32_t kShotsTopY          = 90;  // "Total shots: N", under the date/time
 constexpr int32_t kEntryW             = 264;
 constexpr int32_t kEntryH             = 66;
-constexpr int32_t kEntryGap           = 22;
-constexpr int32_t kEntryFirstTopY     = 138;  // top inset of the first entry pill
+constexpr int32_t kEntryGap           = 14;
+constexpr int32_t kEntryFirstTopY     = 124;  // top inset of the first entry pill
 constexpr int32_t kBackBtnW           = 132;
 constexpr int32_t kBackBtnH           = 56;
 constexpr int32_t kBackBtnBottomInset = 16;
@@ -47,8 +47,9 @@ lv_obj_t*   s_shots     = nullptr;
 lv_timer_t* s_clock_tmr = nullptr;
 lv_obj_t* s_presets  = nullptr;
 lv_obj_t* s_conn     = nullptr;
+lv_obj_t* s_changes  = nullptr;
 lv_obj_t* s_back     = nullptr;
-lv_obj_t* s_fade[6]  = {};
+lv_obj_t* s_fade[7]  = {};
 int       s_fade_n   = 0;
 
 // Refresh the date/time + total-shots lines from the RTC and the shot log.
@@ -130,7 +131,8 @@ lv_obj_t* build_entry(lv_obj_t* group, const char* text, int32_t top_y,
 }  // namespace
 
 lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_back,
-                lv_event_cb_t on_presets, lv_event_cb_t on_connections) {
+                lv_event_cb_t on_presets, lv_event_cb_t on_connections,
+                lv_event_cb_t on_changes) {
   lv_obj_t* group = lv_obj_create(scr);
   lv_obj_set_size(group, kScreen, kScreen);
   lv_obj_set_pos(group, 0, 0);
@@ -168,6 +170,8 @@ lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_back,
   s_presets = build_entry(group, "Presets", kEntryFirstTopY, on_presets);
   s_conn    = build_entry(group, "Connections",
                           kEntryFirstTopY + kEntryH + kEntryGap, on_connections);
+  s_changes = build_entry(group, "Events",
+                          kEntryFirstTopY + 2 * (kEntryH + kEntryGap), on_changes);
 
   // Back pill — bottom-center, identical geometry to the Presets screen's.
   s_back = lv_button_create(group);
@@ -207,6 +211,7 @@ lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_back,
   s_fade[s_fade_n++] = s_shots;
   s_fade[s_fade_n++] = s_presets;
   s_fade[s_fade_n++] = s_conn;
+  s_fade[s_fade_n++] = s_changes;
   s_fade[s_fade_n++] = s_back;
 
   return group;

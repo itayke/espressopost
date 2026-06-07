@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "ui_report.cpp"
         "ui_bar.cpp"
+        "ui_changes.cpp"
         "ui_connections.cpp"
         "ui_menu.cpp"
         "ui_preset_readout.cpp"
@@ -13,6 +14,7 @@ idf_component_register(
     REQUIRES
         lvgl__lvgl
         display
+        calibration
         climate
         cloud
         model

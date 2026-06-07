@@ -1,5 +1,6 @@
 #include "ui.hpp"
 #include "ui_bar.hpp"
+#include "ui_changes.hpp"
 #include "ui_connections.hpp"
 #include "ui_menu.hpp"
 #include "ui_preset_edit.hpp"
@@ -170,8 +171,8 @@ const lv_color_t kColorSubmitDisabled = kColorMuted3;
 // only the center widgets swap. Presets is a full-panel mode (everything hides)
 // reached from Idle via the Menu button — see the section-swap engine below.
 // ---------------------------------------------------------------------------
-enum class Mode { Idle, Post, Menu, Presets, Edit, Connections };
-constexpr int kModeCount = 6;
+enum class Mode { Idle, Post, Menu, Presets, Edit, Connections, Changes };
+constexpr int kModeCount = 7;
 Mode s_mode = Mode::Idle;
 
 // One row per mode in the swap registry (s_views, populated once the group
@@ -354,6 +355,10 @@ lv_obj_t* s_menu_group = nullptr;
 // ui_connections.cpp. Reached from the Menu hub.
 lv_obj_t* s_connections_group = nullptr;
 
+// Changes screen (Mode::Changes) — logs grinder recals / new beans as calibration
+// boundaries; view in ui_changes.cpp. Reached from the Menu hub.
+lv_obj_t* s_changes_group = nullptr;
+
 // Presets screen (Mode::Presets) — the view (title + 3×3 grid + Back) lives in
 // ui_presets.cpp. ui_report only keeps the group handle (set in start_report
 // from presets_screen::build) to show/hide it across the mode swap.
@@ -385,6 +390,8 @@ lv_obj_t* const* s_edit_fade    = nullptr;
 int       s_edit_fade_n        = 0;
 lv_obj_t* const* s_connections_fade = nullptr;
 int       s_connections_fade_n      = 0;
+lv_obj_t* const* s_changes_fade     = nullptr;
+int       s_changes_fade_n          = 0;
 // No-op anim target: drives the swap's two-phase timing independently of which
 // section widgets are visible, so the phase callbacks fire after exactly one
 // kModeSwapFadeMs regardless of how many widgets actually faded.
@@ -782,13 +789,14 @@ const ModeView s_views[kModeCount] = {
     /*Presets*/     {&s_presets_group,     &s_presets_group,     nullptr, nullptr},
     /*Edit*/        {&s_edit_group,        &s_edit_group,        nullptr, nullptr},
     /*Connections*/ {&s_connections_group, &s_connections_group, nullptr, nullptr},
+    /*Changes*/     {&s_changes_group,     &s_changes_group,     nullptr, nullptr},
 };
 
 // Full-panel modes drive the per-section fade engine (vs the Idle↔Post climate
 // swap). Their fade set + group bookkeeping are addressed by mode below.
 bool is_panel_mode(Mode m) {
   return m == Mode::Menu || m == Mode::Presets || m == Mode::Edit ||
-         m == Mode::Connections;
+         m == Mode::Connections || m == Mode::Changes;
 }
 
 // The section-fade set for a mode (Idle participates as the Menu edge's other
@@ -800,6 +808,7 @@ lv_obj_t* const* mode_fade(Mode m, int* n) {
     case Mode::Presets:     *n = s_presets_fade_n;     return s_presets_fade;
     case Mode::Edit:        *n = s_edit_fade_n;        return s_edit_fade;
     case Mode::Connections: *n = s_connections_fade_n; return s_connections_fade;
+    case Mode::Changes:     *n = s_changes_fade_n;     return s_changes_fade;
     default:                *n = 0;                    return nullptr;
   }
 }
@@ -1100,7 +1109,11 @@ void on_menu_tap(lv_event_t*) {
 // Menu hub entries → sub-screens; Menu Back → Idle.
 void on_menu_presets_tap(lv_event_t*)     { switch_mode(Mode::Presets); }
 void on_menu_connections_tap(lv_event_t*) { switch_mode(Mode::Connections); }
+void on_menu_changes_tap(lv_event_t*)     { switch_mode(Mode::Changes); }
 void on_menu_back_tap(lv_event_t*)        { switch_mode(Mode::Idle); }
+
+// Changes: Back → Menu (navigation only; the screen owns its own logging).
+void on_changes_back_tap(lv_event_t*)     { switch_mode(Mode::Menu); }
 
 // Presets Back now returns to the Menu hub (Idle → Menu → Presets).
 void on_back_tap(lv_event_t*) {
@@ -2164,6 +2177,7 @@ void hide_panel(Mode m) {
     case Mode::Presets:     lv_obj_add_flag(s_presets_group, LV_OBJ_FLAG_HIDDEN); break;
     case Mode::Edit:        lv_obj_add_flag(s_edit_group, LV_OBJ_FLAG_HIDDEN); break;
     case Mode::Connections: lv_obj_add_flag(s_connections_group, LV_OBJ_FLAG_HIDDEN); break;
+    case Mode::Changes:     lv_obj_add_flag(s_changes_group, LV_OBJ_FLAG_HIDDEN); break;
     default: break;
   }
 }
@@ -2193,6 +2207,10 @@ void show_panel(Mode m) {
     case Mode::Connections:
       connections_screen::refresh();
       lv_obj_remove_flag(s_connections_group, LV_OBJ_FLAG_HIDDEN);
+      break;
+    case Mode::Changes:
+      changes_screen::refresh();
+      lv_obj_remove_flag(s_changes_group, LV_OBJ_FLAG_HIDDEN);
       break;
     default: break;
   }
@@ -3084,7 +3102,7 @@ void start_report() {
   // Menu hub sits above the idle/post groups in z-order; the idle Menu button
   // opens it. Its entries navigate to Presets / Connections; Back → Idle.
   s_menu_group = menu_screen::build(scr, on_menu_back_tap, on_menu_presets_tap,
-                                    on_menu_connections_tap);
+                                    on_menu_connections_tap, on_menu_changes_tap);
   // Presets group overlays, reached from the Menu hub; Back → Menu, each slot →
   // on_slot_tap (opens the editor).
   s_presets_group = presets_screen::build(scr, on_back_tap, on_slot_tap);
@@ -3097,6 +3115,9 @@ void start_report() {
   s_connections_group = connections_screen::build(scr, on_connections_back_tap,
                                                   on_connections_connect_tap,
                                                   on_connections_forget_tap);
+  // Changes group, reached from the Menu hub; Back → Menu. The screen logs
+  // calibration boundaries itself, so only navigation is injected.
+  s_changes_group = changes_screen::build(scr, on_changes_back_tap);
 
   // Mode-swap input block — full-screen transparent click-eater, hidden until a
   // cross-fade brings it to the foreground (see animate_mode_swap). Clickable so
@@ -3160,6 +3181,7 @@ void start_report() {
   s_presets_fade     = presets_screen::fade_widgets(&s_presets_fade_n);
   s_edit_fade        = preset_edit::fade_widgets(&s_edit_fade_n);
   s_connections_fade = connections_screen::fade_widgets(&s_connections_fade_n);
+  s_changes_fade     = changes_screen::fade_widgets(&s_changes_fade_n);
 
   apply_mode();  // s_mode starts Idle; hides every non-idle group
 
