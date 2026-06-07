@@ -6,6 +6,7 @@
 // optional; storage is also non-fatal so a wedged partition doesn't brick
 // boot — the UI will just refuse Submit and log the error.
 
+#include "calibration.hpp"
 #include "climate.hpp"
 #include "cloud.hpp"
 #include "display.hpp"
@@ -65,6 +66,15 @@ extern "C" void app_main(void) {
   if (rtc_err != ESP_OK) {
     ESP_LOGW(kTag, "rtc unavailable (%s); shots will log rtc_epoch_s=0",
              esp_err_to_name(rtc_err));
+  }
+
+  // Calibration after presets (which owns nvs_flash_init) and before model, so
+  // the first refit can bucket shots into epochs. Non-fatal: on failure the list
+  // reads empty, which collapses to a single epoch — the pre-feature behavior.
+  const esp_err_t calib_err = espressopost::calibration::init();
+  if (calib_err != ESP_OK) {
+    ESP_LOGW(kTag, "calibration init failed (%s); treating log as one epoch",
+             esp_err_to_name(calib_err));
   }
 
   // Model after storage + presets + climate so its first refit sees the live
