@@ -23,8 +23,8 @@ glance how far they are from it. Tapping **Post** swaps the center
 content for a time-delta stepper + 1–5 stars + Submit; the ring stays
 live so they can keep dialing. Submit appends a 40-byte v3 `ShotRecord`
 to LittleFS and returns to Idle. Tapping **Menu** opens a **Menu** hub —
-a "MENU" title over **Presets** and **Connections** entry pills and a
-Back pill to Idle. **Presets** is a "PRESETS" title over a 3×3 grid of
+a "MENU" title over **Presets**, **Connections**, and **Events** entry
+pills and a Back pill to Idle. **Presets** is a "PRESETS" title over a 3×3 grid of
 slots (each showing `PRESET N` / `Xg → Yg` / `Zs` tinted in the preset's
 accent color, empty slots a bare outline); it's view-only for now —
 per-slot select/edit/color-pick is the next step. **Connections** is the
@@ -32,7 +32,14 @@ cloud-sync screen (Wi-Fi state, sync state, a Connect/Reconfigure pill
 that starts captive-portal provisioning, a red Forget Network pill when
 connected, and a QR card carrying a Wi-Fi-join code for the setup
 network — see the cloud paragraph below).
-Both screens Back to the
+**Events** logs setup changes — a grinder recalibration, a new bag of
+beans, or a new/serviced machine — as dated calibration boundaries:
+three single-select reason pills (Grinder / Beans / Machine), a date
+stepper that backdates the change to when it actually happened (so it
+re-buckets shots already on disk), and a Save / cancel-red-Undo pair. The
+boundaries persist in NVS so the model can later treat pre/post shots as
+separate calibration epochs (Grinder / Machine) or reset the quality
+baseline (Beans). All three screens Back to the
 Menu hub; every mode swap fades each section individually rather than the
 whole screen. The grind value persists per preset
 (NVS key `gN`); the model's recommendation lands in a separate
@@ -412,7 +419,7 @@ memory notes for design decisions already locked in.
 ├── partitions.csv              custom: nvs + factory (4 MB) + littlefs (~12 MB)
 ├── sdkconfig.defaults          PSRAM, flash, partition table, FreeRTOS tick
 ├── main/
-│   ├── app_main.cpp            display → touch → storage → presets → storage.finalize_migrations → climate → rtc → model → cloud → power → ui
+│   ├── app_main.cpp            display → touch → storage → presets → storage.finalize_migrations → climate → rtc → calibration → model → cloud → power → ui
 │   ├── board_pins.hpp          verbatim from Waveshare's reference repo
 │   ├── idf_component.yml       managed deps: lvgl, CO5300, CST9217, littlefs
 │   └── CMakeLists.txt
@@ -423,6 +430,7 @@ memory notes for design decisions already locked in.
     ├── storage/                LittleFS mount + 40-byte ShotRecord append-log
     ├── presets/                NVS-backed Preset table + tap-to-cycle selection
     ├── rtc/                    PCF85063 driver: build-time seed + epoch_s() for ShotRecord
+    ├── calibration/            NVS list of setup-change boundaries (Grinder/Beans/Machine); derives each shot's epoch at read time
     ├── power/                  idle state machine: dim @ 30s, off @ 2min, wake on touch
     ├── cloud/                  Wi-Fi (captive-portal setup) + durable-queue shot upload to a Google Sheet
     │   ├── include/cloud.hpp      public API (init/start_provisioning/status/notify_new_shot)
@@ -435,13 +443,16 @@ memory notes for design decisions already locked in.
     │   ├── include/model_math.hpp pure math API (FitSample, fit, suggest, Suggestion)
     │   ├── model.cpp              IDF glue: mutex, storage, climate, logging
     │   └── model_math.cpp         pure math: standardization, ridge prior, Σ
-    └── ui/                     screen build (Idle / Post / Presets modes) + mode registry
+    └── ui/                     per-mode screen build + mode registry
         ├── include/ui.hpp              public API (start_report)
         ├── ui_report.cpp              screen build + mode registry (switch_mode) + section-swap engine + refreshers + handlers
-        ├── ui_menu.{hpp,cpp}          Menu hub: "MENU" title + Presets / Connections entry pills + Back
+        ├── ui_menu.{hpp,cpp}          Menu hub: "MENU" title + Presets / Connections / Events entry pills + Back
         ├── ui_presets.{hpp,cpp}       Presets screen: "PRESETS" title + 3×3 slot grid + Back pill + menu/back glyphs
+        ├── ui_preset_edit.{hpp,cpp}   Preset editor: dose / yield / target-time steppers + accent color pick + delete
         ├── ui_connections.{hpp,cpp}   Connections screen: Wi-Fi/sync status + Connect/Reconfigure + Forget pills + Wi-Fi-join QR card
+        ├── ui_changes.{hpp,cpp}       Events screen: Grinder/Beans/Machine reason pills + date stepper + Save/Undo → calibration boundaries
         ├── ui_preset_readout.{hpp,cpp} shared "PRESET N / Xg→Yg / Zs" readout (idle center line, post surface, grid slots)
+        ├── ui_stepper.{hpp,cpp}       reusable (−) value (+) stepper (post brew time + preset-editor fields)
         ├── ui_bar.{hpp,cpp}           generic scroll/momentum bar engine (grind dial is the only consumer)
         └── ui_theme.hpp               shared layout frame + base palette (mode-specific tuning stays in ui_report)
 
