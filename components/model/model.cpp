@@ -23,6 +23,12 @@ constexpr const char* kTag = "model";
 // paginated/streaming fit is warranted anyway.
 constexpr size_t kMaxShotsLoaded = 1024;
 
+// Post-event shots a new grind epoch needs before its measured dial offset is
+// shown as a firm number on the Events screen (vs a "gathering data" line).
+// Matches the small-sample floor we apply everywhere: a handful of shots can
+// pin the offset's sign but a single-digit count reads as noise to a human.
+constexpr uint16_t kEpochReadbackMinShots = 10;
+
 PresetFit         s_fits[presets::kMaxPresets] = {};
 SemaphoreHandle_t s_lock = nullptr;
 
@@ -199,6 +205,37 @@ ShotAssessment assess_shot(const storage::ShotRecord& rec) {
       classify_shot(f, c, grind, actual, rec.confidence_pct),
       predict_time_s(f, c, grind),
   };
+}
+
+EpochReadback latest_epoch_readback() {
+  EpochReadback rb = {};  // valid=false until proven otherwise
+  if (s_lock == nullptr) return rb;
+
+  Guard g;
+  if (!g.ok) return rb;
+
+  const uint8_t p = presets::selected_id();
+  if (p >= presets::kMaxPresets) return rb;
+  const PresetFit& f = s_fits[p];
+  if (!f.valid || f.n_epochs < 2) return rb;
+
+  // The latest grind epoch is the reference; the event we're annotating split
+  // it from the most recent OLDER epoch that has shots (epochs with none get a
+  // NaN offset and are skipped). That older epoch's offset-vs-reference IS the
+  // dial shift the event introduced.
+  const int ref = f.n_epochs - 1;
+  int e_prev = -1;
+  for (int e = ref - 1; e >= 0; --e) {
+    if (std::isfinite(f.epoch_grind_offset[e])) { e_prev = e; break; }
+  }
+  if (e_prev < 0) return rb;
+
+  rb.valid        = true;
+  rb.grind_offset = f.epoch_grind_offset[e_prev];  // > 0 = current dial reads finer
+  rb.n_shots      = f.epoch_n_used[ref];
+  rb.n_needed     = kEpochReadbackMinShots;
+  rb.firmed       = rb.n_shots >= kEpochReadbackMinShots;
+  return rb;
 }
 
 }  // namespace espressopost::model

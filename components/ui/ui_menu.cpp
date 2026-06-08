@@ -15,6 +15,8 @@ namespace {
 // Neutral palette — the menu reads as plain navigation chrome, so title /
 // entries / Back all borrow the base text color (matching the Presets Back pill).
 const lv_color_t kColorTitle = kColorText;
+const lv_color_t kColorDate = kColorLabel;
+const lv_color_t kColorInfo = kColorMuted;
 const lv_color_t kColorEntry = kColorText;
 const lv_color_t kColorBack  = kColorText;
 
@@ -154,13 +156,13 @@ lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_back,
   setenv("TZ", kPosixTz, 1);
   tzset();
   s_clock = lv_label_create(group);
-  lv_obj_set_style_text_color(s_clock, kColorTitle, LV_PART_MAIN);
+  lv_obj_set_style_text_color(s_clock, kColorDate, LV_PART_MAIN);
   lv_obj_set_style_text_font(s_clock, &lv_font_montserrat_14, LV_PART_MAIN);
   lv_obj_align(s_clock, LV_ALIGN_TOP_MID, 0, kClockTopY);
 
   // Total-shots line under the clock — a quick at-a-glance count from the log.
   s_shots = lv_label_create(group);
-  lv_obj_set_style_text_color(s_shots, kColorTitle, LV_PART_MAIN);
+  lv_obj_set_style_text_color(s_shots, kColorInfo, LV_PART_MAIN);
   lv_obj_set_style_text_font(s_shots, &lv_font_montserrat_14, LV_PART_MAIN);
   lv_obj_align(s_shots, LV_ALIGN_TOP_MID, 0, kShotsTopY);
 

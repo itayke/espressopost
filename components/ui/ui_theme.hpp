@@ -60,11 +60,13 @@ constexpr int32_t kPrimaryBtnRightInset = kCenterEdgeInset - 15;
                                  ((rgb) >> 8)  & 0xFF, \
                                  (rgb)         & 0xFF)
 
-inline const lv_color_t kColorBg     = COLOR(0x000000);
-inline const lv_color_t kColorText   = COLOR(0xE0E0E0);
-inline const lv_color_t kColorMuted  = COLOR(0x707070);
-inline const lv_color_t kColorMuted2 = COLOR(0x505050);
-inline const lv_color_t kColorMuted3 = COLOR(0x303030);
-inline const lv_color_t kColorMuted4 = COLOR(0x202020);
+inline const lv_color_t kColorBg      = COLOR(0x000000);
+inline const lv_color_t kColorText    = COLOR(0xE0E0E0);
+inline const lv_color_t kColorSubText = COLOR(0xA0A0A0);
+inline const lv_color_t kColorLabel   = COLOR(0xB0B0B0);
+inline const lv_color_t kColorMuted   = COLOR(0x707070);
+inline const lv_color_t kColorMuted2  = COLOR(0x505050);
+inline const lv_color_t kColorMuted3  = COLOR(0x303030);
+inline const lv_color_t kColorMuted4  = COLOR(0x202020);
 
 }  // namespace espressopost::ui

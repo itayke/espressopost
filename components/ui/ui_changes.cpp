@@ -6,6 +6,7 @@
 #include "model.hpp"
 #include "rtc.hpp"
 
+#include <cmath>    // fabs
 #include <cstdint>  // uintptr_t
 #include <cstdio>   // snprintf
 #include <cstdlib>  // setenv
@@ -21,13 +22,14 @@ namespace {
 // base tier today.
 const lv_color_t kColorTitle      = kColorText;
 const lv_color_t kColorStatusOk   = COLOR(0x5BB85B);  // just-saved confirmation
-const lv_color_t kColorStatusInfo = kColorMuted;       // on-record / nothing-yet
+const lv_color_t kColorStatusInfo = kColorLabel;    // on-record / nothing-yet
 const lv_color_t kColorStatusWarn = COLOR(0xC88036);   // clock-not-set / list-full
 const lv_color_t kColorTypeOn   = COLOR(0xC88036);  // selected reason pill (fill + on-border), matches taste pills
 const lv_color_t kColorTypeOff  = kColorMuted;      // unselected reason pill (outline + label)
 const lv_color_t kColorStepDisc = COLOR(0xC88036);  // − / + discs (amber, matches the value steppers)
 const lv_color_t kColorDate     = kColorText;       // the selected-date readout
-const lv_color_t kColorCaption  = kColorMuted;      // section prompts
+const lv_color_t kColorCaption  = kColorLabel;    // section prompts
+const lv_color_t kColorMeasured = kColorMuted;     // Measured: ...
 const lv_color_t kColorSaveOn   = kColorText;       // Save enabled (a reason is picked)
 const lv_color_t kColorSaveOff  = kColorMuted;      // Save disabled (nothing to commit)
 const lv_color_t kColorUndo     = COLOR(0xE07055);  // cancel-red, matching the Post ✕ pill
@@ -41,14 +43,15 @@ const lv_color_t kColorBack     = kColorText;
 // save; Back on the bottom arc (same geometry as the other panels).
 constexpr int32_t kTitleTopY      = 30;
 constexpr int32_t kStatusTopY     = 66;    // "Last event: …" line, under the title
-constexpr int32_t kCaptionTopY    = 102;    // prompt, above the reason pills
-constexpr int32_t kTypeRowTopY    = 132;   // the three reason pills
+constexpr int32_t kMeasuredTopY   = 86;    // measured dial-offset readback, only for grind events
+constexpr int32_t kCaptionTopY    = 126;    // prompt, above the reason pills
+constexpr int32_t kTypeRowTopY    = 152;   // the three reason pills
 constexpr int32_t kTypePillH      = (kPostBtnH * 4) / 5;  // same height as the Post taste pills
 constexpr int32_t kTypePillStroke = 2;     // thin outline, matching the taste pills
 constexpr int32_t kTypeTextPadX   = 27;    // total chrome around pill text (auto-width)
 constexpr int32_t kTypeRowGap     = 8;     // gap between adjacent pills
 constexpr int32_t kTypeExtClick   = 10;    // hit-area pad per side
-constexpr int32_t kDateHdrTopY    = 210;   // "EVENT DATE" caption above the selector
+constexpr int32_t kDateHdrTopY    = 220;   // "EVENT DATE" caption above the selector
 constexpr int32_t kStepperTopY    = 229;   // top of the − / + discs (selector sits below the pills)
 constexpr int32_t kStepBtnSize    = 56;
 constexpr int32_t kStepperDX      = 128;   // − / + x-offset from center (room for a date between them)
@@ -78,6 +81,7 @@ constexpr const char* kPosixTz = "EST5EDT,M3.2.0,M11.1.0";
 lv_obj_t* s_group   = nullptr;
 lv_obj_t* s_title   = nullptr;
 lv_obj_t* s_status  = nullptr;   // "Last event: <type> <date>" — also the post-save confirmation
+lv_obj_t* s_measured = nullptr;  // "Measured: reads 0.13 finer (15 shots)" — grind events only
 lv_obj_t* s_caption = nullptr;
 lv_obj_t* s_date_hdr = nullptr;  // "EVENT DATE" caption above the selector
 lv_obj_t* s_minus   = nullptr;
@@ -87,7 +91,7 @@ lv_obj_t* s_save    = nullptr;
 lv_obj_t* s_save_lbl = nullptr;
 lv_obj_t* s_undo    = nullptr;   // appears only right after a successful save
 lv_obj_t* s_back    = nullptr;
-lv_obj_t* s_fade[14] = {};
+lv_obj_t* s_fade[15] = {};
 int       s_fade_n   = 0;
 
 // The three reason pills — single-select radio. label == displayed type.
@@ -183,6 +187,46 @@ void refresh_date_label() {
   lv_label_set_text(s_date, buf);
 }
 
+// The measured sub-line under the status: how much the dial now reads versus
+// before the newest event. Only shown when that event is a grind epoch
+// (Grinder/Machine) — a Beans marker has no dial offset — and only once the
+// model has a reading for it. Closes the loop: "you told me it changed; here's
+// how much I now measure it did." Hidden otherwise so it never lingers stale.
+void refresh_measured() {
+  if (s_measured == nullptr) return;
+
+  calibration::Boundary b[calibration::kMaxBoundaries];
+  const size_t n = calibration::list(b, calibration::kMaxBoundaries);
+  const bool newest_is_epoch =
+      n > 0 && calibration::is_epoch(static_cast<calibration::Kind>(b[n - 1].kind));
+  const model::EpochReadback rb =
+      newest_is_epoch ? model::latest_epoch_readback() : model::EpochReadback{};
+  if (!newest_is_epoch || !rb.valid) {
+    lv_obj_add_flag(s_measured, LV_OBJ_FLAG_HIDDEN);
+    return;
+  }
+
+  char buf[48];
+  if (!rb.firmed) {
+    // Too few post-event shots to trust a number yet — show progress instead.
+    std::snprintf(buf, sizeof(buf), "Measured: gathering data (%u of %u)",
+                  static_cast<unsigned>(rb.n_shots),
+                  static_cast<unsigned>(rb.n_needed));
+  } else if (std::fabs(rb.grind_offset) < model::kGrindStep / 2) {
+    // Firmed up but within half a dial step of zero — the event didn't move the
+    // grind scale (e.g. a machine swap that left brew time put).
+    std::snprintf(buf, sizeof(buf), "Measured: no dial shift (%u shots)",
+                  static_cast<unsigned>(rb.n_shots));
+  } else {
+    std::snprintf(buf, sizeof(buf), "Measured: reads %.2f %s (%u shots)",
+                  static_cast<double>(std::fabs(rb.grind_offset)),
+                  rb.grind_offset > 0 ? "finer" : "coarser",
+                  static_cast<unsigned>(rb.n_shots));
+  }
+  lv_label_set_text(s_measured, buf);
+  lv_obj_remove_flag(s_measured, LV_OBJ_FLAG_HIDDEN);
+}
+
 // Paint the top status line from the store: the newest boundary as
 // "Last event: <type> <date>", or the empty-state hint. Also the browse-state
 // reset, so it clears s_have_last and swaps the action slot back to Save.
@@ -195,6 +239,7 @@ void show_status() {
   if (n == 0) {
     lv_label_set_text(s_status, "No events logged yet");
     lv_obj_set_style_text_color(s_status, kColorStatusInfo, LV_PART_MAIN);
+    refresh_measured();
     return;
   }
   // list() is sorted ascending by time, so the last entry is the newest.
@@ -206,6 +251,7 @@ void show_status() {
                 kind_label(static_cast<calibration::Kind>(newest.kind)), date);
   lv_label_set_text(s_status, buf);
   lv_obj_set_style_text_color(s_status, kColorStatusInfo, LV_PART_MAIN);
+  refresh_measured();
 }
 
 // Commit a boundary for the picked reason at the dialed-in date. The top status
@@ -234,6 +280,7 @@ void save_selection() {
   // next suggestion immediately, not just after a reboot. (Harmless for a Beans
   // marker — the grind model ignores it; it's the Tier-1 drift baseline.)
   model::refit();
+  refresh_measured();  // surface the just-measured offset for the saved event
 
   char date[24];
   format_date(when, date, sizeof(date));
@@ -398,6 +445,17 @@ lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_back) {
   lv_obj_set_style_text_align(s_status, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_obj_align(s_status, LV_ALIGN_TOP_MID, 0, kStatusTopY);
 
+  // Measured dial-offset readback, just under the status. Brighter than the
+  // muted caption below it so the real-data fact stands out; populated and
+  // shown/hidden by refresh_measured() (grind events only).
+  s_measured = lv_label_create(group);
+  lv_obj_set_style_text_color(s_measured, kColorMeasured, LV_PART_MAIN);
+  lv_obj_set_style_text_font(s_measured, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_width(s_measured, kScreen - 80);
+  lv_obj_set_style_text_align(s_measured, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_obj_align(s_measured, LV_ALIGN_TOP_MID, 0, kMeasuredTopY);
+  lv_obj_add_flag(s_measured, LV_OBJ_FLAG_HIDDEN);
+
   // Prompt, above the reason pills.
   s_caption = lv_label_create(group);
   lv_obj_set_style_text_color(s_caption, kColorCaption, LV_PART_MAIN);
@@ -509,6 +567,7 @@ lv_obj_t* build(lv_obj_t* scr, lv_event_cb_t on_back) {
   s_fade_n = 0;
   s_fade[s_fade_n++] = s_title;
   s_fade[s_fade_n++] = s_status;
+  s_fade[s_fade_n++] = s_measured;
   s_fade[s_fade_n++] = s_caption;
   s_fade[s_fade_n++] = s_pills[0].btn;
   s_fade[s_fade_n++] = s_pills[1].btn;

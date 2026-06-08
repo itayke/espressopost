@@ -103,9 +103,9 @@ const lv_color_t kColorSaveEnabled  = COLOR(0x60A8E0);
 const lv_color_t kColorSaveDisabled = kColorMuted3;
 const lv_color_t kColorDelete       = COLOR(0x5A1207);  // trash disc
 const lv_color_t kColorEditTitle    = kColorText;
-const lv_color_t kColorCaption      = COLOR(0xB0B0B0);  // small all-caps headers
+const lv_color_t kColorCaption      = kColorLabel;  // small all-caps headers
 const lv_color_t kColorSwatchSel    = COLOR(0xFFFFFF);  // outline on the chosen swatch
-const lv_color_t kColorWeightArrow  = kColorCaption;    // In→Out flow arrow
+const lv_color_t kColorWeightArrow  = kColorLabel;    // In→Out flow arrow
 
 // Shared value font for every editor readout (Weight In/Out + brew time).
 const lv_font_t* const kEditValueFont = &lv_font_montserrat_36;

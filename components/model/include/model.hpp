@@ -58,4 +58,21 @@ struct ShotAssessment {
 // confident (see model_math::classify_shot for the gating).
 ShotAssessment assess_shot(const storage::ShotRecord& rec);
 
+// Measured calibration-offset readback for the Events screen — the visible
+// confirmation that logging a grinder/machine event did something. Reports the
+// latest grind epoch of the *currently selected* preset's fit: how much the
+// dial now reads versus before that event, and how many post-event shots back
+// the estimate. `valid` is false when there's nothing to show (no grind epoch,
+// the selected preset has no usable fit, or no older epoch with data). `firmed`
+// is false while the post-event shot count is still below `n_needed`, so the UI
+// can show a "gathering data" placeholder instead of a jumpy early number.
+struct EpochReadback {
+  bool     valid;
+  bool     firmed;
+  float    grind_offset;  // dial units the current epoch reads vs the prior one; > 0 = finer now
+  uint16_t n_shots;       // post-event shots in the current epoch
+  uint16_t n_needed;      // post-event shots required before `firmed` flips true
+};
+EpochReadback latest_epoch_readback();
+
 }  // namespace espressopost::model

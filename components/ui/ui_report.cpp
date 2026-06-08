@@ -150,7 +150,6 @@ const lv_color_t kColorConfidenceHigh = COLOR(0x60A8E0);
 const lv_color_t kColorIconPressure = COLOR(0xA880E0);
 const lv_color_t kColorIconTemp     = COLOR(0xE07055);
 const lv_color_t kColorIconHumidity = COLOR(0x60A8E0);
-const lv_color_t kColorLabel        = COLOR(0xB0B0B0);
 
 // Post-mode action button palette. Cancel (✕) borrows the climate-tile
 // temperature red so it reads as a "stop / undo" semantic; Submit borrows
