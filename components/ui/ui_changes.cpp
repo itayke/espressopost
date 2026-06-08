@@ -3,6 +3,7 @@
 #include "ui_theme.hpp"
 
 #include "calibration.hpp"
+#include "model.hpp"
 #include "rtc.hpp"
 
 #include <cstdint>  // uintptr_t
@@ -229,6 +230,11 @@ void save_selection() {
   s_last_rtc  = when;
   s_last_kind = s_sel;
 
+  // Re-fit so a Grinder/Machine boundary's per-epoch offset takes effect on the
+  // next suggestion immediately, not just after a reboot. (Harmless for a Beans
+  // marker — the grind model ignores it; it's the Tier-1 drift baseline.)
+  model::refit();
+
   char date[24];
   format_date(when, date, sizeof(date));
   char buf[56];
@@ -279,6 +285,7 @@ void on_undo(lv_event_t*) {
       break;
     }
   }
+  model::refit();          // drop the boundary back out of the fit too
   show_status();           // repaints on-record + hides Undo
   refresh_save_enabled();  // selection is still none → Save stays disabled
   layout_actions();        // re-center Save now that Undo is gone

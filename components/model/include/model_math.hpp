@@ -22,6 +22,24 @@ namespace espressopost::model {
 // user can actually dial in. Changing this changes both ends in lockstep.
 constexpr float kGrindStep = 0.05f;
 
+// Continuous regression features, fixed order: [grind, T, H, P]. The grind
+// coefficient is always beta[0], so the confidence and readback code can index
+// it directly no matter how many epoch-offset columns follow.
+constexpr int kNCont = 4;
+
+// Calibration epochs (Tier 0). When the grinder is recalibrated or the machine
+// swapped, the same dial number means a different grind — so the model fits a
+// per-epoch intercept *offset* (βg·(g+δ) = βg·g + βg·δ) that puts pre/post
+// shots on one comparable scale, while the climate slopes stay pooled across
+// every epoch (the coffee physics didn't change, only the dial did). The
+// latest epoch is the regression reference (offset 0), so suggest()/predict()
+// always evaluate "as the setup behaves now"; each older epoch with shots earns
+// one ridge-shrunk dummy column. Capped so the augmented matrix stays small and
+// stack-friendly — far above any realistic count of recals/machine swaps over a
+// device's life (the wrapper merges the oldest epochs if somehow exceeded).
+constexpr int kMaxEpochs = 8;
+constexpr int kMaxFeat   = kNCont + (kMaxEpochs - 1);  // continuous + epoch dummies
+
 // Minimum feature row the fit needs from one shot. Decoupled from
 // storage::ShotRecord to keep the math layer free of storage's (and therefore
 // IDF's) includes. `actual_time_s` is the raw shot time in seconds — the
@@ -29,12 +47,17 @@ constexpr float kGrindStep = 0.05f;
 // the grind that lands the preset's `target_time_s` (passed in by the
 // caller). Storing absolute time keeps the math invariant against later
 // preset target changes: only the target plugged into `suggest()` shifts.
+//
+// `epoch_index` buckets the shot onto the calibration timeline (0 = oldest;
+// see calibration::epoch_index). The wrapper fills it; host tests leave it 0
+// (single-epoch / pooled), which reproduces the pre-epoch behavior exactly.
 struct FitSample {
-  float user_grind;
-  float temp_c;
-  float humidity_pct;
-  float pressure_hpa;
-  float actual_time_s;
+  float   user_grind;
+  float   temp_c;
+  float   humidity_pct;
+  float   pressure_hpa;
+  float   actual_time_s;
+  uint8_t epoch_index = 0;  // 0 = oldest / single-epoch; default keeps brace-init callers pooled
 };
 
 // Live climate at predict time. The wrapper pulls this from climate::latest();
@@ -82,9 +105,26 @@ struct Suggestion {
 //                  grind is from anything the user has actually pulled;
 //                  phantoms are excluded so the score reflects user
 //                  behavior, not the prior.
-// `beta[]`         standardized coefficients in [grind, T, H, P] order.
-// `sigma[]`        4×4 posterior covariance, row-major. Used for the
-//                  predictive parameter variance that drives confidence.
+// `beta[]`         standardized coefficients: [grind, T, H, P] in slots 0..3,
+//                  then one per modeled older epoch (centered 0/1 dummy). Only
+//                  the first `n_dim` slots are meaningful.
+// `sigma[]`        n_dim×n_dim posterior covariance, row-major (stride n_dim).
+//                  sigma[0] is β_g's variance, the slope-quality confidence
+//                  input, regardless of how many epoch columns trail it.
+//
+// Per-epoch offset model (Tier 0) — all zero/pooled when n_epochs ≤ 1:
+// `n_dim`          active regression dimension = kNCont + (modeled older epochs).
+// `n_epochs`       calibration epochs reflected in this fit (1 = no offset).
+// `y_z_ref_dummy`  the reference (latest) epoch's dummy contribution to
+//                  standardized y. suggest()/predict() fold it in so they
+//                  evaluate at the current epoch even though y was centered
+//                  across all epochs. 0 when pooled.
+// `epoch_grind_offset[]` per-epoch dial offset from the reference epoch, in
+//                  grind units (latest = 0; positive = that epoch's dial read
+//                  coarser, i.e. the current dial reads finer than it did).
+//                  NaN for epochs with no shots. Feeds the Events readback.
+// `epoch_n_used[]` real shots contributing per epoch — gates the readback's
+//                  "gathering data" copy until an epoch's offset has firmed up.
 struct PresetFit {
   bool     valid;
   uint16_t n_used;
@@ -94,8 +134,13 @@ struct PresetFit {
   float    mean_P, std_P;
   float    mean_y, std_y;
   float    std_g_real;
-  float    beta[4];
-  float    sigma[4 * 4];
+  float    beta[kMaxFeat];
+  float    sigma[kMaxFeat * kMaxFeat];
+  uint8_t  n_dim;
+  uint8_t  n_epochs;
+  float    y_z_ref_dummy;
+  float    epoch_grind_offset[kMaxEpochs];
+  uint16_t epoch_n_used[kMaxEpochs];
 };
 
 // Fit one preset from `samples` (already filtered: caller has dropped
@@ -106,7 +151,13 @@ struct PresetFit {
 // Synthetic phantom shots (see model_math.cpp) are always folded in at low
 // weight so the math behaves gracefully even when real shots haven't varied
 // the grind dial yet.
-PresetFit fit(const FitSample* samples, std::size_t n_real);
+//
+// `n_epochs` is the number of calibration epochs spanning these samples (from
+// calibration::epoch_count; the per-sample bucket is FitSample::epoch_index).
+// The default of 1 means "single epoch / pooled" — every existing caller and
+// host test keeps the exact pre-epoch behavior. With n_epochs ≥ 2 the fit adds
+// a per-epoch intercept offset (see kMaxEpochs).
+PresetFit fit(const FitSample* samples, std::size_t n_real, uint8_t n_epochs = 1);
 
 // Best grind suggestion for a fitted preset evaluated against `climate`.
 // Always returns a Suggestion; `confidence_pct == 0` means "suppress, the

@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdlib>
 
+#include "calibration.hpp"
 #include "climate.hpp"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -86,6 +87,17 @@ void refit() {
   }
   const size_t n_total = storage::read_shots(shots, kMaxShotsLoaded);
 
+  // Calibration epochs span all presets (one global timeline). The model caps
+  // its per-epoch columns at kMaxEpochs; if the user somehow logged more
+  // boundaries than that, merge the OLDEST epochs into epoch 0 by subtracting
+  // a base offset, keeping the most recent kMaxEpochs distinct (the reference
+  // must stay the true latest). In practice raw_epochs is 1–3 and base is 0.
+  const uint8_t raw_epochs = calibration::epoch_count();
+  const uint8_t base = raw_epochs > kMaxEpochs
+                           ? static_cast<uint8_t>(raw_epochs - kMaxEpochs)
+                           : 0;
+  const uint8_t n_epochs_fit = static_cast<uint8_t>(raw_epochs - base);
+
   // Bucket by preset — single pass, indices only. Avoids copying records and
   // keeps per-preset memory at O(n_total) ints worst case.
   uint16_t per_preset_count[presets::kMaxPresets] = {};
@@ -116,9 +128,14 @@ void refit() {
       const auto& r = shots[i];
       if (r.preset_id != p) continue;
       if (excluded(r)) continue;
-      samples[k++] = to_sample(r);
+      FitSample fs = to_sample(r);
+      // Place the shot on the calibration timeline (derived at read time from
+      // its wall-clock rtc), then fold any merged-oldest epochs down by `base`.
+      const uint8_t e = calibration::epoch_index(r.rtc_epoch_s);
+      fs.epoch_index = e > base ? static_cast<uint8_t>(e - base) : 0;
+      samples[k++] = fs;
     }
-    s_fits[p] = fit(samples, k);
+    s_fits[p] = fit(samples, k, n_epochs_fit);
     if (s_fits[p].valid) {
       total_used += s_fits[p].n_used;
       ++n_fits;
@@ -128,10 +145,13 @@ void refit() {
 
   std::free(shots);
 
-  ESP_LOGI(kTag, "refit: %u records on disk, %u presets fit, %u shots used in fits",
+  ESP_LOGI(kTag,
+           "refit: %u records on disk, %u presets fit, %u shots used in fits, "
+           "%u calibration epoch(s)",
            static_cast<unsigned>(n_total),
            static_cast<unsigned>(n_fits),
-           static_cast<unsigned>(total_used));
+           static_cast<unsigned>(total_used),
+           static_cast<unsigned>(n_epochs_fit));
 }
 
 Suggestion suggest_for_preset(uint8_t preset_id) {

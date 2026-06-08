@@ -609,3 +609,131 @@ TEST_CASE("classify_shot: the real 53s outlier reads as RanLong at high conf",
   REQUIRE(pred < 45.0f);
   REQUIRE(classify_shot(f, climate, 5.10f, 53.0f, 95) == ShotVerdict::RanLong);
 }
+
+// -----------------------------------------------------------------------------
+// Per-epoch grind offset (Tier 0) — the calibration-event model consumer
+// -----------------------------------------------------------------------------
+
+namespace {
+
+// Append `n` shots for one calibration epoch. Brew time follows a shared
+// multiplicative grind law t = base·exp(slope·(g − g_center)) (finer → longer
+// when slope < 0), scaled by `time_factor` to model an epoch-wide offset — e.g.
+// a grinder recal that makes the same dial run a fixed fraction longer/shorter.
+// All shots share kTypicalClimate so the epoch offset is the only cross-epoch
+// difference. ±2% multiplicative noise keeps the slope identifiable without
+// drowning the offset.
+void append_epoch_shots(std::vector<FitSample>& out, int n, uint8_t epoch,
+                        float g_center, float g_spread, float slope,
+                        float base_time_s, float time_factor, unsigned seed) {
+  Rng rng(seed);
+  for (int i = 0; i < n; ++i) {
+    const float g = rng.uniform(g_center - g_spread, g_center + g_spread);
+    const float noise = 1.0f + (rng.next01() - 0.5f) * 0.04f;
+    const float t =
+        base_time_s * std::exp(slope * (g - g_center)) * time_factor * noise;
+    FitSample s{g, kTypicalClimate.temp_c, kTypicalClimate.humidity_pct,
+                kTypicalClimate.pressure_hpa, t};
+    s.epoch_index = epoch;
+    out.push_back(s);
+  }
+}
+
+// The grinder-recal fixture: an OLD epoch that ran ~32% shorter at the same dial
+// (the +32% post-recal fingerprint from the real 48-shot log) and a NEW epoch
+// that is the reference. Shared slope, same dial range.
+constexpr float kEpochSlope    = -1.2f;        // log-s per dial unit, finer→longer
+constexpr float kEpochBaseNew  = 30.0f;        // new-epoch time at g_center
+constexpr float kEpochOldRatio = 1.0f / 1.32f; // old ran ~32% shorter
+std::vector<FitSample> two_epoch_fixture() {
+  std::vector<FitSample> shots;
+  append_epoch_shots(shots, 30, /*epoch=*/0, 5.15f, 0.12f, kEpochSlope,
+                     kEpochBaseNew, kEpochOldRatio, /*seed=*/11);
+  append_epoch_shots(shots, 30, /*epoch=*/1, 5.15f, 0.12f, kEpochSlope,
+                     kEpochBaseNew, /*time_factor=*/1.0f, /*seed=*/22);
+  return shots;
+}
+
+}  // namespace
+
+TEST_CASE("default n_epochs is pooled and identical to explicit n_epochs=1",
+          "[epoch]") {
+  auto shots = synth_grind_slope(20, 5.5f, 1.0f, -2.0f, kTypicalClimate, 0.5f);
+  PresetFit a = fit(shots.data(), shots.size());
+  PresetFit b = fit(shots.data(), shots.size(), /*n_epochs=*/1);
+  REQUIRE(a.valid);
+  REQUIRE(a.n_dim == 4);
+  REQUIRE(a.y_z_ref_dummy == 0.0f);
+  REQUIRE(predict_time_s(a, kTypicalClimate, 5.5f)
+        == predict_time_s(b, kTypicalClimate, 5.5f));
+}
+
+TEST_CASE("epoch offset: pooled fit under-predicts the current epoch; the "
+          "epoch fit corrects it", "[epoch]") {
+  auto shots = two_epoch_fixture();
+  PresetFit pooled = fit(shots.data(), shots.size(), /*n_epochs=*/1);
+  PresetFit epoch  = fit(shots.data(), shots.size(), /*n_epochs=*/2);
+  REQUIRE(pooled.valid);
+  REQUIRE(epoch.valid);
+  REQUIRE(epoch.n_dim == 5);  // 4 continuous + 1 older-epoch dummy
+
+  // The new epoch genuinely takes ~kEpochBaseNew at g_center; the epoch fit,
+  // evaluating at the reference, recovers that within noise.
+  const float g = 5.15f;
+  const float epoch_pred  = predict_time_s(epoch,  kTypicalClimate, g);
+  const float pooled_pred = predict_time_s(pooled, kTypicalClimate, g);
+  INFO("epoch_pred=" << epoch_pred << "  pooled_pred=" << pooled_pred);
+  REQUIRE(epoch_pred > 27.0f);
+  REQUIRE(epoch_pred < 33.0f);
+  // Pooling blends the old (short) epoch in → biased LOW for the current one.
+  REQUIRE(pooled_pred < epoch_pred - 2.0f);
+}
+
+TEST_CASE("epoch offset: readback recovers the dial-shift sign and scale",
+          "[epoch]") {
+  auto shots = two_epoch_fixture();
+  PresetFit f = fit(shots.data(), shots.size(), /*n_epochs=*/2);
+  REQUIRE(f.valid);
+  REQUIRE(f.n_epochs == 2);
+  REQUIRE(f.epoch_n_used[0] == 30);
+  REQUIRE(f.epoch_n_used[1] == 30);
+  REQUIRE(f.epoch_grind_offset[1] == 0.0f);  // latest epoch is the reference
+  REQUIRE(std::isfinite(f.epoch_grind_offset[0]));
+  INFO("old-epoch grind offset = " << f.epoch_grind_offset[0]);
+  // Old epoch ran shorter → its dial read coarser → the current dial reads
+  // finer → positive offset. A 1.32× ratio at this slope implies ~0.2 dial
+  // units; ridge shrinks it some but the sign and order of magnitude hold.
+  REQUIRE(f.epoch_grind_offset[0] > 0.05f);
+  REQUIRE(f.epoch_grind_offset[0] < 0.40f);
+}
+
+TEST_CASE("epoch offset: suggestion shifts toward the current epoch vs pooled",
+          "[epoch]") {
+  auto shots = two_epoch_fixture();
+  PresetFit pooled = fit(shots.data(), shots.size(), /*n_epochs=*/1);
+  PresetFit epoch  = fit(shots.data(), shots.size(), /*n_epochs=*/2);
+  // Aim for the new-epoch base time. Pooling thinks the dial runs shorter than
+  // it now does, so to hit the target it asks for a finer (lower) grind than
+  // the epoch-aware fit does.
+  Suggestion sp = suggest(pooled, kTypicalClimate, kEpochBaseNew);
+  Suggestion se = suggest(epoch,  kTypicalClimate, kEpochBaseNew);
+  REQUIRE(std::isfinite(sp.grind));
+  REQUIRE(std::isfinite(se.grind));
+  INFO("pooled grind=" << sp.grind << "  epoch grind=" << se.grind);
+  REQUIRE(se.grind > sp.grind);
+}
+
+TEST_CASE("epoch offset: empty reference epoch falls back to a pooled fit",
+          "[epoch]") {
+  // Declare two epochs but give the latest (reference) none — the situation
+  // right after logging a calibration event, before any post-event shot. The
+  // fit must not try to anchor "now" on no data: it pools instead.
+  std::vector<FitSample> shots;
+  append_epoch_shots(shots, 12, /*epoch=*/0, 5.15f, 0.12f, kEpochSlope,
+                     kEpochBaseNew, kEpochOldRatio, /*seed=*/7);
+  PresetFit f = fit(shots.data(), shots.size(), /*n_epochs=*/2);
+  REQUIRE(f.valid);
+  REQUIRE(f.n_dim == 4);              // no dummy column added
+  REQUIRE(f.y_z_ref_dummy == 0.0f);
+  REQUIRE(std::isfinite(suggest(f, kTypicalClimate, kTestTargetS).grind));
+}

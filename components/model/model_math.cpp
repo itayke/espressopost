@@ -7,12 +7,12 @@
 namespace espressopost::model {
 namespace {
 
-// Time model features after centering/scaling: grind, temp, humidity, pressure.
+// Time model features after centering/scaling: grind, temp, humidity, pressure
+// (kNCont, in the header), optionally followed by per-epoch intercept dummies.
 // (Intercept absorbed by centering y and X.) Spec calls for two models (time
 // + quality); v1 ships time-only because it has the cleanest grind→target
 // relationship. Quality model + cross-preset pooling are follow-ups, gated
 // behind enough data to make extra parameters earn their keep.
-constexpr int kNFeat = 4;
 
 // Ridge prior precision λ on each (standardized) coefficient. Spec calls for
 // "effective sample size ≈ 3 shots" before data dominates the fit; with
@@ -174,7 +174,7 @@ inline float log_time_s(float seconds) {
 }
 
 // In-place Gauss-Jordan inverse of an n×n matrix with partial pivoting. We
-// only ever invert n=kNFeat (4×4) so stack-allocating the augmented matrix is
+// only ever invert n ≤ kMaxFeat so stack-allocating the augmented matrix is
 // fine and avoids dragging in std::vector / a heap allocation per refit. With
 // the +λI ridge regularization the input is strictly diagonally dominant in
 // expectation, so the partial pivot is more defensive than necessary — kept
@@ -183,7 +183,7 @@ inline float log_time_s(float seconds) {
 // Returns false on singular (won't happen in practice given the ridge); the
 // caller treats that as "fit failed, no suggestion".
 bool invert(float* mat, int n) {
-  constexpr int kMax = kNFeat;
+  constexpr int kMax = kMaxFeat;
   if (n > kMax) return false;
   float aug[kMax][2 * kMax] = {};
   for (int i = 0; i < n; ++i) {
@@ -231,9 +231,39 @@ uint8_t confidence_pct_from_factor(float factor) {
 
 }  // namespace
 
-PresetFit fit(const FitSample* samples, std::size_t n_real) {
+PresetFit fit(const FitSample* samples, std::size_t n_real, uint8_t n_epochs) {
   PresetFit f = {};
   if (n_real < kMinShotsForFit) return f;
+
+  // --- Step 0a: epoch-dummy layout -------------------------------------
+  // Map calibration epochs onto regression columns. The latest epoch is the
+  // reference (no column — suggest()/predict() evaluate there); each OLDER
+  // epoch that actually has shots earns one centered-0/1 dummy column appended
+  // after the four continuous features. Empty older epochs get no column (the
+  // ridge would just zero them anyway). If the reference epoch itself has no
+  // shots we can't anchor "now," so we fall back to a single pooled fit — the
+  // same path n_epochs ≤ 1 takes, byte-identical to the pre-epoch model.
+  if (n_epochs < 1) n_epochs = 1;
+  if (n_epochs > kMaxEpochs) n_epochs = kMaxEpochs;
+  const int ref_epoch = n_epochs - 1;
+
+  uint16_t epoch_n[kMaxEpochs] = {};
+  auto epoch_of = [&](const FitSample& s) -> int {
+    int e = s.epoch_index;
+    if (e < 0) e = 0;
+    if (e > ref_epoch) e = ref_epoch;
+    return e;
+  };
+  for (std::size_t i = 0; i < n_real; ++i) ++epoch_n[epoch_of(samples[i])];
+
+  int dummy_col[kMaxEpochs];
+  for (int e = 0; e < kMaxEpochs; ++e) dummy_col[e] = -1;
+  int n_dummies = 0;
+  if (n_epochs >= 2 && epoch_n[ref_epoch] > 0) {
+    for (int e = 0; e < ref_epoch; ++e)
+      if (epoch_n[e] > 0) dummy_col[e] = kNCont + (n_dummies++);
+  }
+  const int n_dim = kNCont + n_dummies;
 
   // --- Step 0: real-shot centroids drive phantom placement -------------
   // Phantoms are built symmetrically around the user's actual operating
@@ -339,50 +369,106 @@ PresetFit fit(const FitSample* samples, std::size_t n_real) {
   f.std_g_real = std::max(kGrindStdFloor,
                           static_cast<float>(std::sqrt(var_g_r / n_real)));
 
-  // --- Step 2: form XᵀWX (kNFeat×kNFeat) and XᵀWy in standardized space.
+  // --- Step 1b: epoch-dummy means (deviation coding) -------------------
+  // Each older-epoch column is a raw 0/1 indicator; we CENTER it (subtract its
+  // weighted mean) but deliberately do NOT scale it to unit variance. With one
+  // shared ridge λ, an unscaled centered dummy self-regularizes by population:
+  // its XᵀWX diagonal is w_sum·m(1−m), so a sparse epoch (small m) is shrunk
+  // hard toward the reference while a well-populated one is trusted — exactly
+  // the "ridge shrinks sparse epochs toward 0" behavior we want, and stable
+  // (no divide-by-tiny-std blow-up a rare epoch would cause if standardized).
+  // Phantoms sit at the reference epoch (raw dummy 0), so they only contribute
+  // to the denominator. Means index by dummy slot j (column kNCont + j).
+  float dummy_mean[kMaxFeat - kNCont] = {};
+  if (n_dummies > 0) {
+    double dsum[kMaxFeat - kNCont] = {};
+    for (std::size_t i = 0; i < n_real; ++i) {
+      const int col = dummy_col[epoch_of(samples[i])];
+      if (col >= 0) dsum[col - kNCont] += 1.0;  // weight 1; phantoms add 0
+    }
+    for (int j = 0; j < n_dummies; ++j)
+      dummy_mean[j] = static_cast<float>(dsum[j] / w_sum);
+  }
+
+  // --- Step 2: form XᵀWX (n_dim×n_dim) and XᵀWy in standardized space.
   // For weighted Bayesian regression with zero-mean Gaussian prior:
   //   posterior precision Λ = XᵀWX + λI
   //   posterior mean β     = Λ⁻¹ XᵀWy
   // We build XᵀWX directly by accumulating outer products row-by-row so we
-  // never allocate the full X matrix.
-  float A[kNFeat * kNFeat] = {};
-  float b[kNFeat]          = {};
-  auto accumulate = [&](float w, float g_raw, float T_raw, float H_raw,
-                        float P_raw, float y_raw) {
-    const float x[kNFeat] = {
-        (g_raw - f.mean_g) / f.std_g,
-        (T_raw - f.mean_T) / f.std_T,
-        (H_raw - f.mean_H) / f.std_H,
-        (P_raw - f.mean_P) / f.std_P,
-    };
+  // never allocate the full X matrix. The first kNCont columns are the
+  // standardized continuous features; any trailing columns are the centered
+  // epoch dummies (`dcol` is the column this sample's epoch lights up, or −1
+  // for a reference-epoch shot / phantom).
+  float A[kMaxFeat * kMaxFeat] = {};
+  float b[kMaxFeat]            = {};
+  auto accumulate = [&](float w, int dcol, float g_raw, float T_raw,
+                        float H_raw, float P_raw, float y_raw) {
+    float x[kMaxFeat];
+    x[0] = (g_raw - f.mean_g) / f.std_g;
+    x[1] = (T_raw - f.mean_T) / f.std_T;
+    x[2] = (H_raw - f.mean_H) / f.std_H;
+    x[3] = (P_raw - f.mean_P) / f.std_P;
+    for (int j = 0; j < n_dummies; ++j) {
+      const float raw = (dcol == kNCont + j) ? 1.0f : 0.0f;
+      x[kNCont + j] = raw - dummy_mean[j];  // deviation coding, unscaled
+    }
     const float y = (y_raw - f.mean_y) / f.std_y;
-    for (int r = 0; r < kNFeat; ++r) {
+    for (int r = 0; r < n_dim; ++r) {
       b[r] += w * x[r] * y;
-      for (int c = 0; c < kNFeat; ++c) {
-        A[r * kNFeat + c] += w * x[r] * x[c];
-      }
+      for (int c = 0; c < n_dim; ++c) A[r * n_dim + c] += w * x[r] * x[c];
     }
   };
   for (std::size_t i = 0; i < n_real; ++i) {
-    accumulate(1.0f, samples[i].user_grind, samples[i].temp_c,
-               samples[i].humidity_pct, samples[i].pressure_hpa,
-               log_time_s(samples[i].actual_time_s));
+    accumulate(1.0f, dummy_col[epoch_of(samples[i])], samples[i].user_grind,
+               samples[i].temp_c, samples[i].humidity_pct,
+               samples[i].pressure_hpa, log_time_s(samples[i].actual_time_s));
   }
   for (const auto& ph : phantoms) {
-    accumulate(kPriorShotWeight, ph.user_grind, kPriorShotTempC,
+    accumulate(kPriorShotWeight, /*dcol=*/-1, ph.user_grind, kPriorShotTempC,
                kPriorShotHumidity, kPriorShotPressure, phantom_y(ph));
   }
-  for (int r = 0; r < kNFeat; ++r) A[r * kNFeat + r] += kPriorPrec;
+  for (int r = 0; r < n_dim; ++r) A[r * n_dim + r] += kPriorPrec;
 
   // --- Step 3: invert A → Σ (posterior covariance scaled by σ²=1) -------
-  std::memcpy(f.sigma, A, sizeof(f.sigma));
-  if (!invert(f.sigma, kNFeat)) return f;  // .valid stays false
+  // f.sigma is stored at stride n_dim (the leading n_dim×n_dim block); the
+  // unused tail stays zero from the f = {} init.
+  std::memcpy(f.sigma, A, sizeof(float) * n_dim * n_dim);
+  if (!invert(f.sigma, n_dim)) return f;  // .valid stays false
 
   // β = Σ b
-  for (int r = 0; r < kNFeat; ++r) {
+  for (int r = 0; r < n_dim; ++r) {
     float acc = 0.0f;
-    for (int c = 0; c < kNFeat; ++c) acc += f.sigma[r * kNFeat + c] * b[c];
+    for (int c = 0; c < n_dim; ++c) acc += f.sigma[r * n_dim + c] * b[c];
     f.beta[r] = acc;
+  }
+
+  // --- Step 4: epoch reference offset + per-epoch readback -------------
+  f.n_dim    = static_cast<uint8_t>(n_dim);
+  f.n_epochs = n_epochs;
+  // Reference-epoch dummy values are (0 − meanⱼ), so the reference's
+  // contribution to predicted y_z is −Σ βⱼ·meanⱼ. suggest()/predict() fold
+  // this in so they evaluate "as the setup behaves now" even though y was
+  // centered across all epochs. Zero when pooled (no dummy columns).
+  float y_z_ref = 0.0f;
+  for (int j = 0; j < n_dummies; ++j)
+    y_z_ref += f.beta[kNCont + j] * (0.0f - dummy_mean[j]);
+  f.y_z_ref_dummy = y_z_ref;
+
+  // Per-epoch dial offset vs the reference, in grind units. A centered dummy's
+  // coefficient is exactly that epoch's y_z offset from the reference (the 0→1
+  // jump equals βⱼ); convert to grind via Δg = δ·std_g/β_g. Reference = 0;
+  // epochs with no column (empty, or a pooled fit) report NaN so the Events
+  // readback shows "gathering data" instead of a fake zero.
+  const bool have_slope = std::fabs(f.beta[0]) > 1e-3f;
+  for (int e = 0; e < kMaxEpochs; ++e) {
+    f.epoch_n_used[e]       = (e < n_epochs) ? epoch_n[e] : 0;
+    f.epoch_grind_offset[e] = std::nanf("");
+  }
+  f.epoch_grind_offset[ref_epoch] = 0.0f;  // latest epoch is the reference
+  for (int e = 0; e < ref_epoch; ++e) {
+    const int col = dummy_col[e];
+    if (col >= 0 && have_slope)
+      f.epoch_grind_offset[e] = f.beta[col] * f.std_g / f.beta[0];
   }
 
   f.valid  = true;
@@ -420,9 +506,13 @@ Suggestion suggest(const PresetFit& f, ClimateInput c, float target_time_s) {
   // with no support. Suppress.
   if (std::fabs(f.beta[0]) < 1e-3f) return none;
 
+  // Solve at the reference (latest) epoch: y_z_ref_dummy is the constant the
+  // epoch-offset model adds for "now" (0 when pooled), so it moves to the
+  // numerator alongside the climate terms.
   const float g_z = (target_y_z - f.beta[1] * T_z
                                 - f.beta[2] * H_z
-                                - f.beta[3] * P_z) / f.beta[0];
+                                - f.beta[3] * P_z
+                                - f.y_z_ref_dummy) / f.beta[0];
 
   // De-standardize back to the grinder's dial units.
   float grind = g_z * f.std_g + f.mean_g;
@@ -483,8 +573,10 @@ float predict_time_s(const PresetFit& f, ClimateInput c, float grind) {
   const float P_z = std::clamp((c.pressure_hpa - f.mean_P) / f.std_P,
                                -kClimateClampZ, kClimateClampZ);
 
+  // Evaluate at the reference (latest) epoch — y_z_ref_dummy carries the
+  // epoch-offset constant for "now" (0 when pooled), matching suggest().
   const float y_z = f.beta[0] * g_z + f.beta[1] * T_z
-                  + f.beta[2] * H_z + f.beta[3] * P_z;
+                  + f.beta[2] * H_z + f.beta[3] * P_z + f.y_z_ref_dummy;
   return std::exp(y_z * f.std_y + f.mean_y);  // log-seconds → seconds
 }
 
