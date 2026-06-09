@@ -1,4 +1,5 @@
-// espressopost — Step 3: shot logging skeleton.
+// Esprosso Post - coffee grind guide and journal device, based on historic climate and brew data 
+// Copyright (c) 2026 Itay Keren
 //
 // Initializes the AMOLED + touch + LVGL, mounts LittleFS for shot records,
 // starts the BME280 climate read loop, and shows the Report screen (brew
@@ -23,10 +24,12 @@
 
 namespace {
 constexpr const char* kTag = "app";
+constexpr const char *kApp = "Espresso Post";
+constexpr const char *kVer = "v0.3.8";
 }
 
 extern "C" void app_main(void) {
-  ESP_LOGI(kTag, "espressopost boot");
+  ESP_LOGI(kTag, "%s %s", kApp, kVer);
 
   ESP_ERROR_CHECK(espressopost::display::init());
   ESP_ERROR_CHECK(espressopost::touch::init(espressopost::display::lvgl_display()));
