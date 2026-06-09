@@ -75,18 +75,21 @@ constexpr int32_t kGrindValueY           = 108;
 constexpr int32_t kGrindCaptionX         = 50;
 constexpr int32_t kGrindCaptionY         = 335;
 
-// "SUGGESTION" / "x.xx (xx%)" block mirrors GRIND VALUE on the right side of
-// the big number. Both lines render center-aligned inside a fixed-width box
-// so the bottom line stays horizontally locked to the caption no matter how
-// the digit/percent counts shift. Block right edge sits 50 px from the screen
-// edge — symmetric to the caption's 50 px left inset.
-constexpr int32_t kSuggestionBlockW      = 120;
-constexpr int32_t kSuggestionBlockX      = kScreen - 44 - kSuggestionBlockW;
-// Shift the two-line block up so its visual center (≈ Y + 17 for two Mont14
-// rows) lines up with the single-line GRIND VALUE caption center
-// (≈ kGrindCaptionY + 9). That puts the caption at kGrindCaptionY - 8.
-constexpr int32_t kSuggestionCaptionY    = kGrindCaptionY - 8;
-constexpr int32_t kSuggestionValueY      = kSuggestionCaptionY + 18;
+// SUGGESTION is a tappable pill mirroring GRIND VALUE on the right of the big
+// number: a two-line "SUGGESTION / x.xx (xx%)" label inside a confidence-tinted
+// outline (same height + stroke as the Post pill). Tapping it glides the grind
+// dial to the model's number. Vertically centered on the GRIND VALUE caption
+// row, which seats the pill in the band between the grinder-cap separator and
+// the bar so it clears both. Right edge mirrors the caption's left inset.
+constexpr int32_t kSuggestionBtnW      = 130;
+constexpr int32_t kSuggestionBtnH      = 52;
+constexpr int32_t kSuggestionBtnStroke = 2;  // lighter than the Post pill
+constexpr int32_t kSuggestionBtnX      = 300;
+constexpr int32_t kSuggestionBtnY      = 312;
+// Whether the pill draws its capsule outline. Off → just the tinted two-line
+// text (still tappable; the click target + ext-click area are unchanged). A
+// design toggle while we decide if the outline earns its weight here.
+constexpr bool    kSuggestionRenderCapsule = false;
 
 // Grind bar y on screen — the bar's placement (its visual width, tick tiers,
 // and feel tuning live in ui_bar.hpp). Sized to hug the round-display chord at
@@ -235,8 +238,8 @@ lv_obj_t* s_static_cursor     = nullptr;  // upward-pointing triangle just below
 lv_obj_t* s_suggestion_arrow  = nullptr;  // confidence-tinted suggestion triangle over the cursor
 lv_obj_t* s_grind_value_label = nullptr;  // big "5.10" above the bar — visible in idle mode
 lv_obj_t* s_grind_caption      = nullptr; // "GRIND VALUE" header next to the big number
-lv_obj_t* s_suggestion_caption = nullptr; // static "SUGGESTION" header, right of the big value
-lv_obj_t* s_suggested_label   = nullptr;  // "x.xx (xx%)" value line under SUGGESTION caption
+lv_obj_t* s_suggested_btn     = nullptr;  // tappable SUGGESTION pill; glides the dial to the model's grind
+lv_obj_t* s_suggested_label   = nullptr;  // two-line "SUGGESTION\nx.xx (xx%)" inside s_suggested_btn
 
 // The grind bar — spec is wired at start_report(), widget at build_grinder.
 // Shown in both modes.
@@ -545,41 +548,37 @@ void refresh_suggestion_arrow() {
   lv_obj_invalidate(s_suggestion_arrow);
 }
 
-// Right-side SUGGESTION block. Caption + value are toggled as a pair so the
-// header never floats above empty space. The bottom area is shared across
-// idle and post, so this block stays visible in both modes — only model
-// availability gates it now:
-//   - No usable model output → muted "N/A" placeholder so the spot doesn't
-//     appear/disappear as data trickles in; reads as "this slot exists,
-//     just nothing to say yet".
-//   - Suggestion available → live "x.xx (NN%)" tinted by the confidence
-//     tier; caption shares the tier color so the whole block carries it.
+// Right-side SUGGESTION pill. The two-line label + the pill outline are tinted
+// as a pair, and the tap (glide-to-suggestion) is armed only when there's a
+// trustworthy number. The bottom area is shared across idle and post, so the
+// pill stays visible in both modes — only model availability gates it:
+//   - No usable model output → muted "N/A" placeholder, non-clickable so the
+//     pill never invites a tap toward a number we wouldn't trust.
+//   - Suggestion available → live "x.xx (NN%)" + outline in the confidence
+//     tier color; clickable so on_suggestion_tap can glide the dial to it.
 void refresh_suggested_label() {
-  if (s_suggested_label == nullptr) return;
+  if (s_suggested_label == nullptr || s_suggested_btn == nullptr) return;
   if (!predicted_visible(s_current_suggestion)) {
-    lv_label_set_text(s_suggested_label, "N/A");
+    lv_label_set_text(s_suggested_label, "SUGGESTION\nN/A");
     lv_obj_set_style_text_color(s_suggested_label, kColorMuted3, LV_PART_MAIN);
-    lv_obj_remove_flag(s_suggested_label, LV_OBJ_FLAG_HIDDEN);
-    if (s_suggestion_caption != nullptr) {
-      lv_obj_set_style_text_color(s_suggestion_caption, kColorMuted3,
-                                  LV_PART_MAIN);
-      lv_obj_remove_flag(s_suggestion_caption, LV_OBJ_FLAG_HIDDEN);
+    if constexpr (kSuggestionRenderCapsule) {
+      lv_obj_set_style_border_color(s_suggested_btn, kColorMuted3, LV_PART_MAIN);
     }
+    lv_obj_remove_flag(s_suggested_btn, LV_OBJ_FLAG_CLICKABLE);
     return;
   }
-  char buf[24];
+  char buf[32];
   std::snprintf(buf, sizeof(buf),
-                "%.2f (%u%%)",
+                "SUGGESTION\n%.2f (%u%%)",
                 static_cast<double>(s_current_suggestion.grind),
                 static_cast<unsigned>(s_current_suggestion.confidence_pct));
   lv_label_set_text(s_suggested_label, buf);
   const lv_color_t tier = confidence_color(s_current_suggestion.confidence_pct);
   lv_obj_set_style_text_color(s_suggested_label, tier, LV_PART_MAIN);
-  lv_obj_remove_flag(s_suggested_label, LV_OBJ_FLAG_HIDDEN);
-  if (s_suggestion_caption != nullptr) {
-    lv_obj_set_style_text_color(s_suggestion_caption, tier, LV_PART_MAIN);
-    lv_obj_remove_flag(s_suggestion_caption, LV_OBJ_FLAG_HIDDEN);
+  if constexpr (kSuggestionRenderCapsule) {
+    lv_obj_set_style_border_color(s_suggested_btn, tier, LV_PART_MAIN);
   }
+  lv_obj_add_flag(s_suggested_btn, LV_OBJ_FLAG_CLICKABLE);
 }
 
 void refresh_grinder() {
@@ -1094,6 +1093,17 @@ void on_preset_tap(lv_event_t*) {
 
 void on_post_tap(lv_event_t*) {
   switch_mode(Mode::Post);
+}
+
+// SUGGESTION pill — glide the grind dial to the model's number. Armed only in
+// idle (the dial is read-only context in post mode) and only when there's a
+// trustworthy suggestion (refresh keeps the pill non-clickable otherwise; the
+// guards here are belt-and-suspenders). Reuses the bar's end-of-swipe glide:
+// the dial sweeps, snaps, and persists exactly as a released flick would.
+void on_suggestion_tap(lv_event_t*) {
+  if (s_mode != Mode::Idle) return;
+  if (!predicted_visible(s_current_suggestion)) return;
+  bar_animate_to(&s_grind, s_current_suggestion.grind);
 }
 
 void on_cancel_tap(lv_event_t*) {
@@ -2552,35 +2562,42 @@ void build_grinder(lv_obj_t* scr) {
   lv_label_set_text(s_grind_caption, "GRIND VALUE");
   lv_obj_set_pos(s_grind_caption, kGrindCaptionX, kGrindCaptionY);
 
-  // SUGGESTION block — mirrors the GRIND VALUE caption on the right side of
-  // the big number. Caption is the muted-gray static header; the value line
-  // underneath carries the live number and confidence-tier color. Both share
-  // a fixed-width box with centered text so the second line stays anchored
-  // to the caption regardless of digit count. Both hidden until the model
-  // produces a usable suggestion; refresh_suggested_label toggles them as a
-  // pair so the caption never floats over an empty value row.
-  s_suggestion_caption = lv_label_create(s_grinder_group);
-  lv_obj_set_style_text_color(s_suggestion_caption, kColorLabel, LV_PART_MAIN);
-  lv_obj_set_style_text_font(s_suggestion_caption, &lv_font_montserrat_14,
-                             LV_PART_MAIN);
-  lv_label_set_text(s_suggestion_caption, "SUGGESTION");
-  lv_obj_set_pos(s_suggestion_caption, kSuggestionBlockX, kSuggestionCaptionY);
-  lv_obj_set_width(s_suggestion_caption, kSuggestionBlockW);
-  lv_obj_set_style_text_align(s_suggestion_caption, LV_TEXT_ALIGN_CENTER,
-                              LV_PART_MAIN);
-  lv_obj_add_flag(s_suggestion_caption, LV_OBJ_FLAG_HIDDEN);
+  // SUGGESTION pill — mirrors the GRIND VALUE caption on the right of the big
+  // number, as a tappable button. A two-line "SUGGESTION / x.xx (xx%)" label
+  // sits inside; the text (and the capsule outline, when kSuggestionRenderCapsule
+  // is on) share the confidence-tier color. Tapping glides the dial to the
+  // model's number (on_suggestion_tap). refresh_suggested_label keeps the tint +
+  // the clickable flag in sync with the live suggestion; a muted, non-clickable
+  // "N/A" shows when the model has nothing usable. Seeded muted here so it reads
+  // as a placeholder before the first refresh.
+  s_suggested_btn = lv_button_create(s_grinder_group);
+  lv_obj_set_size(s_suggested_btn, kSuggestionBtnW, kSuggestionBtnH);
+  lv_obj_set_pos(s_suggested_btn, kSuggestionBtnX, kSuggestionBtnY);
+  lv_obj_set_style_radius(s_suggested_btn, kSuggestionBtnH / 2, LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(s_suggested_btn, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_shadow_width(s_suggested_btn, 0, LV_PART_MAIN);
+  // Capsule outline is gated — off leaves just the tinted text (the button still
+  // takes taps via its bounds + ext-click area).
+  if constexpr (kSuggestionRenderCapsule) {
+    lv_obj_set_style_border_color(s_suggested_btn, kColorMuted3, LV_PART_MAIN);
+    lv_obj_set_style_border_width(s_suggested_btn, kSuggestionBtnStroke,
+                                  LV_PART_MAIN);
+    lv_obj_set_style_border_opa(s_suggested_btn, LV_OPA_COVER, LV_PART_MAIN);
+  } else {
+    lv_obj_set_style_border_width(s_suggested_btn, 0, LV_PART_MAIN);
+  }
+  lv_obj_set_ext_click_area(s_suggested_btn, kPostBtnExtClick);
+  lv_obj_add_event_cb(s_suggested_btn, on_suggestion_tap, LV_EVENT_CLICKED,
+                      nullptr);
 
-  s_suggested_label = lv_label_create(s_grinder_group);
-  lv_obj_set_style_text_color(s_suggested_label, kColorMuted, LV_PART_MAIN);
+  s_suggested_label = lv_label_create(s_suggested_btn);
+  lv_obj_set_style_text_color(s_suggested_label, kColorMuted3, LV_PART_MAIN);
   lv_obj_set_style_text_font(s_suggested_label, &lv_font_montserrat_14,
                              LV_PART_MAIN);
-  lv_obj_set_style_bg_opa(s_suggested_label, LV_OPA_TRANSP, LV_PART_MAIN);
-  lv_obj_set_pos(s_suggested_label, kSuggestionBlockX, kSuggestionValueY);
-  lv_obj_set_width(s_suggested_label, kSuggestionBlockW);
   lv_obj_set_style_text_align(s_suggested_label, LV_TEXT_ALIGN_CENTER,
                               LV_PART_MAIN);
-  lv_obj_clear_flag(s_suggested_label, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_flag(s_suggested_label, LV_OBJ_FLAG_HIDDEN);
+  lv_label_set_text(s_suggested_label, "SUGGESTION\nN/A");
+  lv_obj_center(s_suggested_label);
 }
 
 lv_obj_t* make_separator(lv_obj_t* parent, int32_t x, int32_t y,
@@ -3172,8 +3189,7 @@ void start_report() {
   s_idle_fade_n = 0;
   for (lv_obj_t* w : {s_climate_anim, s_menu_btn, s_preset_btn, s_post_btn,
                       s_grind.widget, s_static_cursor, s_suggestion_arrow,
-                      s_grind_value_label, s_grind_caption, s_suggestion_caption,
-                      s_suggested_label}) {
+                      s_grind_value_label, s_grind_caption, s_suggested_btn}) {
     s_idle_fade[s_idle_fade_n++] = w;
   }
   s_menu_fade        = menu_screen::fade_widgets(&s_menu_fade_n);

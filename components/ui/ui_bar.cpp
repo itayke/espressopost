@@ -167,6 +167,32 @@ void bar_momentum_tick(lv_timer_t* t) {
   }
 }
 
+// Programmatic glide step (bar_animate_to). Eases value from glide_from→glide_to
+// over glide_ticks_total steps, then ends in the same snap+settle as a flick.
+void bar_glide_tick(lv_timer_t* t) {
+  auto* s = static_cast<BarState*>(lv_timer_get_user_data(t));
+  if (s == nullptr || s->spec == nullptr) return;
+  const BarSpec& spec = *s->spec;
+  ++s->glide_tick;
+  const float p = std::min(
+      1.0f, static_cast<float>(s->glide_tick) /
+                static_cast<float>(s->glide_ticks_total));
+  // Ease-out (decelerate into the target) so the tail reads like a momentum
+  // glide settling, not a hard stop.
+  const float eased = 1.0f - (1.0f - p) * (1.0f - p);
+  const float new_value = std::clamp(
+      s->glide_from + (s->glide_to - s->glide_from) * eased, spec.min, spec.max);
+  if (new_value != s->value) {
+    s->value = new_value;
+    if (s->on_change) s->on_change(s);
+  }
+  if (s->glide_tick >= s->glide_ticks_total) {
+    bar_snap_and_settle(s);
+    s->momentum_timer = nullptr;
+    lv_timer_delete(t);
+  }
+}
+
 }  // namespace
 
 // Make one bar's tick-strip widget. Parent decides visibility — the grind bar
@@ -274,6 +300,24 @@ void bar_dispatch_event(lv_event_t* e, BarState* s) {
     default:
       break;
   }
+}
+
+void bar_animate_to(BarState* s, float target) {
+  if (s == nullptr || s->spec == nullptr) return;
+  const BarSpec& spec = *s->spec;
+  // A fresh programmatic glide owns the bar — kill any flick tail first (this
+  // also frees the momentum_timer slot the glide reuses).
+  bar_cancel_momentum(s);
+  s->glide_from        = s->value;
+  s->glide_to          = std::clamp(target, spec.min, spec.max);
+  s->glide_tick        = 0;
+  s->glide_ticks_total = kGlideTicks;
+  // Already there — settle in place so the value still snaps + persists.
+  if (s->glide_from == s->glide_to) {
+    bar_snap_and_settle(s);
+    return;
+  }
+  s->momentum_timer = lv_timer_create(bar_glide_tick, kGlidePeriodMs, s);
 }
 
 }  // namespace espressopost::ui

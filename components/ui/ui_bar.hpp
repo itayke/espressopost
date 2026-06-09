@@ -45,6 +45,13 @@ constexpr uint32_t kMomentumPeriodMs = 30;     // tick cadence
 constexpr int      kMomentumMaxTicks = 17;     // ≈500 ms at 30 ms/tick
 constexpr float    kMomentumDecay    = 0.85f;  // per tick → ~6% left after 17 ticks
 constexpr float    kMomentumMinSpeed = 0.5f;   // value units/sec — below this we stop
+
+// Programmatic glide (e.g. a "snap to suggestion" tap) — an eased value sweep
+// that ends in the same snap+settle as a released flick. Smoother/shorter
+// cadence than the momentum flywheel since the travel distance is known up
+// front, so we interpolate rather than decay a velocity.
+constexpr uint32_t kGlidePeriodMs = 16;        // ~60 Hz step
+constexpr int      kGlideTicks    = 12;        // ≈290 ms total sweep
 // ===========================================================================
 
 struct BarSpec {
@@ -86,8 +93,16 @@ struct BarState {
 
   // Flick momentum — kMomentum* cadence/decay.
   float       velocity;            // value units / sec, signed
-  lv_timer_t* momentum_timer;
+  lv_timer_t* momentum_timer;      // also hosts the glide timer (one is active at a time)
   int         momentum_ticks_left;
+
+  // Programmatic glide-to-target (bar_animate_to). Interpolates value from
+  // glide_from→glide_to over glide_ticks_total steps, then snap+settles. Hosted
+  // in momentum_timer so a fresh drag cancels it via bar_cancel_momentum.
+  float       glide_from;
+  float       glide_to;
+  int         glide_tick;
+  int         glide_ticks_total;
 
   // Hooks. on_change fires whenever value moves (drag step, momentum step, or
   // settle-snap). on_settle fires once when drag/glide ends, after snap.
@@ -105,5 +120,10 @@ lv_obj_t* make_bar_widget(lv_obj_t* parent, BarState* state);
 // Feed a touch event (from the consumer's overlay / widget callback) to bar `s`:
 // drag, velocity tracking, flick handoff, snap. Hooks fire as the value moves.
 void bar_dispatch_event(lv_event_t* e, BarState* s);
+
+// Glide bar `s` to `target` (clamped to spec range) with an eased sweep, then
+// snap + settle exactly as a released flick would. Cancels any in-flight drag
+// momentum first. on_change fires each step; on_settle fires once at the end.
+void bar_animate_to(BarState* s, float target);
 
 }  // namespace espressopost::ui
