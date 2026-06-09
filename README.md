@@ -411,9 +411,6 @@ If any of these fail, the most likely culprits in order:
   cloud-driven model retraining. The device pushes shots up; nothing comes
   back down.
 
-Each is its own step in the brief's build order. See the project's
-memory notes for design decisions already locked in.
-
 ## Layout
 
 ```
