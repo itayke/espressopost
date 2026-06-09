@@ -1,4 +1,4 @@
-# espressopost
+# Espresso Post
 
 An espresso-grind helper for the Waveshare ESP32-S3 Touch-AMOLED-1.75. Logs
 per-shot feedback (raw brew seconds + 1–5 quality stars) against the ambient
