@@ -1,8 +1,12 @@
 # espressopost
 
-Standalone ESP32-S3 firmware for an espresso-grind helper. Reads ambient
-climate, logs per-shot feedback (raw brew seconds + 1–5 quality stars),
-and learns a per-preset grind adjustment from local data. Offline-first.
+An espresso-grind helper for the Waveshare ESP32-S3 Touch-AMOLED-1.75. Logs
+per-shot feedback (raw brew seconds + 1–5 quality stars) against the ambient
+climate at pull time, learns a per-preset grind model from that local history,
+and shows a live "suggested grind" on the dial. Records sync one-way to a
+Google Sheet when Wi-Fi is configured.
+
+By Itay Keren <itay@untame.com>. Copyright (c) 2026 Itay Keren.
 
 ## Status
 
@@ -26,8 +30,10 @@ to LittleFS and returns to Idle. Tapping **Menu** opens a **Menu** hub —
 a "MENU" title over **Presets**, **Connections**, and **Events** entry
 pills and a Back pill to Idle. **Presets** is a "PRESETS" title over a 3×3 grid of
 slots (each showing `PRESET N` / `Xg → Yg` / `Zs` tinted in the preset's
-accent color, empty slots a bare outline); it's view-only for now —
-per-slot select/edit/color-pick is the next step. **Connections** is the
+accent color, empty slots a bare outline). Tapping a slot opens a
+**Preset editor** — dose / yield / target-time steppers, a column of
+accent-color swatches, and a Save / Cancel pair (plus a trash disc that
+deletes a populated slot behind a confirm). **Connections** is the
 cloud-sync screen (Wi-Fi state, sync state, a Connect/Reconfigure pill
 that starts captive-portal provisioning, a red Forget Network pill when
 connected, and a QR card carrying a Wi-Fi-join code for the setup
@@ -388,14 +394,11 @@ If any of these fail, the most likely culprits in order:
   add this when battery / true light-sleep matters).
 - QMI8658 IMU driver — wake-on-motion is a planned upgrade so the
   device can also wake by picking it up, not just touching it.
-- A real time-set flow — first-boot seeding from `__DATE__`/`__TIME__`
-  is approximate (off by the build machine's TZ; minutes-to-hours stale
-  by the time the device actually boots). NTP-over-companion-app, a
-  serial command, or a hidden UI gesture will eventually replace it.
-- A Preset editor — the Presets screen renders the 3×3 grid but is
-  view-only; per-slot select, edit (dose / yield / target time), and
-  color-pick are the next UI step. The table itself is still seeded from
-  hard-coded defaults.
+- An offline time-set flow — the clock now self-corrects over SNTP the
+  first time Wi-Fi connects, but with no network it falls back to the
+  approximate `__DATE__`/`__TIME__` build-time seed (off by the build
+  machine's TZ, minutes-to-hours stale by boot). A serial command or a
+  hidden UI gesture to set the clock without a network is still missing.
 - The model's full spec — v1 ships a time-only Bayesian regression
   fitted per preset. The quality model (peak-quality grind via
   `α + β·grind + γ·grind² + climate + interactions`) and cross-preset

@@ -1,5 +1,18 @@
-// Esprosso Post - coffee grind guide and journal device, based on historic climate and brew data 
-// Copyright (c) 2026 Itay Keren
+// ============================================================================
+//  Espresso Post
+//  An espresso-grind helper for the Waveshare ESP32-S3 Touch-AMOLED-1.75. 
+//  Logs per-shot feedback (raw brew seconds + 1-5 quality stars) against the 
+//  ambient climate at pull time, learns a per-preset grind model from that 
+//  local history, and shows a live "suggested grind" on the dial.
+//  Records sync one-way to a Google Sheet when Wi-Fi is configured.
+//
+//  Author:    Itay Keren <itay@untame.com>
+//  Copyright: (c) 2026 Itay Keren. All rights reserved.
+// ============================================================================
+//
+// app_main is the boot sequencer: it brings each subsystem up in dependency
+// order (display -> touch -> storage -> presets -> migrations -> climate ->
+// rtc -> calibration -> model -> cloud -> power -> ui) and hands off to the UI.
 //
 // Initializes the AMOLED + touch + LVGL, mounts LittleFS for shot records,
 // starts the BME280 climate read loop, and shows the Report screen (brew
