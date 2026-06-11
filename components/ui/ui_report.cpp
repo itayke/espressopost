@@ -1095,13 +1095,14 @@ void on_post_tap(lv_event_t*) {
   switch_mode(Mode::Post);
 }
 
-// SUGGESTION pill — glide the grind dial to the model's number. Armed only in
-// idle (the dial is read-only context in post mode) and only when there's a
+// SUGGESTION pill — glide the grind dial to the model's number. The grinder bar
+// is live in both Idle and Post (the ring keeps dialing while reporting), so the
+// glide is valid in either; other modes hide the pill. Armed only when there's a
 // trustworthy suggestion (refresh keeps the pill non-clickable otherwise; the
 // guards here are belt-and-suspenders). Reuses the bar's end-of-swipe glide:
 // the dial sweeps, snaps, and persists exactly as a released flick would.
 void on_suggestion_tap(lv_event_t*) {
-  if (s_mode != Mode::Idle) return;
+  if (s_mode != Mode::Idle && s_mode != Mode::Post) return;
   if (!predicted_visible(s_current_suggestion)) return;
   bar_animate_to(&s_grind, s_current_suggestion.grind);
 }
